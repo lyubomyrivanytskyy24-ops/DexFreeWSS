@@ -46,7 +46,7 @@ def _get_or_create_secret(env_name: str, file_name: str) -> str:
 # the app works out of the box - override with DEX_API_KEY in any deployment
 # you want to actually secure (this default is visible to anyone who can
 # read this source file).
-API_KEY = (os.environ.get("DEX_API_KEY", "").strip() or "DEXONTOP")
+API_KEY = (os.environ.get("DEX_API_KEY", "").strip() or "")
 SECRET_KEY = _get_or_create_secret("DEX_SECRET_KEY", ".dex_secret_key")
 BASE_URL = os.environ.get("DEX_BASE_URL", "https://dexapi1.up.railway.app").rstrip("/")
 
