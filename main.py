@@ -20,32 +20,69 @@ app = FastAPI()
 # =========================================================================
 # SECURITY NOTES (read me)
 # =========================================================================
-# 1. Set these environment variables before running in production:
-#      DEX_ADMIN_KEY   - admin panel key
-#      DEX_SENDER_KEY  - key used by your log-sender (bot) and WS viewers
-#      DEX_SECRET_KEY  - used to sign session cookies (keep this secret!)
+# 1. There is now a SINGLE shared key for the whole API: DEX_API_KEY.
+#    It defaults to the literal string "DEXONTOP" if the env var isn't set,
+#    so the app runs out of the box - but that means anyone who can see this
+#    source file knows the key. Set DEX_API_KEY to something else in any
+#    environment you actually care about protecting.
+#      DEX_API_KEY     - the one key used everywhere below
+#      DEX_SECRET_KEY  - used to sign session cookies (unrelated to the API
+#                        key; keep this secret too). Auto-generated and
+#                        persisted to .dex_secret_key if not set.
 #      DEX_BASE_URL    - public base URL, e.g. https://dexapi1.up.railway.app
-#    If DEX_ADMIN_KEY / DEX_SENDER_KEY / DEX_SECRET_KEY are not set, secure
-#    random values are generated at startup and printed ONCE to the console.
-#    Save them somewhere safe - they will change on every restart if you
-#    don't set the env vars.
 #
-# 2. Any client that previously called /logs, /blacklisted (POST) or
-#    /admin/stats must now send header:  X-Api-Key: <your key>
-#    (either DEX_ADMIN_KEY or DEX_SENDER_KEY both work for the sender-style
-#    endpoints; only DEX_ADMIN_KEY works for /admin/*).
+# 2. Every POST endpoint requires header  X-Api-Key: <DEX_API_KEY>  EXCEPT
+#    POST /logs, which is intentionally left open with no key check at all.
+#    This includes /secure, /usernames, /blacklisted, /unblacklisted, and
+#    /announcements. (Previously /usernames was left open because the
+#    in-game "finder" client has no way to hold a secret - that exemption
+#    has been intentionally removed per updated requirements; the finder
+#    client will need to be updated to send the header too.)
 #
-#    NOTE: POST /usernames is intentionally left WITHOUT a key requirement.
-#    The in-game "finder" client reports its own username automatically and
-#    has no way to hold a secret key, so this endpoint stays public (same
-#    as its GET counterpart) and only ever writes a username string.
+#    /home (user register/login/script panel) and /admin (login form) are
+#    plain HTML forms and are NOT gated by X-Api-Key - a browser form can't
+#    attach a custom header. /admin's own login form still requires typing
+#    in DEX_API_KEY as the "admin key" to get a session.
 #
-# 3. WebSocket viewers must connect to  /ws?key=<DEX_SENDER_KEY or DEX_ADMIN_KEY>
+# 3. WebSocket viewers/senders must connect to  /ws?key=<DEX_API_KEY>
 #    Anonymous viewer connections are no longer accepted.
 #
 # 4. Passwords are now hashed (PBKDF2-HMAC-SHA256, per-user salt). Existing
 #    plaintext users.json from the old version will NOT be compatible -
 #    users will need to re-register.
+#
+# 5. /admin IS NOW VIEW-ONLY. There is no longer any code path that lets
+#    /admin change announcements, the blacklist, paid keys, or the GitHub
+#    cache. Those are still manageable, just via direct API calls with the
+#    X-Api-Key header:
+#      POST /announcements        - set the announcement
+#      POST /blacklisted           - add a username to the blacklist
+#      POST /unblacklisted         - remove a username from the blacklist
+#      POST /dexpaid/keys          - generate a global paid key (body: hours)
+#      POST /github/refresh        - force-refresh the GitHub script cache
+#
+# 6. GITHUB-MANAGED LOADER SCRIPTS (dexchilli / dexfree / dexserverhop /
+#    dexhub / dexpaid). These five scripts are no longer editable from the
+#    admin panel or any API endpoint. Their content is pulled from a GitHub
+#    repo you control, and the ONLY way to change them is to push a commit
+#    to that repo. Set:
+#      DEX_GITHUB_OWNER  - GitHub username or org
+#      DEX_GITHUB_REPO   - repo name
+#      DEX_GITHUB_BRANCH - branch to read from (default: main)
+#      DEX_GITHUB_TOKEN  - optional, needed for a private repo or to avoid
+#                          GitHub's unauthenticated rate limit
+#    Optionally override the path of each script inside the repo (defaults
+#    shown):
+#      DEX_GITHUB_PATH_DEXCHILLI     (default: scripts/dexchilli.lua)
+#      DEX_GITHUB_PATH_DEXFREE       (default: scripts/dexfree.lua)
+#      DEX_GITHUB_PATH_DEXSERVERHOP  (default: scripts/dexserverhop.lua)
+#      DEX_GITHUB_PATH_DEXHUB        (default: scripts/dexhub.lua)
+#      DEX_GITHUB_PATH_DEXPAID       (default: scripts/dexpaid.lua)
+#    Fetched content is cached in memory for DEX_GITHUB_CACHE_TTL seconds
+#    (default 60) and also mirrored to the local .lua fallback file, so a
+#    GitHub outage or process restart still serves the last-known-good copy
+#    instead of failing. Use the "Refresh from GitHub" button in /admin to
+#    force an immediate re-fetch.
 # =========================================================================
 
 # -----------------------------
@@ -77,8 +114,11 @@ def _get_or_create_secret(env_name: str, file_name: str) -> str:
     return generated
 
 
-ADMIN_KEY = _get_or_create_secret("DEX_ADMIN_KEY", ".dex_admin_key")
-SENDER_KEY = _get_or_create_secret("DEX_SENDER_KEY", ".dex_sender_key")
+# Single shared key for the whole API. Defaults to the literal "DEXONTOP" so
+# the app works out of the box - override with DEX_API_KEY in any deployment
+# you want to actually secure (this default is visible to anyone who can
+# read this source file).
+API_KEY = (os.environ.get("DEX_API_KEY", "").strip() or "DEXONTOP")
 SECRET_KEY = _get_or_create_secret("DEX_SECRET_KEY", ".dex_secret_key")
 BASE_URL = os.environ.get("DEX_BASE_URL", "https://dexapi1.up.railway.app").rstrip("/")
 
@@ -87,12 +127,111 @@ def constant_time_eq(a: str, b: str) -> bool:
     return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
-def is_valid_admin_key(k: str) -> bool:
-    return bool(k) and constant_time_eq(k, ADMIN_KEY)
+def is_valid_key(k: str) -> bool:
+    return bool(k) and constant_time_eq(k, API_KEY)
 
 
-def is_valid_sender_or_admin_key(k: str) -> bool:
-    return bool(k) and (constant_time_eq(k, SENDER_KEY) or constant_time_eq(k, ADMIN_KEY))
+# -----------------------------
+# GITHUB-MANAGED SCRIPT SOURCE
+# -----------------------------
+# See SECURITY NOTES item 5 above. These five scripts can ONLY be changed by
+# editing the file in the configured GitHub repo - there is no code path
+# left (admin panel or API) that writes to them from within this app.
+
+GITHUB_OWNER = os.environ.get("DEX_GITHUB_OWNER", "").strip()
+GITHUB_REPO = os.environ.get("DEX_GITHUB_REPO", "").strip()
+GITHUB_BRANCH = os.environ.get("DEX_GITHUB_BRANCH", "main").strip() or "main"
+GITHUB_TOKEN = os.environ.get("DEX_GITHUB_TOKEN", "").strip()
+GITHUB_CACHE_TTL = int(os.environ.get("DEX_GITHUB_CACHE_TTL", "60"))
+
+GITHUB_SCRIPT_PATHS: Dict[str, str] = {
+    "dexchilli": os.environ.get("DEX_GITHUB_PATH_DEXCHILLI", "scripts/dexchilli.lua").strip(),
+    "dexfree": os.environ.get("DEX_GITHUB_PATH_DEXFREE", "scripts/dexfree.lua").strip(),
+    "dexserverhop": os.environ.get("DEX_GITHUB_PATH_DEXSERVERHOP", "scripts/dexserverhop.lua").strip(),
+    "dexhub": os.environ.get("DEX_GITHUB_PATH_DEXHUB", "scripts/dexhub.lua").strip(),
+    "dexpaid": os.environ.get("DEX_GITHUB_PATH_DEXPAID", "scripts/dexpaid.lua").strip(),
+}
+
+# name -> {"content": str, "fetched_at": float, "source": "github"|"local_fallback"|"default"}
+_github_cache: Dict[str, Dict[str, Any]] = {}
+_github_cache_lock = asyncio.Lock()
+
+
+def github_configured() -> bool:
+    return bool(GITHUB_OWNER and GITHUB_REPO)
+
+
+def github_repo_url() -> str:
+    if not github_configured():
+        return ""
+    return f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/blob/{GITHUB_BRANCH}"
+
+
+def _github_raw_url(path: str) -> str:
+    return f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{path}"
+
+
+def _fetch_github_raw_sync(path: str) -> Optional[str]:
+    """Blocking fetch, run via asyncio.to_thread. Returns None on any failure."""
+    url = _github_raw_url(path)
+    req = urllib.request.Request(url)
+    req.add_header("Cache-Control", "no-cache")
+    if GITHUB_TOKEN:
+        req.add_header("Authorization", f"token {GITHUB_TOKEN}")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = resp.read()
+            return data.decode("utf-8")
+    except Exception as e:
+        print(f"[GITHUB] Failed to fetch {path}: {e}")
+        return None
+
+
+async def get_github_script(name: str, local_fallback_file: str, default: str) -> str:
+    """Return this script's current content: fresh cache -> GitHub fetch (also
+    refreshes the on-disk fallback copy) -> in-memory cache (stale) ->
+    on-disk fallback file -> hardcoded default. This is a read path only;
+    nothing in this app writes new content for these scripts."""
+    now = time.time()
+
+    async with _github_cache_lock:
+        cached = _github_cache.get(name)
+        if cached and (now - cached["fetched_at"]) < GITHUB_CACHE_TTL:
+            return cached["content"]
+
+    path = GITHUB_SCRIPT_PATHS.get(name)
+    content = None
+    if path and github_configured():
+        content = await asyncio.to_thread(_fetch_github_raw_sync, path)
+
+    if content is not None:
+        async with _github_cache_lock:
+            _github_cache[name] = {"content": content, "fetched_at": now, "source": "github"}
+        try:
+            save_file(local_fallback_file, content)
+        except Exception:
+            pass
+        return content
+
+    # GitHub fetch failed (or not configured) - fall back to whatever we have.
+    async with _github_cache_lock:
+        cached = _github_cache.get(name)
+        if cached:
+            return cached["content"]
+
+    fallback = load_file(local_fallback_file, default)
+    async with _github_cache_lock:
+        _github_cache[name] = {"content": fallback, "fetched_at": now, "source": "local_fallback"}
+    return fallback
+
+
+async def force_refresh_github_cache():
+    async with _github_cache_lock:
+        _github_cache.clear()
+
+
+def get_cache_meta(name: str) -> Optional[Dict[str, Any]]:
+    return _github_cache.get(name)
 
 
 # -----------------------------
@@ -203,6 +342,23 @@ MAX_FORM_BODY = 2 * 1024 * 1024 + (100 * 1024)  # form posts (script code + othe
 MAX_PASSWORD_LEN = 128
 
 
+def is_valid_username(username: str) -> bool:
+    if not USERNAME_RE.match(username):
+        return False
+    if username.lower() in RESERVED_USERNAMES:
+        return False
+    return True
+
+
+def make_slug(name: str) -> Optional[str]:
+    if not SLUG_SOURCE_RE.match(name):
+        return None
+    slug = name.strip().replace(" ", "-")
+    if not slug:
+        return None
+    return slug
+
+
 # -----------------------------
 # PASSWORD HASHING (PBKDF2-HMAC-SHA256, stdlib only)
 # -----------------------------
@@ -248,17 +404,29 @@ dexpaid_keys_lock = asyncio.Lock()
 users_lock = asyncio.Lock()
 scripts_lock = asyncio.Lock()
 
+# These local files are now ONLY a read fallback (last-known-good mirror of
+# GitHub) - nothing in this app writes to them except get_github_script()
+# syncing down a fresh GitHub copy.
 DEXCHILLI_FILE = "dexchilli.lua"
 DEXFREE_FILE = "dexfree.lua"
 DEXSERVERHOP_FILE = "dexserverhop.lua"
 DEXHUB_FILE = "dexhub.lua"
 DEXPAID_FILE = "dexpaid.lua"
 
-DEFAULT_DEXCHILLI = "-- DexChilli loader script not set yet."
-DEFAULT_DEXFREE = "-- DexFree loader script not set yet."
-DEFAULT_DEXSERVERHOP = "-- DexServerHop loader script not set yet."
-DEFAULT_DEXHUB = "-- DexHub loader script not set yet."
-DEFAULT_DEXPAID = "-- DexPaid loader script not set yet."
+DEFAULT_DEXCHILLI = "-- DexChilli loader script not set yet. Add scripts/dexchilli.lua to the GitHub repo."
+DEFAULT_DEXFREE = "-- DexFree loader script not set yet. Add scripts/dexfree.lua to the GitHub repo."
+DEFAULT_DEXSERVERHOP = "-- DexServerHop loader script not set yet. Add scripts/dexserverhop.lua to the GitHub repo."
+DEFAULT_DEXHUB = "-- DexHub loader script not set yet. Add scripts/dexhub.lua to the GitHub repo."
+DEFAULT_DEXPAID = "-- DexPaid loader script not set yet. Add scripts/dexpaid.lua to the GitHub repo."
+
+# Central place mapping each fixed script name to its local fallback file + default.
+FIXED_SCRIPTS: Dict[str, Dict[str, str]] = {
+    "dexchilli": {"file": DEXCHILLI_FILE, "default": DEFAULT_DEXCHILLI, "label": "DexChilli"},
+    "dexfree": {"file": DEXFREE_FILE, "default": DEFAULT_DEXFREE, "label": "DexFree"},
+    "dexserverhop": {"file": DEXSERVERHOP_FILE, "default": DEFAULT_DEXSERVERHOP, "label": "DexServerHop"},
+    "dexhub": {"file": DEXHUB_FILE, "default": DEFAULT_DEXHUB, "label": "DexHub"},
+    "dexpaid": {"file": DEXPAID_FILE, "default": DEFAULT_DEXPAID, "label": "DexPaid"},
+}
 
 viewers: Set[WebSocket] = set()
 sender_ws: Optional[WebSocket] = None
@@ -452,6 +620,9 @@ RESERVED_PATHS_LOWER = {p.lower() for p in RESERVED_PATHS}
 
 
 def ensure_builtin_scripts():
+    """Registers the five fixed scripts in the `scripts` dict for the admin
+    overview listing only. Their actual served content always comes from
+    get_github_script() at request time, never from this dict."""
     builtin = [
         ("DexFree", "dexfree", DEXFREE_FILE, DEFAULT_DEXFREE),
         ("DexChilli", "dexchilli", DEXCHILLI_FILE, DEFAULT_DEXCHILLI),
@@ -472,7 +643,10 @@ def ensure_builtin_scripts():
                 "keys": {},
                 "last_key": "",
                 "last_loadstring": "",
+                "github_managed": True,
             }
+        else:
+            scripts[slug]["github_managed"] = True
     save_scripts_to_file()
 
 
@@ -489,7 +663,7 @@ async def set_wss(request: Request):
     global current_wss
 
     api_key = request.headers.get("X-Api-Key", "")
-    if not is_valid_admin_key(api_key):
+    if not is_valid_key(api_key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     raw_body = await request.body()
@@ -503,7 +677,7 @@ async def set_wss(request: Request):
 @app.get("/secure")
 async def get_wss(request: Request):
     api_key = request.headers.get("X-Api-Key", "")
-    if not is_valid_admin_key(api_key):
+    if not is_valid_key(api_key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return {"wss": current_wss}
 
@@ -519,7 +693,7 @@ async def websocket_endpoint(websocket: WebSocket):
     # Require a valid key just to open the connection at all - previously
     # anyone could connect anonymously and read every broadcast log.
     key_param = websocket.query_params.get("key", "")
-    if not is_valid_sender_or_admin_key(key_param):
+    if not is_valid_key(key_param):
         await websocket.close(code=4401)
         return
 
@@ -553,7 +727,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if not text:
                 continue
 
-            if role == "viewer" and constant_time_eq(text, SENDER_KEY):
+            if role == "viewer" and constant_time_eq(text, API_KEY):
                 role = "sender"
                 sender_ws = websocket
                 viewers.discard(websocket)
@@ -594,10 +768,9 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.post("/logs")
 async def post_logs(request: Request):
-    api_key = request.headers.get("X-Api-Key", "")
-    if not is_valid_sender_or_admin_key(api_key):
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-
+    # Intentionally NO key check here - /logs is the one POST endpoint that
+    # stays open per updated requirements. Every other POST endpoint in this
+    # file requires X-Api-Key.
     raw = await request.body()
     if len(raw) > MAX_GENERIC_BODY:
         return PlainTextResponse("PAYLOAD TOO LARGE", status_code=413)
@@ -628,20 +801,25 @@ async def post_logs(request: Request):
 @app.get("/logs")
 async def get_logs(request: Request):
     api_key = request.headers.get("X-Api-Key", "")
-    if not is_valid_sender_or_admin_key(api_key):
+    if not is_valid_key(api_key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     async with logs_lock:
         return PlainTextResponse("\n".join(stored_logs))
 
 # -----------------------------
 # USERNAME ENDPOINTS
-# POST is intentionally public (no X-Api-Key) because the in-game finder
-# script has no key to send - it just reports its own username. GET stays
-# public too, since it always has.
+# POST now requires X-Api-Key like every other POST endpoint except /logs.
+# (Previously left open for an in-game client that couldn't hold a secret -
+# that exemption was intentionally removed; update that client to send the
+# header too.) GET stays public, since it always has.
 # -----------------------------
 
 @app.post("/usernames")
 async def add_username(request: Request):
+    api_key = request.headers.get("X-Api-Key", "")
+    if not is_valid_key(api_key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
     raw = await request.body()
     if len(raw) > MAX_GENERIC_BODY:
         return PlainTextResponse("PAYLOAD TOO LARGE", status_code=413)
@@ -673,7 +851,7 @@ async def get_usernames():
 @app.post("/blacklisted")
 async def add_blacklisted(request: Request):
     api_key = request.headers.get("X-Api-Key", "")
-    if not is_valid_sender_or_admin_key(api_key):
+    if not is_valid_key(api_key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     raw = await request.body()
@@ -695,7 +873,7 @@ async def add_blacklisted(request: Request):
 @app.post("/unblacklisted")
 async def remove_blacklisted(request: Request):
     api_key = request.headers.get("X-Api-Key", "")
-    if not is_valid_sender_or_admin_key(api_key):
+    if not is_valid_key(api_key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     raw = await request.body()
@@ -728,7 +906,7 @@ async def post_announcement(request: Request):
     global announcement_text, announcement_timestamp
 
     api_key = request.headers.get("X-Api-Key", "")
-    if not is_valid_sender_or_admin_key(api_key):
+    if not is_valid_key(api_key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     raw = await request.body()
@@ -751,6 +929,56 @@ async def get_announcement():
             return PlainTextResponse(announcement_text)
         else:
             return PlainTextResponse("")
+
+# -----------------------------
+# DEXPAID GLOBAL KEY GENERATION - moved out of /admin (which is view-only now)
+# -----------------------------
+
+@app.post("/dexpaid/keys")
+async def create_dexpaid_key(request: Request):
+    global last_generated_paid_key, last_generated_paid_loadstring
+
+    api_key = request.headers.get("X-Api-Key", "")
+    if not is_valid_key(api_key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    raw = await request.body()
+    if len(raw) > MAX_GENERIC_BODY:
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
+    hours = parse_duration_hours(raw.decode().strip())
+    if hours is None:
+        return JSONResponse({"error": f"invalid duration (0 < hours <= {MAX_KEY_DURATION_HOURS})"}, status_code=400)
+
+    async with dexpaid_keys_lock:
+        cleanup_expired_paid_keys()
+        new_key = generate_paid_key(20)
+        expiry = time.time() + hours * 3600.0
+        dexpaid_keys[new_key] = expiry
+        save_dexpaid_keys_to_file(dexpaid_keys)
+        last_generated_paid_key = new_key
+        last_generated_paid_loadstring = (
+            f'loadstring(game:HttpGet("{BASE_URL}/dexpaid?key={new_key}"))()'
+        )
+
+    return JSONResponse({
+        "key": new_key,
+        "expires_at": expiry,
+        "loadstring": last_generated_paid_loadstring,
+    })
+
+# -----------------------------
+# GITHUB CACHE REFRESH - moved out of /admin (which is view-only now)
+# -----------------------------
+
+@app.post("/github/refresh")
+async def refresh_github(request: Request):
+    api_key = request.headers.get("X-Api-Key", "")
+    if not is_valid_key(api_key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    await force_refresh_github_cache()
+    return JSONResponse({"ok": True, "message": "GitHub script cache cleared - next request re-fetches."})
 
 # -----------------------------
 # HOME PAGE (ROOT)
@@ -1180,15 +1408,19 @@ async def home_post(request: Request):
         is_paid_str = data.get("is_paid", ["no"])[0].strip().lower()
         hwid_lock_str = data.get("hwid_lock", ["no"])[0].strip().lower()
 
-        if len(code.encode("utf-8")) > MAX_SCRIPT_BODY:
-            return HTMLResponse(HOME_BASE_HTML.format(
-                body=build_home_logged_in_body(current_user, message="Script code is too large.")))
-
         async with scripts_lock:
             s = scripts.get(slug)
             if not s or s.get("owner") != current_user:
                 return HTMLResponse(HOME_BASE_HTML.format(
                     body=build_home_logged_in_body(current_user, message="Script not found or not owned by you.")))
+            if s.get("github_managed"):
+                return HTMLResponse(HOME_BASE_HTML.format(
+                    body=build_home_logged_in_body(
+                        current_user,
+                        message="This script is managed via the GitHub repo and can't be edited here.")))
+            if len(code.encode("utf-8")) > MAX_SCRIPT_BODY:
+                return HTMLResponse(HOME_BASE_HTML.format(
+                    body=build_home_logged_in_body(current_user, message="Script code is too large.")))
             s["name"] = name or s["name"]
             s["code"] = code
             s["is_paid"] = is_paid_str == "yes"
@@ -1205,6 +1437,11 @@ async def home_post(request: Request):
             if not s or s.get("owner") != current_user:
                 return HTMLResponse(HOME_BASE_HTML.format(
                     body=build_home_logged_in_body(current_user, message="Script not found or not owned by you.")))
+            if s.get("github_managed"):
+                return HTMLResponse(HOME_BASE_HTML.format(
+                    body=build_home_logged_in_body(
+                        current_user,
+                        message="This script is managed via the GitHub repo and can't be deleted here.")))
             scripts.pop(slug, None)
             save_scripts_to_file()
         return HTMLResponse(HOME_BASE_HTML.format(
@@ -1275,6 +1512,9 @@ ADMIN_BASE_HTML = """
             padding:10px 22px; border-radius:999px; border:none; cursor:pointer; font-weight:600;
             background:linear-gradient(135deg,var(--accent1),var(--accent2)); color:#050509; margin-top:10px;
         }}
+        button.secondary {{
+            background:linear-gradient(135deg,#3a3a4a,#25252f); color:#e6e6e6;
+        }}
         .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:20px; }}
         .label {{ font-size:13px; color:#b0b0c0; margin-bottom:6px; }}
         .pill {{
@@ -1290,10 +1530,15 @@ ADMIN_BASE_HTML = """
         .stat-value {{ font-size:18px; font-weight:600; margin-top:4px; }}
         .small-text {{ font-size:12px; color:#8a8aa0; }}
         .error {{ margin-top:10px; color:#ff5252; font-size:13px; }}
+        .locked-note {{
+            margin-top:8px; font-size:12px; color:#ffcf6b; background:rgba(255,193,7,0.1);
+            border:1px solid rgba(255,193,7,0.3); border-radius:8px; padding:8px 10px;
+        }}
         .logs-box {{
             background:rgba(8,8,13,0.95); border-radius:12px; border:1px solid #262636; padding:12px;
             font-family:monospace; font-size:12px; max-height:240px; overflow:auto; white-space:pre-wrap;
         }}
+        a.repo-link {{ color:#4fc3f7; }}
     </style>
     <script>
         async function refreshStats() {{
@@ -1345,7 +1590,7 @@ def admin_login_form(error: str = "") -> str:
             <span class="pill green">Loader Scripts</span>
             <span class="pill purple">Control Center</span>
         </p>
-        <p class="label">Enter the admin key to manage loader scripts, blacklist, announcements, paid keys, users, and system stats.</p>
+        <p class="label">Enter the key to view loader scripts, blacklist, announcements, paid keys, users, and system stats. This dashboard is view-only.</p>
         <form method="post">
             <label class="label">Admin Key</label><br>
             <input type="password" name="key" placeholder="Enter admin key">
@@ -1361,16 +1606,65 @@ async def admin_get(request: Request):
     # if already have a valid admin session, skip straight to dashboard
     token = request.cookies.get("dex_admin_session")
     if verify_session_token(token, ADMIN_SESSION_MAX_AGE) == "admin":
-        return HTMLResponse(ADMIN_BASE_HTML.format(body=build_admin_dashboard_body()))
+        return HTMLResponse(ADMIN_BASE_HTML.format(body=await build_admin_dashboard_body()))
     return HTMLResponse(ADMIN_BASE_HTML.format(body=admin_login_form()))
 
 
-def build_admin_dashboard_body() -> str:
-    dexchilli_code = html.escape(load_file(DEXCHILLI_FILE, DEFAULT_DEXCHILLI))
-    dexfree_code = html.escape(load_file(DEXFREE_FILE, DEFAULT_DEXFREE))
-    dexserverhop_code = html.escape(load_file(DEXSERVERHOP_FILE, DEFAULT_DEXSERVERHOP))
-    dexhub_code = html.escape(load_file(DEXHUB_FILE, DEFAULT_DEXHUB))
-    dexpaid_code = html.escape(load_file(DEXPAID_FILE, DEFAULT_DEXPAID))
+def _format_age(fetched_at: Optional[float]) -> str:
+    if not fetched_at:
+        return "never"
+    delta = max(0, int(time.time() - fetched_at))
+    if delta < 60:
+        return f"{delta}s ago"
+    if delta < 3600:
+        return f"{delta // 60}m ago"
+    return f"{delta // 3600}h ago"
+
+
+async def build_fixed_script_card(name: str) -> str:
+    meta = FIXED_SCRIPTS[name]
+    content = await get_github_script(name, meta["file"], meta["default"])
+    cache_meta = get_cache_meta(name)
+    source = cache_meta.get("source") if cache_meta else "unknown"
+    fetched_at = cache_meta.get("fetched_at") if cache_meta else None
+    repo_path = GITHUB_SCRIPT_PATHS.get(name, "")
+
+    if github_configured():
+        repo_link = f"{github_repo_url()}/{repo_path}"
+        source_line = (
+            f'Source: <a class="repo-link" href="{html.escape(repo_link)}" target="_blank" rel="noopener">'
+            f'{html.escape(GITHUB_OWNER)}/{html.escape(GITHUB_REPO)}@{html.escape(GITHUB_BRANCH)} :: {html.escape(repo_path)}</a>'
+        )
+    else:
+        source_line = (
+            "Source: GitHub repo not configured yet - set DEX_GITHUB_OWNER / DEX_GITHUB_REPO. "
+            "Serving local fallback file / default text."
+        )
+
+    return f"""
+    <div class="card">
+        <h2>{html.escape(meta['label'])}</h2>
+        <p class="label">
+            <span class="pill purple">Read-only</span>
+            <span class="pill">{html.escape(source or 'unknown')}</span>
+            <span class="pill">fetched {html.escape(_format_age(fetched_at))}</span>
+        </p>
+        <p class="small-text">{source_line}</p>
+        <div class="locked-note">
+            This script is hard-locked to the GitHub repo. To change it, edit
+            <code>{html.escape(repo_path)}</code> in the repo and push - then use
+            "Refresh from GitHub" below (or wait up to {GITHUB_CACHE_TTL}s for the cache to expire).
+        </div>
+        <p class="small-text" style="margin-top:10px;">Current content (read-only):</p>
+        <div class="logs-box">{html.escape(content)}</div>
+    </div>
+    """
+
+
+async def build_admin_dashboard_body() -> str:
+    fixed_cards_html = ""
+    for name in ("dexchilli", "dexfree", "dexserverhop", "dexhub", "dexpaid"):
+        fixed_cards_html += await build_fixed_script_card(name)
 
     keys_preview_lines = []
     now = time.time()
@@ -1388,21 +1682,39 @@ def build_admin_dashboard_body() -> str:
     scripts_lines = []
     for s in scripts.values():
         scripts_lines.append(
-            f"{s['name']} ({s['slug']}) | owner: {s['owner']} | paid: {s['is_paid']} | hwid_lock: {s['hwid_lock']}"
+            f"{s['name']} ({s['slug']}) | owner: {s['owner']} | paid: {s['is_paid']} | "
+            f"hwid_lock: {s['hwid_lock']}{' | GITHUB-LOCKED' if s.get('github_managed') else ''}"
         )
     scripts_preview = "\n".join(scripts_lines) if scripts_lines else "No scripts."
+
+    github_status = (
+        f"Connected to {html.escape(GITHUB_OWNER)}/{html.escape(GITHUB_REPO)}@{html.escape(GITHUB_BRANCH)}"
+        if github_configured() else
+        "Not configured - set DEX_GITHUB_OWNER and DEX_GITHUB_REPO"
+    )
 
     body = f"""
     <div class="card">
         <h1>Dex Control Center</h1>
         <p class="label">
+            <span class="pill red">View-Only</span>
             <span class="pill">/dexchilli</span>
             <span class="pill">/dexfree</span>
             <span class="pill">/dexserverhop</span>
             <span class="pill purple">/dexhub</span>
             <span class="pill green">/dexpaid</span>
         </p>
-        <p class="label">Manage loader scripts, blacklist, announcements, paid keys, users, and live system data.</p>
+        <p class="label">This dashboard is read-only. Nothing here can change any data - there is
+        no form on this page that submits anywhere. To change announcements, the blacklist,
+        paid keys, or the GitHub cache, call the API directly with header <code>X-Api-Key</code>:</p>
+        <div class="logs-box">
+POST /announcements     (raw text body = announcement)
+POST /blacklisted        (raw text body = username to add)
+POST /unblacklisted      (raw text body = username to remove)
+POST /dexpaid/keys       (raw text body = duration in hours)
+POST /github/refresh     (no body needed)
+        </div>
+        <p class="small-text" style="margin-top:10px;">GitHub source: {github_status}</p>
         <div class="stats-grid">
             <div class="stat-box"><div class="stat-label">Registered Usernames</div><div class="stat-value" id="stat-usernames">0</div></div>
             <div class="stat-box"><div class="stat-label">Blacklisted Users</div><div class="stat-value" id="stat-blacklisted">0</div></div>
@@ -1415,101 +1727,18 @@ def build_admin_dashboard_body() -> str:
     </div>
 
     <div class="grid">
-        <div class="card">
-            <h2>DexChilli Loader Script</h2>
-            <form method="post" action="/admin/update">
-                <input type="hidden" name="target" value="dexchilli">
-                <label class="label">Script (plain Lua)</label>
-                <textarea name="code">{dexchilli_code}</textarea>
-                <button type="submit">Save DexChilli Script</button>
-            </form>
-        </div>
-        <div class="card">
-            <h2>DexFree Loader Script</h2>
-            <form method="post" action="/admin/update">
-                <input type="hidden" name="target" value="dexfree">
-                <label class="label">Script (plain Lua)</label>
-                <textarea name="code">{dexfree_code}</textarea>
-                <button type="submit">Save DexFree Script</button>
-            </form>
-        </div>
-        <div class="card">
-            <h2>DexServerHop Loader Script</h2>
-            <form method="post" action="/admin/update">
-                <input type="hidden" name="target" value="dexserverhop">
-                <label class="label">Script (plain Lua)</label>
-                <textarea name="code">{dexserverhop_code}</textarea>
-                <button type="submit">Save DexServerHop Script</button>
-            </form>
-        </div>
-        <div class="card">
-            <h2>DexHub Loader Script</h2>
-            <form method="post" action="/admin/update">
-                <input type="hidden" name="target" value="dexhub">
-                <label class="label">Script (plain Lua)</label>
-                <textarea name="code">{dexhub_code}</textarea>
-                <button type="submit">Save DexHub Script</button>
-            </form>
-        </div>
-    </div>
-
-    <div class="grid">
-        <div class="card">
-            <h2>DexPaid Loader Script</h2>
-            <p class="label">Paid script, loaded only with valid key.</p>
-            <form method="post" action="/admin/update">
-                <input type="hidden" name="target" value="dexpaid_script">
-                <label class="label">Script (plain Lua, obfuscated allowed)</label>
-                <textarea name="code">{dexpaid_code}</textarea>
-                <button type="submit">Save DexPaid Script</button>
-            </form>
-        </div>
-        <div class="card">
-            <h2>DexPaid Key Generator</h2>
-            <p class="label">Generate a key with a time limit (in hours, max {MAX_KEY_DURATION_HOURS}).</p>
-            <form method="post" action="/admin/update">
-                <input type="hidden" name="target" value="dexpaid_key">
-                <label class="label">Duration (hours)</label>
-                <input type="text" name="code" placeholder="e.g. 1, 5, 10">
-                <button type="submit">Generate Paid Key</button>
-            </form>
-            <p class="small-text" style="margin-top:10px;">Last generated key:</p>
-            <div class="logs-box" id="dexpaid-last-key-box">No key generated yet.</div>
-            <p class="small-text" style="margin-top:10px;">Last generated loadstring:</p>
-            <div class="logs-box" id="dexpaid-last-loadstring-box">No loadstring generated yet.</div>
-            <p class="small-text" style="margin-top:10px;">All active paid keys:</p>
-            <div class="logs-box" id="dexpaid-keys-box">{keys_preview_text}</div>
-        </div>
+        {fixed_cards_html}
     </div>
 
     <div class="grid">
         <div class="card">
             <h2>Announcements</h2>
-            <form method="post" action="/admin/update">
-                <input type="hidden" name="target" value="announcement">
-                <label class="label">Announcement Text</label>
-                <textarea name="code"></textarea>
-                <button type="submit">Send Announcement</button>
-            </form>
-            <p class="small-text" style="margin-top:10px;">Current announcement preview:</p>
+            <p class="small-text">Current announcement preview (read-only):</p>
             <div class="logs-box" id="announcement-preview-box">No active announcement.</div>
         </div>
         <div class="card">
-            <h2>Blacklist Management</h2>
-            <p class="label">Add or remove usernames from blacklist. One username per line.</p>
-            <form method="post" action="/admin/update">
-                <input type="hidden" name="target" value="blacklist_add">
-                <label class="label">Add to Blacklist</label>
-                <textarea name="code"></textarea>
-                <button type="submit">Blacklist Users</button>
-            </form>
-            <form method="post" action="/admin/update" style="margin-top:16px;">
-                <input type="hidden" name="target" value="blacklist_remove">
-                <label class="label">Remove from Blacklist</label>
-                <textarea name="code"></textarea>
-                <button type="submit">Unblacklist Users</button>
-            </form>
-            <p class="small-text" style="margin-top:10px;">Current blacklisted users:</p>
+            <h2>Blacklisted Users</h2>
+            <p class="small-text">Read-only. Manage via POST /blacklisted or /unblacklisted with X-Api-Key.</p>
             <div class="logs-box" id="blacklist-preview-box"></div>
         </div>
         <div class="card">
@@ -1519,6 +1748,16 @@ def build_admin_dashboard_body() -> str:
     </div>
 
     <div class="grid">
+        <div class="card">
+            <h2>DexPaid Keys</h2>
+            <p class="small-text">Read-only. Generate via POST /dexpaid/keys with X-Api-Key.</p>
+            <p class="small-text" style="margin-top:10px;">Last generated key:</p>
+            <div class="logs-box" id="dexpaid-last-key-box">No key generated yet.</div>
+            <p class="small-text" style="margin-top:10px;">Last generated loadstring:</p>
+            <div class="logs-box" id="dexpaid-last-loadstring-box">No loadstring generated yet.</div>
+            <p class="small-text" style="margin-top:10px;">All active paid keys:</p>
+            <div class="logs-box" id="dexpaid-keys-box">{keys_preview_text}</div>
+        </div>
         <div class="card">
             <h2>Users Overview</h2>
             <p class="label">Registered usernames (password hashes are never displayed).</p>
@@ -1546,12 +1785,12 @@ async def admin_post(request: Request):
     data = parse_qs(raw.decode())
     key = data.get("key", [""])[0]
 
-    if not is_valid_admin_key(key):
+    if not is_valid_key(key):
         await record_failed_attempt("admin_login", ip)
         return HTMLResponse(ADMIN_BASE_HTML.format(body=admin_login_form("Invalid key.")))
 
     await clear_attempts("admin_login", ip)
-    resp = HTMLResponse(ADMIN_BASE_HTML.format(body=build_admin_dashboard_body()))
+    resp = HTMLResponse(ADMIN_BASE_HTML.format(body=await build_admin_dashboard_body()))
     admin_token = create_session_token("admin")
     resp.set_cookie(
         "dex_admin_session", admin_token,
@@ -1568,69 +1807,21 @@ def require_admin_session(request: Request) -> bool:
 
 @app.post("/admin/update")
 async def admin_update(request: Request):
-    global announcement_text, announcement_timestamp
-    global last_generated_paid_key, last_generated_paid_loadstring
-
+    # /admin is permanently view-only now. This route intentionally performs
+    # NO mutation of any kind, regardless of what's posted to it - it exists
+    # only so old bookmarks/requests get a clear explanation instead of a
+    # confusing 404. Use the dedicated API endpoints (with X-Api-Key) instead:
+    #   POST /announcements, /blacklisted, /unblacklisted, /dexpaid/keys,
+    #   /github/refresh
     if not require_admin_session(request):
         return PlainTextResponse("Unauthorized - please log in at /admin again.", status_code=401)
 
-    raw = await request.body()
-    if len(raw) > MAX_FORM_BODY:
-        return PlainTextResponse("Payload too large.", status_code=413)
-    data = parse_qs(raw.decode())
-
-    target = data.get("target", [""])[0]
-    code = data.get("code", [""])[0]
-
-    if target in ("dexchilli", "dexfree", "dexserverhop", "dexhub", "dexpaid_script"):
-        if len(code.encode("utf-8")) > MAX_SCRIPT_BODY:
-            return PlainTextResponse("Script too large.", status_code=413)
-
-    if target == "dexchilli":
-        save_file(DEXCHILLI_FILE, code)
-    elif target == "dexfree":
-        save_file(DEXFREE_FILE, code)
-    elif target == "dexserverhop":
-        save_file(DEXSERVERHOP_FILE, code)
-    elif target == "dexhub":
-        save_file(DEXHUB_FILE, code)
-    elif target == "dexpaid_script":
-        save_file(DEXPAID_FILE, code)
-    elif target == "dexpaid_key":
-        hours = parse_duration_hours(code.strip())
-        if hours is not None:
-            async with dexpaid_keys_lock:
-                cleanup_expired_paid_keys()
-                new_key = generate_paid_key(20)
-                expiry = time.time() + hours * 3600.0
-                dexpaid_keys[new_key] = expiry
-                save_dexpaid_keys_to_file(dexpaid_keys)
-                last_generated_paid_key = new_key
-                last_generated_paid_loadstring = (
-                    f'loadstring(game:HttpGet("{BASE_URL}/dexpaid?key={new_key}"))()'
-                )
-    elif target == "announcement":
-        msg = code.strip()
-        async with announcement_lock:
-            announcement_text = msg
-            announcement_timestamp = time.time()
-    elif target == "blacklist_add":
-        lines = [u.strip() for u in code.splitlines() if u.strip()][:200]
-        async with blacklist_lock:
-            for username in lines:
-                if username not in blacklisted_usernames:
-                    blacklisted_usernames.add(username)
-            save_blacklist_to_file(blacklisted_usernames)
-    elif target == "blacklist_remove":
-        lines = [u.strip() for u in code.splitlines() if u.strip()][:200]
-        async with blacklist_lock:
-            for username in lines:
-                blacklisted_usernames.discard(username)
-            save_blacklist_to_file(blacklisted_usernames)
-    else:
-        return PlainTextResponse("Invalid target", status_code=400)
-
-    return HTMLResponse(ADMIN_BASE_HTML.format(body=build_admin_dashboard_body()))
+    return PlainTextResponse(
+        "The admin panel is view-only. Nothing can be changed from /admin or /admin/update. "
+        "Use the API directly with header X-Api-Key: POST /announcements, /blacklisted, "
+        "/unblacklisted, /dexpaid/keys, or /github/refresh.",
+        status_code=403,
+    )
 
 # -----------------------------
 # ADMIN LIVE STATS API - now requires an admin session
@@ -1687,7 +1878,8 @@ async def admin_stats(request: Request):
         scripts_lines = []
         for s in scripts.values():
             scripts_lines.append(
-                f"{s['name']} ({s['slug']}) | owner: {s['owner']} | paid: {s['is_paid']} | hwid_lock: {s['hwid_lock']}"
+                f"{s['name']} ({s['slug']}) | owner: {s['owner']} | paid: {s['is_paid']} | "
+                f"hwid_lock: {s['hwid_lock']}{' | GITHUB-LOCKED' if s.get('github_managed') else ''}"
             )
         scripts_preview = "\n".join(scripts_lines) if scripts_lines else "No scripts."
 
@@ -1730,35 +1922,35 @@ def is_executor(request: Request) -> bool:
     return ("roblox" in ua_lower) or ("wininet" in ua_lower)
 
 # -----------------------------
-# FIXED LOADER ENDPOINTS (GLOBAL FILES)
+# FIXED LOADER ENDPOINTS (GITHUB-MANAGED)
 # -----------------------------
 
 @app.get("/dexfree")
 async def dexfree(request: Request):
     if not is_executor(request):
         return PlainTextResponse("Private Script")
-    return PlainTextResponse(load_file(DEXFREE_FILE, DEFAULT_DEXFREE))
+    return PlainTextResponse(await get_github_script("dexfree", DEXFREE_FILE, DEFAULT_DEXFREE))
 
 
 @app.get("/dexchilli")
 async def dexchilli(request: Request):
     if not is_executor(request):
         return PlainTextResponse("Private Script")
-    return PlainTextResponse(load_file(DEXCHILLI_FILE, DEFAULT_DEXCHILLI))
+    return PlainTextResponse(await get_github_script("dexchilli", DEXCHILLI_FILE, DEFAULT_DEXCHILLI))
 
 
 @app.get("/dexserverhop")
 async def dexserverhop(request: Request):
     if not is_executor(request):
         return PlainTextResponse("Private Script")
-    return PlainTextResponse(load_file(DEXSERVERHOP_FILE, DEFAULT_DEXSERVERHOP))
+    return PlainTextResponse(await get_github_script("dexserverhop", DEXSERVERHOP_FILE, DEFAULT_DEXSERVERHOP))
 
 
 @app.get("/dexhub")
 async def dexhub(request: Request):
     if not is_executor(request):
         return PlainTextResponse("Private Script")
-    return PlainTextResponse(load_file(DEXHUB_FILE, DEFAULT_DEXHUB))
+    return PlainTextResponse(await get_github_script("dexhub", DEXHUB_FILE, DEFAULT_DEXHUB))
 
 
 @app.get("/dexpaid")
@@ -1784,7 +1976,7 @@ async def dexpaid(request: Request):
             save_dexpaid_keys_to_file(dexpaid_keys)
             return PlainTextResponse("-- Paid key expired.")
 
-    return PlainTextResponse(load_file(DEXPAID_FILE, DEFAULT_DEXPAID))
+    return PlainTextResponse(await get_github_script("dexpaid", DEXPAID_FILE, DEFAULT_DEXPAID))
 
 # -----------------------------
 # DYNAMIC LOADER ENDPOINTS
