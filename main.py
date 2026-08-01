@@ -7,7 +7,9 @@ import hmac
 import hashlib
 import secrets
 import re
+import unicodedata
 import urllib.request
+from collections import defaultdict, deque
 from typing import Set, Dict, Any, Optional
 from urllib.parse import parse_qs
 
@@ -203,8 +205,11 @@ def verify_session_token(token: Optional[str], max_age: int) -> Optional[str]:
 
 
 # -----------------------------
-# RATE LIMITING (simple in-memory, per-IP)
+# LOCKOUT-STYLE RATE LIMITING (failed-attempt based, for auth/brute-force)
 # -----------------------------
+# This is the original mechanism: N failures within a window trips a
+# lockout for a further window. Used for login/admin-key/paid-key guessing,
+# where what matters is repeated *failures*, not raw request volume.
 
 RATE_LIMIT_MAX_ATTEMPTS = 5
 RATE_LIMIT_WINDOW = 15 * 60      # 15 minutes to accumulate failures
@@ -214,9 +219,36 @@ _rate_state: Dict[str, Dict[str, Any]] = {}
 _rate_lock = asyncio.Lock()
 
 
+# Rough shape check for a single IPv4/IPv6 address/token, used to sanity-check
+# whatever shows up in X-Forwarded-For before we trust it as "the" client IP.
+_IP_TOKEN_PATTERN = re.compile(r"^[0-9a-fA-F:.]{2,45}$")
+
+
 def _client_ip(request: Request) -> str:
+    # If this app sits behind a reverse proxy (Railway, nginx, etc.), the
+    # real client IP arrives via X-Forwarded-For - request.client.host would
+    # otherwise just be the proxy's IP for every single visitor, which would
+    # make all per-IP rate limiting useless. We take the left-most entry,
+    # but only if it actually looks like an IP; a malformed/spoofed header
+    # falls back to the direct connection IP rather than being trusted blindly.
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        candidate = xff.split(",")[0].strip()
+        if _IP_TOKEN_PATTERN.match(candidate):
+            return candidate
     if request.client:
         return request.client.host
+    return "unknown"
+
+
+def _ws_client_ip(websocket: WebSocket) -> str:
+    xff = websocket.headers.get("x-forwarded-for")
+    if xff:
+        candidate = xff.split(",")[0].strip()
+        if _IP_TOKEN_PATTERN.match(candidate):
+            return candidate
+    if websocket.client:
+        return websocket.client.host
     return "unknown"
 
 
@@ -256,6 +288,164 @@ async def clear_attempts(bucket: str, ip: str):
 
 
 # -----------------------------
+# SLIDING-WINDOW RATE LIMITING (raw request volume, for every endpoint)
+# -----------------------------
+# Complements the lockout system above: this caps how many requests of any
+# kind (successful or not) a single IP can send to a given bucket in a
+# rolling window. In-memory and per-process - fine for a single Railway
+# instance; move to a shared store (Redis) if you ever scale to multiple
+# replicas, since each process would otherwise track its own counters.
+
+_volume_buckets: Dict[str, deque] = defaultdict(deque)
+
+
+def rate_limited(ip: str, bucket: str, max_requests: int, window_seconds: float) -> bool:
+    """Returns True if this ip/bucket combo has exceeded the allowed rate."""
+    key = f"{bucket}:{ip}"
+    now = time.monotonic()
+    q = _volume_buckets[key]
+    while q and now - q[0] > window_seconds:
+        q.popleft()
+    if len(q) >= max_requests:
+        return True
+    q.append(now)
+    return False
+
+
+async def rate_bucket_janitor():
+    """Periodically clears out stale sliding-window buckets so memory
+    doesn't grow forever from one-off visitors."""
+    while True:
+        await asyncio.sleep(600)
+        now = time.monotonic()
+        stale_keys = [k for k, q in _volume_buckets.items() if not q or now - q[-1] > 3600]
+        for k in stale_keys:
+            _volume_buckets.pop(k, None)
+
+
+def reject_if_oversized(request: Request, max_bytes: int) -> bool:
+    """Cheap pre-check using the declared Content-Length so we can bail
+    before buffering a huge/garbage body into memory. This is a courtesy
+    check, not a hard guarantee - a client can lie about Content-Length or
+    stream via chunked encoding, so the actual byte-length is still
+    re-checked after the body is read (as this app already does). For real
+    protection against giant bodies, also set a max request size at the
+    reverse proxy / platform level in front of this service.
+    """
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            if int(cl) > max_bytes:
+                return True
+        except ValueError:
+            return True
+    return False
+
+
+# -----------------------------
+# CONTENT FILTERING (links, Discord invites, profanity/slurs - including
+# spaced-out / leetspeak / accented evasion attempts)
+# -----------------------------
+# Applied to the open /logs endpoint and to /usernames, since both accept
+# free text from untrusted, unauthenticated (or only lightly authenticated)
+# clients.
+
+BLOCKED_SUBSTRINGS = {
+    "discord", "discordgg", "discordcom", "discordappcom", "dscgg",
+    "fuck", "shit", "bitch", "asshole", "cunt", "dick", "cock", "pussy",
+    "nigger", "nigga", "faggot", "fag", "retard", "whore", "slut",
+    "porn", "rape", "nazi", "kike", "chink", "spic",
+}
+
+_LEET_TRANSLATION = str.maketrans({
+    "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t",
+    "@": "a", "$": "s",
+})
+
+_URL_PATTERN = re.compile(r"(https?://|www\.)", re.IGNORECASE)
+
+# Control characters (other than the ones we intentionally strip via
+# .strip()) have no legitimate reason to be in a username or a log line -
+# reject outright rather than silently stripping them. This permissive
+# version still allows tab/newline/CR through, so it's only appropriate for
+# genuinely multi-line fields (script code, announcements).
+_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+# Strict version for single-line fields (log lines, usernames, WSS URLs,
+# blacklist entries) - blocks EVERY control character including tab,
+# newline, and carriage return. A newline embedded in a "single value" is
+# itself a format violation: it could forge extra /logs entries, corrupt
+# the one-line-per-username storage files, or otherwise smuggle structure
+# into a field that's supposed to be a single atomic value.
+_STRICT_SINGLE_LINE_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
+
+# A field consisting entirely of NUL bytes has no legitimate use anywhere,
+# including inside multi-line script code (Lua source is text, never
+# embeds NULs) - checked separately from _CONTROL_CHAR_PATTERN since script
+# code legitimately contains tabs/newlines that the permissive pattern
+# already allows.
+_NUL_BYTE_PATTERN = re.compile(r"\x00")
+
+# ws:// or wss:// URL, plain hostname (letters/digits/dots/hyphens), an
+# optional port, and an optional path - anything outside this shape for
+# the /secure endpoint is rejected rather than stored verbatim.
+WSS_URL_PATTERN = re.compile(
+    r"^wss?://[A-Za-z0-9.\-]{1,253}(:\d{1,5})?(/[A-Za-z0-9._~\-/%]*)?$"
+)
+
+# Shared shape check for usernames submitted to /usernames, /blacklisted,
+# and /unblacklisted: must start and end with a letter/digit, 3-32 chars
+# total, and allows single (non-repeated) underscores/periods in between -
+# covers both classic Roblox usernames and newer period-containing display
+# names, while still rejecting garbage.
+USERNAME_FORMAT_PATTERN = re.compile(r"^(?!.*[_.]{2})[A-Za-z0-9][A-Za-z0-9_.]{1,30}[A-Za-z0-9]$")
+
+# Paid keys are secrets.token_urlsafe() output (URL-safe base64 alphabet);
+# HWIDs are opaque client-generated identifiers. Neither has any legitimate
+# reason to be huge or to contain arbitrary characters - bound both before
+# they're used in any comparison or dict lookup.
+KEY_PARAM_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
+HWID_PARAM_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,128}$")
+
+
+def normalize_field(text: str) -> str:
+    """Unicode-normalize a raw field (NFKC) so visually-similar characters
+    (full-width forms, combining marks, etc.) collapse to their plain ASCII
+    equivalent before we validate shape or scan for blocked content."""
+    return unicodedata.normalize("NFKC", text)
+
+
+def _normalize_for_matching(text: str) -> str:
+    """Aggressively collapse a field down to bare lowercase letters/digits
+    (stripping accents, translating common leetspeak, removing spaces and
+    punctuation) purely for blocklist substring matching - NOT used for
+    display or storage."""
+    stripped = unicodedata.normalize("NFKD", text)
+    stripped = "".join(c for c in stripped if not unicodedata.combining(c))
+    stripped = stripped.lower().translate(_LEET_TRANSLATION)
+    return re.sub(r"[^a-z0-9]+", "", stripped)
+
+
+def contains_blocked_content(*fields: str) -> bool:
+    """True if any field contains a link or a blocked word, including
+    common spaced-out / leetspeak / punctuation-obfuscated variants."""
+    for field in fields:
+        if _URL_PATTERN.search(field.lower()):
+            return True
+        normalized = _normalize_for_matching(field)
+        for bad in BLOCKED_SUBSTRINGS:
+            if bad in normalized:
+                return True
+    return False
+
+
+def has_excessive_repetition(text: str, max_repeat: int = 6) -> bool:
+    """Flags obvious spam like 'aaaaaaaaaa' or '!!!!!!!!!!' - a single
+    character repeated more than max_repeat times in a row."""
+    return bool(re.search(r"(.)\1{" + str(max_repeat) + r",}", text))
+
+
+# -----------------------------
 # INPUT VALIDATION HELPERS
 # -----------------------------
 
@@ -268,12 +458,16 @@ MAX_GENERIC_BODY = 8 * 1024          # small text endpoints (logs/usernames/blac
 MAX_SCRIPT_BODY = 2 * 1024 * 1024    # script code, raised to 2MB
 MAX_FORM_BODY = 2 * 1024 * 1024 + (100 * 1024)  # form posts (script code + other fields), 2MB + 100KB overhead buffer
 MAX_PASSWORD_LEN = 128
+MAX_LOG_LEN = 4096                   # a single /logs line - generous but bounded
+MAX_USERNAME_LEN = 32
 
 
 def is_valid_username(username: str) -> bool:
     if not USERNAME_RE.match(username):
         return False
     if username.lower() in RESERVED_USERNAMES:
+        return False
+    if contains_blocked_content(username):
         return False
     return True
 
@@ -331,6 +525,7 @@ logs_lock = asyncio.Lock()
 dexpaid_keys_lock = asyncio.Lock()
 users_lock = asyncio.Lock()
 scripts_lock = asyncio.Lock()
+ws_count_lock = asyncio.Lock()
 
 # These local files are now ONLY a read fallback (last-known-good mirror of
 # GitHub) - nothing in this app writes to them except get_github_script()
@@ -358,6 +553,7 @@ FIXED_SCRIPTS: Dict[str, Dict[str, str]] = {
 
 viewers: Set[WebSocket] = set()
 sender_ws: Optional[WebSocket] = None
+ws_ip_connection_counts: Dict[str, int] = defaultdict(int)
 
 announcement_text: str = ""
 announcement_timestamp: float = 0.0
@@ -401,6 +597,9 @@ def save_usernames_to_file(names: set):
 
 
 stored_usernames: set = load_usernames_from_file()
+# Lowercased mirror purely for case-insensitive dedup, so "Foo", "foo", and
+# "FOO" don't each get stored as separate entries.
+stored_usernames_lower: set = {u.lower() for u in stored_usernames}
 
 # -----------------------------
 # BLACKLIST FILE HELPERS
@@ -581,42 +780,134 @@ def ensure_builtin_scripts():
 ensure_builtin_scripts()
 
 # -----------------------------
+# GLOBAL HTTP MIDDLEWARE — applies to every plain HTTP request (not the
+# WebSocket upgrade, which is handled separately below): an overall per-IP
+# request budget on top of each endpoint's own tighter limit, a standard
+# set of defensive response headers, and a catch-all so nothing ever leaks
+# a stack trace to a client.
+# -----------------------------
+
+GLOBAL_HTTP_RATE_LIMIT = 200
+GLOBAL_HTTP_RATE_WINDOW = 10.0
+
+
+@app.middleware("http")
+async def global_rate_limit_and_security_headers(request: Request, call_next):
+    ip = _client_ip(request)
+
+    if rate_limited(ip, "global_http", max_requests=GLOBAL_HTTP_RATE_LIMIT, window_seconds=GLOBAL_HTTP_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
+    response = await call_next(request)
+
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    )
+    # Session-bearing / dynamic pages should never be cached by an
+    # intermediary; static loader responses are short-lived anyway.
+    if "Cache-Control" not in response.headers:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    # Never leak stack traces / internals to the client.
+    print(f"❌ Unhandled exception on {request.url.path}: {exc}")
+    return PlainTextResponse("INTERNAL_ERROR", status_code=500)
+
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(rate_bucket_janitor())
+
+# -----------------------------
 # /secure ENDPOINT (now key-protected - previously open to anyone)
 # -----------------------------
 current_wss: Optional[str] = None
+
+SECURE_RATE_LIMIT = 20
+SECURE_RATE_WINDOW = 10.0
 
 
 @app.post("/secure")
 async def set_wss(request: Request):
     global current_wss
 
+    ip = _client_ip(request)
+    if rate_limited(ip, "secure_post", max_requests=SECURE_RATE_LIMIT, window_seconds=SECURE_RATE_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
     api_key = request.headers.get("X-Api-Key", "")
     if not is_valid_key(api_key):
+        await record_failed_attempt("secure_auth", ip)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    if reject_if_oversized(request, MAX_GENERIC_BODY):
+        return JSONResponse({"error": "payload too large"}, status_code=413)
 
     raw_body = await request.body()
     if len(raw_body) > MAX_GENERIC_BODY:
         return JSONResponse({"error": "payload too large"}, status_code=413)
 
-    current_wss = raw_body.decode("utf-8").strip()
+    candidate = normalize_field(raw_body.decode("utf-8", errors="ignore").strip())
+
+    if not candidate:
+        return JSONResponse({"error": "empty"}, status_code=400)
+    if _STRICT_SINGLE_LINE_PATTERN.search(candidate):
+        return JSONResponse({"error": "invalid characters"}, status_code=400)
+    if not WSS_URL_PATTERN.match(candidate):
+        return JSONResponse({"error": "invalid format - expected a ws:// or wss:// URL"}, status_code=400)
+    if contains_blocked_content(candidate):
+        return JSONResponse({"error": "blocked content"}, status_code=400)
+
+    current_wss = candidate
     return {"wss": current_wss}
 
 
 @app.get("/secure")
 async def get_wss(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "secure_get", max_requests=SECURE_RATE_LIMIT, window_seconds=SECURE_RATE_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
     api_key = request.headers.get("X-Api-Key", "")
     if not is_valid_key(api_key):
+        await record_failed_attempt("secure_auth", ip)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return {"wss": current_wss}
 
 
 # -----------------------------
-# WEBSOCKET ENDPOINT (VIEWERS + SENDER) - now requires a key to connect
+# WEBSOCKET ENDPOINT (VIEWERS + SENDER) - requires a key to connect, capped
+# per IP, and now rate-limited on both connection attempts and message
+# volume so a single client can't flood the broadcast or brute-force the
+# in-band sender-auth message.
 # -----------------------------
+
+MAX_WS_CONNECTIONS_PER_IP = 5
+WS_CONNECT_RATE_LIMIT = 20
+WS_CONNECT_RATE_WINDOW = 60.0
+WS_SEND_RATE_LIMIT = 30
+WS_SEND_RATE_WINDOW = 10.0
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     global sender_ws
+
+    ip = _ws_client_ip(websocket)
+
+    if await is_rate_limited("ws_sender_auth", ip):
+        await websocket.close(code=4429)
+        return
+
+    if rate_limited(ip, "ws_connect", max_requests=WS_CONNECT_RATE_LIMIT, window_seconds=WS_CONNECT_RATE_WINDOW):
+        await websocket.close(code=4429)
+        return
 
     # Require a valid key just to open the connection at all - previously
     # anyone could connect anonymously and read every broadcast log.
@@ -624,6 +915,12 @@ async def websocket_endpoint(websocket: WebSocket):
     if not is_valid_key(key_param):
         await websocket.close(code=4401)
         return
+
+    async with ws_count_lock:
+        if ws_ip_connection_counts[ip] >= MAX_WS_CONNECTIONS_PER_IP:
+            await websocket.close(code=4009)
+            return
+        ws_ip_connection_counts[ip] += 1
 
     await websocket.accept()
 
@@ -655,13 +952,22 @@ async def websocket_endpoint(websocket: WebSocket):
             if not text:
                 continue
 
-            if role == "viewer" and constant_time_eq(text, API_KEY):
-                role = "sender"
-                sender_ws = websocket
-                viewers.discard(websocket)
+            if role == "viewer":
+                if rate_limited(ip, "ws_sender_auth_attempt", max_requests=10, window_seconds=60.0):
+                    continue
+                if constant_time_eq(text, API_KEY):
+                    role = "sender"
+                    sender_ws = websocket
+                    viewers.discard(websocket)
+                    await clear_attempts("ws_sender_auth", ip)
+                else:
+                    await record_failed_attempt("ws_sender_auth", ip)
                 continue
 
             if role == "sender":
+                if rate_limited(ip, "ws_send", max_requests=WS_SEND_RATE_LIMIT, window_seconds=WS_SEND_RATE_WINDOW):
+                    continue
+
                 log_entry = text
 
                 async with logs_lock:
@@ -689,23 +995,54 @@ async def websocket_endpoint(websocket: WebSocket):
             viewers.discard(websocket)
         elif role == "sender" and sender_ws is websocket:
             sender_ws = None
+        async with ws_count_lock:
+            ws_ip_connection_counts[ip] -= 1
+            if ws_ip_connection_counts[ip] <= 0:
+                ws_ip_connection_counts.pop(ip, None)
 
 # -----------------------------
-# LOGS ENDPOINT (HTTP -> WS) - now key-protected
+# LOGS ENDPOINT (HTTP -> WS) - stays key-less per requirements, but is now
+# rate-limited AND content-filtered: control characters, links/Discord
+# invites, and profanity/slurs (including obfuscated variants) cause the
+# post to be rejected outright rather than stored or broadcast.
 # -----------------------------
+
+LOGS_POST_RATE_LIMIT = 20
+LOGS_POST_RATE_WINDOW = 10.0
+LOGS_GET_RATE_LIMIT = 30
+LOGS_GET_RATE_WINDOW = 10.0
+
 
 @app.post("/logs")
 async def post_logs(request: Request):
     # Intentionally NO key check here - /logs is the one POST endpoint that
     # stays open per updated requirements. Every other POST endpoint in this
-    # file requires X-Api-Key.
+    # file requires X-Api-Key. Because it's open, it gets its own rate limit
+    # and strict content filtering so it can't be used to spam the WS
+    # broadcast with links, slurs, or garbage.
+    ip = _client_ip(request)
+    if rate_limited(ip, "logs_post", max_requests=LOGS_POST_RATE_LIMIT, window_seconds=LOGS_POST_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
+    if reject_if_oversized(request, MAX_LOG_LEN):
+        return PlainTextResponse("PAYLOAD_TOO_LARGE", status_code=413)
+
     raw = await request.body()
-    if len(raw) > MAX_GENERIC_BODY:
-        return PlainTextResponse("PAYLOAD TOO LARGE", status_code=413)
-    msg = raw.decode().strip()
+    if len(raw) > MAX_LOG_LEN:
+        return PlainTextResponse("PAYLOAD_TOO_LARGE", status_code=413)
+
+    msg = raw.decode(errors="ignore").strip()
 
     if not msg:
         return PlainTextResponse("EMPTY")
+
+    if _CONTROL_CHAR_PATTERN.search(msg):
+        return PlainTextResponse("REJECTED_INVALID_CHARACTERS", status_code=400)
+
+    msg = normalize_field(msg)
+
+    if contains_blocked_content(msg):
+        return PlainTextResponse("REJECTED_BLOCKED_CONTENT", status_code=400)
 
     async with logs_lock:
         stored_logs.append(msg)
@@ -728,6 +1065,10 @@ async def post_logs(request: Request):
 
 @app.get("/logs")
 async def get_logs(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "logs_get", max_requests=LOGS_GET_RATE_LIMIT, window_seconds=LOGS_GET_RATE_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
     api_key = request.headers.get("X-Api-Key", "")
     if not is_valid_key(api_key):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -736,56 +1077,101 @@ async def get_logs(request: Request):
 
 # -----------------------------
 # USERNAME ENDPOINTS
-# POST now requires X-Api-Key like every other POST endpoint except /logs.
-# (Previously left open for an in-game client that couldn't hold a secret -
-# that exemption was intentionally removed; update that client to send the
-# header too.) GET stays public, since it always has.
+# POST requires X-Api-Key like every other POST endpoint except /logs, is
+# rate-limited, and now runs the same content filter as /logs (links,
+# Discord invites, profanity/slurs, control characters, spam repetition).
+# GET stays public but is now rate-limited too.
 # -----------------------------
+
+USERNAME_POST_RATE_LIMIT = 20
+USERNAME_POST_RATE_WINDOW = 10.0
+USERNAME_GET_RATE_LIMIT = 30
+USERNAME_GET_RATE_WINDOW = 10.0
+
 
 @app.post("/usernames")
 async def add_username(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "username_post", max_requests=USERNAME_POST_RATE_LIMIT, window_seconds=USERNAME_POST_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
     api_key = request.headers.get("X-Api-Key", "")
     if not is_valid_key(api_key):
+        await record_failed_attempt("usernames_auth", ip)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
+    if reject_if_oversized(request, MAX_USERNAME_LEN + 16):
+        return PlainTextResponse("PAYLOAD_TOO_LARGE", status_code=413)
+
     raw = await request.body()
-    if len(raw) > MAX_GENERIC_BODY:
-        return PlainTextResponse("PAYLOAD TOO LARGE", status_code=413)
-    username = raw.decode().strip()
+    if len(raw) > MAX_USERNAME_LEN + 16:
+        return PlainTextResponse("PAYLOAD_TOO_LARGE", status_code=413)
+
+    raw_username = raw.decode(errors="ignore").strip()
 
     # Basic sanity check - Roblox usernames are short, so reject obvious junk
     # without being so strict that we reject legitimate names (e.g. those
     # with a period from newer Roblox display-name formats).
-    if not username or len(username) > 32 or "\n" in username or "\r" in username:
+    if not raw_username or len(raw_username) > MAX_USERNAME_LEN:
         return PlainTextResponse("EMPTY")
 
+    if _CONTROL_CHAR_PATTERN.search(raw_username) or "\n" in raw_username or "\r" in raw_username:
+        return PlainTextResponse("REJECTED_INVALID_CHARACTERS", status_code=400)
+
+    username = normalize_field(raw_username)
+
+    if contains_blocked_content(username):
+        return PlainTextResponse("REJECTED_BLOCKED_CONTENT", status_code=400)
+
+    if has_excessive_repetition(username):
+        return PlainTextResponse("REJECTED_SPAM_PATTERN", status_code=400)
+
     async with lock:
-        if username not in stored_usernames:
+        if username.lower() not in stored_usernames_lower:
             stored_usernames.add(username)
+            stored_usernames_lower.add(username.lower())
             save_usernames_to_file(stored_usernames)
 
     return PlainTextResponse("OK")
 
 
 @app.get("/usernames")
-async def get_usernames():
+async def get_usernames(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "username_get", max_requests=USERNAME_GET_RATE_LIMIT, window_seconds=USERNAME_GET_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
     async with lock:
         return PlainTextResponse("\n".join(sorted(stored_usernames)))
 
 # -----------------------------
-# BLACKLIST ENDPOINTS - writes now key-protected, reads remain public
+# BLACKLIST ENDPOINTS - writes key-protected + rate-limited, reads public
+# but rate-limited too.
 # -----------------------------
+
+BLACKLIST_POST_RATE_LIMIT = 15
+BLACKLIST_POST_RATE_WINDOW = 10.0
+BLACKLIST_GET_RATE_LIMIT = 30
+BLACKLIST_GET_RATE_WINDOW = 10.0
+
 
 @app.post("/blacklisted")
 async def add_blacklisted(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "blacklist_post", max_requests=BLACKLIST_POST_RATE_LIMIT, window_seconds=BLACKLIST_POST_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
     api_key = request.headers.get("X-Api-Key", "")
     if not is_valid_key(api_key):
+        await record_failed_attempt("blacklist_auth", ip)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    if reject_if_oversized(request, MAX_GENERIC_BODY):
+        return PlainTextResponse("PAYLOAD_TOO_LARGE", status_code=413)
 
     raw = await request.body()
     if len(raw) > MAX_GENERIC_BODY:
         return PlainTextResponse("PAYLOAD TOO LARGE", status_code=413)
-    username = raw.decode().strip()
+    username = raw.decode(errors="ignore").strip()
 
     if not username:
         return PlainTextResponse("EMPTY")
@@ -800,14 +1186,22 @@ async def add_blacklisted(request: Request):
 
 @app.post("/unblacklisted")
 async def remove_blacklisted(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "blacklist_post", max_requests=BLACKLIST_POST_RATE_LIMIT, window_seconds=BLACKLIST_POST_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
     api_key = request.headers.get("X-Api-Key", "")
     if not is_valid_key(api_key):
+        await record_failed_attempt("blacklist_auth", ip)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    if reject_if_oversized(request, MAX_GENERIC_BODY):
+        return PlainTextResponse("PAYLOAD_TOO_LARGE", status_code=413)
 
     raw = await request.body()
     if len(raw) > MAX_GENERIC_BODY:
         return PlainTextResponse("PAYLOAD TOO LARGE", status_code=413)
-    username = raw.decode().strip()
+    username = raw.decode(errors="ignore").strip()
 
     if not username:
         return PlainTextResponse("EMPTY")
@@ -821,26 +1215,44 @@ async def remove_blacklisted(request: Request):
 
 
 @app.get("/blacklisted")
-async def get_blacklisted():
+async def get_blacklisted(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "blacklist_get", max_requests=BLACKLIST_GET_RATE_LIMIT, window_seconds=BLACKLIST_GET_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
     async with blacklist_lock:
         return PlainTextResponse("\n".join(sorted(blacklisted_usernames)))
 
 # -----------------------------
-# ANNOUNCEMENTS ENDPOINT - POST now key-protected, GET stays public (polled by clients)
+# ANNOUNCEMENTS ENDPOINT - POST key-protected + rate-limited, GET public
+# but rate-limited (generously, since clients poll it).
 # -----------------------------
+
+ANNOUNCEMENT_POST_RATE_LIMIT = 10
+ANNOUNCEMENT_POST_RATE_WINDOW = 10.0
+ANNOUNCEMENT_GET_RATE_LIMIT = 60
+ANNOUNCEMENT_GET_RATE_WINDOW = 10.0
+
 
 @app.post("/announcements")
 async def post_announcement(request: Request):
     global announcement_text, announcement_timestamp
 
+    ip = _client_ip(request)
+    if rate_limited(ip, "announcement_post", max_requests=ANNOUNCEMENT_POST_RATE_LIMIT, window_seconds=ANNOUNCEMENT_POST_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
     api_key = request.headers.get("X-Api-Key", "")
     if not is_valid_key(api_key):
+        await record_failed_attempt("announcement_auth", ip)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    if reject_if_oversized(request, MAX_GENERIC_BODY):
+        return PlainTextResponse("PAYLOAD_TOO_LARGE", status_code=413)
 
     raw = await request.body()
     if len(raw) > MAX_GENERIC_BODY:
         return PlainTextResponse("PAYLOAD TOO LARGE", status_code=413)
-    msg = raw.decode().strip()
+    msg = raw.decode(errors="ignore").strip()
 
     async with announcement_lock:
         announcement_text = msg
@@ -850,7 +1262,10 @@ async def post_announcement(request: Request):
 
 
 @app.get("/announcements")
-async def get_announcement():
+async def get_announcement(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "announcement_get", max_requests=ANNOUNCEMENT_GET_RATE_LIMIT, window_seconds=ANNOUNCEMENT_GET_RATE_WINDOW):
+        return PlainTextResponse("", status_code=429)
     async with announcement_lock:
         now = time.time()
         if announcement_text and (now - announcement_timestamp) <= 1.0:
@@ -862,19 +1277,31 @@ async def get_announcement():
 # DEXPAID GLOBAL KEY GENERATION - moved out of /admin (which is view-only now)
 # -----------------------------
 
+DEXPAID_KEYS_RATE_LIMIT = 10
+DEXPAID_KEYS_RATE_WINDOW = 60.0
+
+
 @app.post("/dexpaid/keys")
 async def create_dexpaid_key(request: Request):
     global last_generated_paid_key, last_generated_paid_loadstring
 
+    ip = _client_ip(request)
+    if rate_limited(ip, "dexpaid_keys_post", max_requests=DEXPAID_KEYS_RATE_LIMIT, window_seconds=DEXPAID_KEYS_RATE_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
     api_key = request.headers.get("X-Api-Key", "")
     if not is_valid_key(api_key):
+        await record_failed_attempt("dexpaid_keys_auth", ip)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    if reject_if_oversized(request, MAX_GENERIC_BODY):
+        return JSONResponse({"error": "payload too large"}, status_code=413)
 
     raw = await request.body()
     if len(raw) > MAX_GENERIC_BODY:
         return JSONResponse({"error": "payload too large"}, status_code=413)
 
-    hours = parse_duration_hours(raw.decode().strip())
+    hours = parse_duration_hours(raw.decode(errors="ignore").strip())
     if hours is None:
         return JSONResponse({"error": f"invalid duration (0 < hours <= {MAX_KEY_DURATION_HOURS})"}, status_code=400)
 
@@ -899,10 +1326,19 @@ async def create_dexpaid_key(request: Request):
 # GITHUB CACHE REFRESH - moved out of /admin (which is view-only now)
 # -----------------------------
 
+GITHUB_REFRESH_RATE_LIMIT = 5
+GITHUB_REFRESH_RATE_WINDOW = 60.0
+
+
 @app.post("/github/refresh")
 async def refresh_github(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "github_refresh_post", max_requests=GITHUB_REFRESH_RATE_LIMIT, window_seconds=GITHUB_REFRESH_RATE_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
     api_key = request.headers.get("X-Api-Key", "")
     if not is_valid_key(api_key):
+        await record_failed_attempt("github_refresh_auth", ip)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     await force_refresh_github_cache()
@@ -912,8 +1348,16 @@ async def refresh_github(request: Request):
 # HOME PAGE (ROOT)
 # -----------------------------
 
+INDEX_RATE_LIMIT = 30
+INDEX_RATE_WINDOW = 10.0
+
+
 @app.get("/")
-async def index():
+async def index(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "index_get", max_requests=INDEX_RATE_LIMIT, window_seconds=INDEX_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
     html_page = f"""
     <!DOCTYPE html>
     <html>
@@ -1212,8 +1656,18 @@ def set_session_cookie(resp, username: str):
     )
 
 
+HOME_GET_RATE_LIMIT = 30
+HOME_GET_RATE_WINDOW = 10.0
+HOME_POST_RATE_LIMIT = 20
+HOME_POST_RATE_WINDOW = 10.0
+
+
 @app.get("/home")
 async def home_get(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "home_get", max_requests=HOME_GET_RATE_LIMIT, window_seconds=HOME_GET_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
     username = get_logged_in_user(request)
     if not username:
         body = build_home_logged_out_body()
@@ -1224,12 +1678,22 @@ async def home_get(request: Request):
 
 @app.post("/home")
 async def home_post(request: Request):
+    ip = _client_ip(request)
+
+    # Coarse per-IP volume cap on top of the existing failed-login lockout
+    # below - stops mass script/account creation even when every individual
+    # attempt "succeeds".
+    if rate_limited(ip, "home_post", max_requests=HOME_POST_RATE_LIMIT, window_seconds=HOME_POST_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
+    if reject_if_oversized(request, MAX_FORM_BODY):
+        return PlainTextResponse("Payload too large.", status_code=413)
+
     raw = await request.body()
     if len(raw) > MAX_FORM_BODY:
         return PlainTextResponse("Payload too large.", status_code=413)
 
-    ip = _client_ip(request)
-    data = parse_qs(raw.decode())
+    data = parse_qs(raw.decode(errors="ignore"))
     action = data.get("action", [""])[0]
     username = data.get("username", [""])[0].strip()
     password = data.get("password", [""])[0]
@@ -1237,18 +1701,26 @@ async def home_post(request: Request):
         password = password[:MAX_PASSWORD_LEN]
 
     if action == "register":
+        if await is_rate_limited("home_register", ip):
+            return HTMLResponse(HOME_BASE_HTML.format(
+                body=build_home_logged_out_body("Too many attempts. Try again later.")), status_code=429)
+
         if not username or not password:
+            await record_failed_attempt("home_register", ip)
             return HTMLResponse(HOME_BASE_HTML.format(
                 body=build_home_logged_out_body("Username and password required.")))
         if not is_valid_username(username):
+            await record_failed_attempt("home_register", ip)
             return HTMLResponse(HOME_BASE_HTML.format(
                 body=build_home_logged_out_body(
-                    "Username must be 3-32 chars: letters, numbers, _ or - only, and not a reserved name.")))
+                    "Username must be 3-32 chars: letters, numbers, _ or - only, and not a reserved/blocked name.")))
         if len(password) < 8:
+            await record_failed_attempt("home_register", ip)
             return HTMLResponse(HOME_BASE_HTML.format(
                 body=build_home_logged_out_body("Password must be at least 8 characters.")))
         async with users_lock:
             if username in users:
+                await record_failed_attempt("home_register", ip)
                 return HTMLResponse(HOME_BASE_HTML.format(
                     body=build_home_logged_out_body("Username already in use.")))
             users[username] = {
@@ -1257,6 +1729,7 @@ async def home_post(request: Request):
                 "created_at": time.time(),
             }
             save_users_to_file()
+        await clear_attempts("home_register", ip)
         resp = HTMLResponse(HOME_BASE_HTML.format(
             body=build_home_logged_in_body(username, success="Account created and logged in.")))
         set_session_cookie(resp, username)
@@ -1529,8 +2002,16 @@ def admin_login_form(error: str = "") -> str:
     """
 
 
+ADMIN_GET_RATE_LIMIT = 20
+ADMIN_GET_RATE_WINDOW = 60.0
+
+
 @app.get("/admin")
 async def admin_get(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "admin_get", max_requests=ADMIN_GET_RATE_LIMIT, window_seconds=ADMIN_GET_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
     # if already have a valid admin session, skip straight to dashboard
     token = request.cookies.get("dex_admin_session")
     if verify_session_token(token, ADMIN_SESSION_MAX_AGE) == "admin":
@@ -1707,10 +2188,13 @@ async def admin_post(request: Request):
         return HTMLResponse(ADMIN_BASE_HTML.format(
             body=admin_login_form("Too many failed attempts. Try again later.")), status_code=429)
 
+    if reject_if_oversized(request, MAX_GENERIC_BODY):
+        return PlainTextResponse("Payload too large.", status_code=413)
+
     raw = await request.body()
     if len(raw) > MAX_GENERIC_BODY:
         return PlainTextResponse("Payload too large.", status_code=413)
-    data = parse_qs(raw.decode())
+    data = parse_qs(raw.decode(errors="ignore"))
     key = data.get("key", [""])[0]
 
     if not is_valid_key(key):
@@ -1752,8 +2236,13 @@ async def admin_update(request: Request):
     )
 
 # -----------------------------
-# ADMIN LIVE STATS API - now requires an admin session
+# ADMIN LIVE STATS API - requires an admin session, and is now rate-limited
+# with headroom for the dashboard's own 2s polling.
 # -----------------------------
+
+ADMIN_STATS_RATE_LIMIT = 30
+ADMIN_STATS_RATE_WINDOW = 10.0
+
 
 async def fetch_remote_info() -> dict:
     url = f"{BASE_URL}/info"
@@ -1771,6 +2260,10 @@ async def fetch_remote_info() -> dict:
 
 @app.get("/admin/stats")
 async def admin_stats(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "admin_stats_get", max_requests=ADMIN_STATS_RATE_LIMIT, window_seconds=ADMIN_STATS_RATE_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
     if not require_admin_session(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
@@ -1850,11 +2343,21 @@ def is_executor(request: Request) -> bool:
     return ("roblox" in ua_lower) or ("wininet" in ua_lower)
 
 # -----------------------------
-# FIXED LOADER ENDPOINTS (GITHUB-MANAGED)
+# FIXED LOADER ENDPOINTS (GITHUB-MANAGED) - rate-limited per IP so the
+# loader can't be hammered into re-fetching from GitHub constantly (the
+# cache absorbs most of this anyway, but the limit protects against abuse
+# regardless of cache state).
 # -----------------------------
+
+LOADER_RATE_LIMIT = 30
+LOADER_RATE_WINDOW = 10.0
+
 
 @app.get("/dexfree")
 async def dexfree(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
     if not is_executor(request):
         return PlainTextResponse("Private Script")
     return PlainTextResponse(await get_github_script("dexfree", DEXFREE_FILE, DEFAULT_DEXFREE))
@@ -1862,6 +2365,9 @@ async def dexfree(request: Request):
 
 @app.get("/dexchilli")
 async def dexchilli(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
     if not is_executor(request):
         return PlainTextResponse("Private Script")
     return PlainTextResponse(await get_github_script("dexchilli", DEXCHILLI_FILE, DEFAULT_DEXCHILLI))
@@ -1869,6 +2375,9 @@ async def dexchilli(request: Request):
 
 @app.get("/dexserverhop")
 async def dexserverhop(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
     if not is_executor(request):
         return PlainTextResponse("Private Script")
     return PlainTextResponse(await get_github_script("dexserverhop", DEXSERVERHOP_FILE, DEFAULT_DEXSERVERHOP))
@@ -1876,15 +2385,36 @@ async def dexserverhop(request: Request):
 
 @app.get("/dexhub")
 async def dexhub(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
     if not is_executor(request):
         return PlainTextResponse("Private Script")
     return PlainTextResponse(await get_github_script("dexhub", DEXHUB_FILE, DEFAULT_DEXHUB))
 
 
+# Paid-key guessing gets its own failed-attempt lockout (separate from the
+# general loader rate limit above) since a wrong key here is a meaningful
+# "attack signal", not just traffic volume.
+DEXPAID_KEY_CHECK_RATE_LIMIT = 20
+DEXPAID_KEY_CHECK_RATE_WINDOW = 60.0
+
+
 @app.get("/dexpaid")
 async def dexpaid(request: Request):
+    ip = _client_ip(request)
+
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+
     if not is_executor(request):
         return PlainTextResponse("Private Script")
+
+    if await is_rate_limited("dexpaid_key_guess", ip):
+        return PlainTextResponse("-- Too many invalid key attempts. Try again later.", status_code=429)
+
+    if rate_limited(ip, "dexpaid_key_check", max_requests=DEXPAID_KEY_CHECK_RATE_LIMIT, window_seconds=DEXPAID_KEY_CHECK_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
 
     key = request.query_params.get("key", "").strip()
     if not key:
@@ -1898,20 +2428,32 @@ async def dexpaid(request: Request):
                 expiry = exp
                 break
         if not expiry:
+            await record_failed_attempt("dexpaid_key_guess", ip)
             return PlainTextResponse("-- Invalid paid key.")
         if time.time() > expiry:
             dexpaid_keys.pop(key, None)
             save_dexpaid_keys_to_file(dexpaid_keys)
             return PlainTextResponse("-- Paid key expired.")
 
+    await clear_attempts("dexpaid_key_guess", ip)
     return PlainTextResponse(await get_github_script("dexpaid", DEXPAID_FILE, DEFAULT_DEXPAID))
 
 # -----------------------------
-# DYNAMIC LOADER ENDPOINTS
+# DYNAMIC LOADER ENDPOINTS - rate-limited, with a separate failed-attempt
+# lockout on wrong paid keys / HWID mismatches per IP.
 # -----------------------------
+
+SLUG_LOADER_RATE_LIMIT = 30
+SLUG_LOADER_RATE_WINDOW = 10.0
+
 
 @app.get("/{slug}")
 async def dynamic_loader(slug: str, request: Request):
+    ip = _client_ip(request)
+
+    if rate_limited(ip, "slug_loader_get", max_requests=SLUG_LOADER_RATE_LIMIT, window_seconds=SLUG_LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+
     if slug.lower() in RESERVED_PATHS_LOWER:
         return PlainTextResponse("Private Script")
 
@@ -1936,6 +2478,9 @@ async def dynamic_loader(slug: str, request: Request):
     if not is_paid:
         return PlainTextResponse(code)
 
+    if await is_rate_limited("slug_key_guess", ip):
+        return PlainTextResponse("-- Too many invalid key attempts. Try again later.", status_code=429)
+
     key = request.query_params.get("key", "").strip()
     hwid = request.query_params.get("hwid", "").strip()
 
@@ -1957,6 +2502,7 @@ async def dynamic_loader(slug: str, request: Request):
                 break
 
         if matched_key is None:
+            await record_failed_attempt("slug_key_guess", ip)
             return PlainTextResponse("-- Invalid paid key.")
 
         info = keys[matched_key]
@@ -1976,8 +2522,10 @@ async def dynamic_loader(slug: str, request: Request):
                 save_scripts_to_file()
             else:
                 if not constant_time_eq(bound_hwid, hwid):
+                    await record_failed_attempt("slug_key_guess", ip)
                     return PlainTextResponse("-- HWID mismatch for this key.")
 
+    await clear_attempts("slug_key_guess", ip)
     return PlainTextResponse(code)
 
 # -----------------------------
