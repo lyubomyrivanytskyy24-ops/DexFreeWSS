@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import html
 import time
 import json
@@ -347,8 +348,7 @@ def reject_if_oversized(request: Request, max_bytes: int) -> bool:
 # spaced-out / leetspeak / accented evasion attempts)
 # -----------------------------
 # Applied to the open /logs endpoint and to /usernames, since both accept
-# free text from untrusted, unauthenticated (or only lightly authenticated)
-# clients.
+# free text from untrusted, unauthenticated clients.
 
 BLOCKED_SUBSTRINGS = {
     "discord", "discordgg", "discordcom", "discordappcom", "dscgg",
@@ -385,6 +385,11 @@ _STRICT_SINGLE_LINE_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 # code legitimately contains tabs/newlines that the permissive pattern
 # already allows.
 _NUL_BYTE_PATTERN = re.compile(r"\x00")
+
+# Any whitespace at all (regular space, tabs, newlines, unicode spaces,
+# etc). Usernames must be a single unbroken token - anything containing
+# whitespace is silently ignored rather than stored.
+_ANY_WHITESPACE_PATTERN = re.compile(r"\s")
 
 # ws:// or wss:// URL, plain hostname (letters/digits/dots/hyphens), an
 # optional port, and an optional path - anything outside this shape for
@@ -585,6 +590,13 @@ def _atomic_write(path: str, content: str, mode: int = 0o600):
 # USERNAME FILE HELPERS
 # -----------------------------
 
+# Hard cap on how many usernames can be stored at once. Once a POST would
+# bring the list to (or past) this size, the app cleans out anything that
+# shouldn't be there and, if still at capacity, restarts the process (see
+# schedule_restart() / restart_process() below) so it comes back up clean.
+MAX_STORED_USERNAMES = 5000
+
+
 def load_usernames_from_file() -> set:
     if not os.path.exists(USERNAME_FILE):
         return set()
@@ -600,6 +612,63 @@ stored_usernames: set = load_usernames_from_file()
 # Lowercased mirror purely for case-insensitive dedup, so "Foo", "foo", and
 # "FOO" don't each get stored as separate entries.
 stored_usernames_lower: set = {u.lower() for u in stored_usernames}
+
+
+def _purge_bad_usernames_locked() -> bool:
+    """Defense-in-depth sweep of the in-memory username set: removes any
+    entry that is empty, contains whitespace, fails the username shape
+    check, or matches the blocklist (including obfuscated variants). Must
+    be called while already holding `lock`. Returns True if anything was
+    removed (i.e. the on-disk file needs rewriting)."""
+    bad = set()
+    for name in stored_usernames:
+        if not name:
+            bad.add(name)
+            continue
+        if _ANY_WHITESPACE_PATTERN.search(name):
+            bad.add(name)
+            continue
+        if not is_valid_username(name):
+            bad.add(name)
+            continue
+    if bad:
+        for name in bad:
+            stored_usernames.discard(name)
+            stored_usernames_lower.discard(name.lower())
+        return True
+    return False
+
+
+async def username_cleanup_janitor():
+    """Periodically sweeps the stored username list for anything that
+    shouldn't be there (bad words, whitespace, bad shape) and rewrites the
+    file if it had to remove something. Belt-and-suspenders on top of the
+    checks already done at write time in /usernames."""
+    while True:
+        await asyncio.sleep(300)
+        async with lock:
+            changed = _purge_bad_usernames_locked()
+            if changed:
+                save_usernames_to_file(stored_usernames)
+
+
+def restart_process():
+    """Re-exec this process in place. Used when the username list hits its
+    cap so the app comes back up with a clean, freshly-loaded state instead
+    of just silently refusing new entries forever."""
+    print("[USERNAMES] Reached MAX_STORED_USERNAMES - restarting process.")
+    try:
+        sys.stdout.flush()
+    except Exception:
+        pass
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+async def schedule_restart(delay: float = 1.0):
+    """Give the current HTTP response a moment to actually get flushed to
+    the client before we tear down and re-exec the process."""
+    await asyncio.sleep(delay)
+    restart_process()
 
 # -----------------------------
 # BLACKLIST FILE HELPERS
@@ -823,6 +892,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(rate_bucket_janitor())
+    asyncio.create_task(username_cleanup_janitor())
 
 # -----------------------------
 # /secure ENDPOINT (now key-protected - previously open to anyone)
@@ -1015,11 +1085,11 @@ LOGS_GET_RATE_WINDOW = 10.0
 
 @app.post("/logs")
 async def post_logs(request: Request):
-    # Intentionally NO key check here - /logs is the one POST endpoint that
-    # stays open per updated requirements. Every other POST endpoint in this
-    # file requires X-Api-Key. Because it's open, it gets its own rate limit
-    # and strict content filtering so it can't be used to spam the WS
-    # broadcast with links, slurs, or garbage.
+    # Intentionally NO key check here - /logs is one of the POST endpoints
+    # that stays open per updated requirements (like /usernames below).
+    # Because it's open, it gets its own rate limit and strict content
+    # filtering so it can't be used to spam the WS broadcast with links,
+    # slurs, or garbage.
     ip = _client_ip(request)
     if rate_limited(ip, "logs_post", max_requests=LOGS_POST_RATE_LIMIT, window_seconds=LOGS_POST_RATE_WINDOW):
         return PlainTextResponse("RATE_LIMITED", status_code=429)
@@ -1077,13 +1147,32 @@ async def get_logs(request: Request):
 
 # -----------------------------
 # USERNAME ENDPOINTS
-# POST requires X-Api-Key like every other POST endpoint except /logs, is
-# rate-limited, and now runs the same content filter as /logs (links,
-# Discord invites, profanity/slurs, control characters, spam repetition).
-# GET stays public but is now rate-limited too.
+#
+# POST is now OPEN - no X-Api-Key required at all. Because anyone can hit
+# it, it leans much harder on the layered defenses below instead of an
+# auth check:
+#   - tight sliding-window rate limit per IP (volume)
+#   - a separate failed-attempt lockout per IP for rejected submissions
+#     (so a script hammering it with garbage gets locked out, not just
+#     slowed down)
+#   - strict shape check (letters/digits/_/- only, 3-32 chars)
+#   - ANY whitespace at all (space, tab, newline, unicode space) means the
+#     submission is silently ignored - nothing is stored, no error is
+#     raised, it just doesn't get added
+#   - full bad-word / slur / link / Discord-invite filter (including
+#     leetspeak + accent + spacing evasion) - any match is rejected and
+#     never stored
+#   - spam-repetition filter ("aaaaaaaaa", "!!!!!!!!!")
+#   - reserved-name + case-insensitive dedup
+#   - hard cap of MAX_STORED_USERNAMES (5000): once reached, the list is
+#     swept for anything that shouldn't be there, and if it's still at
+#     capacity after that, the process restarts itself so it comes back up
+#     clean
+#
+# GET stays public and rate-limited, same as before.
 # -----------------------------
 
-USERNAME_POST_RATE_LIMIT = 20
+USERNAME_POST_RATE_LIMIT = 8
 USERNAME_POST_RATE_WINDOW = 10.0
 USERNAME_GET_RATE_LIMIT = 30
 USERNAME_GET_RATE_WINDOW = 10.0
@@ -1092,13 +1181,16 @@ USERNAME_GET_RATE_WINDOW = 10.0
 @app.post("/usernames")
 async def add_username(request: Request):
     ip = _client_ip(request)
+
+    # Volume-based limit (applies to every request, valid or not).
     if rate_limited(ip, "username_post", max_requests=USERNAME_POST_RATE_LIMIT, window_seconds=USERNAME_POST_RATE_WINDOW):
         return PlainTextResponse("RATE_LIMITED", status_code=429)
 
-    api_key = request.headers.get("X-Api-Key", "")
-    if not is_valid_key(api_key):
-        await record_failed_attempt("usernames_auth", ip)
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    # Failed-attempt lockout (applies specifically to rejected submissions -
+    # this is what actually stops someone from grinding away at the filter
+    # with garbage now that there's no key gating the endpoint).
+    if await is_rate_limited("username_reject", ip):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
 
     if reject_if_oversized(request, MAX_USERNAME_LEN + 16):
         return PlainTextResponse("PAYLOAD_TOO_LARGE", status_code=413)
@@ -1109,28 +1201,61 @@ async def add_username(request: Request):
 
     raw_username = raw.decode(errors="ignore").strip()
 
-    # Basic sanity check - Roblox usernames are short, so reject obvious junk
-    # without being so strict that we reject legitimate names (e.g. those
-    # with a period from newer Roblox display-name formats).
     if not raw_username or len(raw_username) > MAX_USERNAME_LEN:
         return PlainTextResponse("EMPTY")
 
-    if _CONTROL_CHAR_PATTERN.search(raw_username) or "\n" in raw_username or "\r" in raw_username:
+    # Any whitespace anywhere (not just leading/trailing, which .strip()
+    # already removed) means this isn't a single real username token -
+    # ignore it outright, don't store it, don't even count it as a
+    # "rejection" since it's not an attack signal on its own.
+    if _ANY_WHITESPACE_PATTERN.search(raw_username):
+        return PlainTextResponse("IGNORED_CONTAINS_WHITESPACE")
+
+    if _CONTROL_CHAR_PATTERN.search(raw_username):
+        await record_failed_attempt("username_reject", ip)
         return PlainTextResponse("REJECTED_INVALID_CHARACTERS", status_code=400)
 
     username = normalize_field(raw_username)
 
-    if contains_blocked_content(username):
-        return PlainTextResponse("REJECTED_BLOCKED_CONTENT", status_code=400)
+    # Re-check whitespace after normalization too (NFKC can turn some
+    # unicode spacing characters into a plain space).
+    if _ANY_WHITESPACE_PATTERN.search(username):
+        return PlainTextResponse("IGNORED_CONTAINS_WHITESPACE")
+
+    if not is_valid_username(username):
+        # is_valid_username() already covers shape, reserved names, and the
+        # blocked-content filter (bad words / slurs / links) in one place.
+        await record_failed_attempt("username_reject", ip)
+        return PlainTextResponse("REJECTED_INVALID_OR_BLOCKED", status_code=400)
 
     if has_excessive_repetition(username):
+        await record_failed_attempt("username_reject", ip)
         return PlainTextResponse("REJECTED_SPAM_PATTERN", status_code=400)
+
+    should_restart = False
 
     async with lock:
         if username.lower() not in stored_usernames_lower:
             stored_usernames.add(username)
             stored_usernames_lower.add(username.lower())
-            save_usernames_to_file(stored_usernames)
+
+        # Defense-in-depth: sweep out anything bad that might already be in
+        # the set (e.g. a legacy entry from before this filter existed).
+        _purge_bad_usernames_locked()
+
+        save_usernames_to_file(stored_usernames)
+
+        if len(stored_usernames) >= MAX_STORED_USERNAMES:
+            should_restart = True
+
+    await clear_attempts("username_reject", ip)
+
+    if should_restart:
+        # Let this response go out first, then tear down and re-exec so the
+        # app comes back up with a clean slate instead of just silently
+        # refusing every new username forever.
+        asyncio.create_task(schedule_restart())
+        return PlainTextResponse("OK_LIMIT_REACHED_RESTARTING")
 
     return PlainTextResponse("OK")
 
@@ -2122,6 +2247,7 @@ POST /blacklisted        (raw text body = username to add)
 POST /unblacklisted      (raw text body = username to remove)
 POST /dexpaid/keys       (raw text body = duration in hours)
 POST /github/refresh     (no body needed)
+NOTE: POST /usernames and POST /logs are intentionally open (no key).
         </div>
         <p class="small-text" style="margin-top:10px;">GitHub source: {github_status}</p>
         <div class="stats-grid">
