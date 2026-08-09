@@ -65,7 +65,7 @@ def is_valid_key(k: str) -> bool:
 # -----------------------------
 # GITHUB-MANAGED SCRIPT SOURCE
 # -----------------------------
-# See SECURITY NOTES item 5 above. These five scripts can ONLY be changed by
+# See SECURITY NOTES item 5 above. These scripts can ONLY be changed by
 # editing the file in the configured GitHub repo - there is no code path
 # left (admin panel or API) that writes to them from within this app.
 
@@ -81,6 +81,7 @@ GITHUB_SCRIPT_PATHS: Dict[str, str] = {
     "dexserverhop": os.environ.get("DEX_GITHUB_PATH_DEXSERVERHOP", "scripts/dexserverhop.lua").strip(),
     "dexhub": os.environ.get("DEX_GITHUB_PATH_DEXHUB", "scripts/dexhub.lua").strip(),
     "dexpaid": os.environ.get("DEX_GITHUB_PATH_DEXPAID", "scripts/dexpaid.lua").strip(),
+    "dexautoroll": os.environ.get("DEX_GITHUB_PATH_DEXAUTOROLL", "scripts/dexautoroll.lua").strip(),
 }
 
 # name -> {"content": str, "fetched_at": float, "source": "github"|"local_fallback"|"default"}
@@ -540,12 +541,14 @@ DEXFREE_FILE = "dexfree.lua"
 DEXSERVERHOP_FILE = "dexserverhop.lua"
 DEXHUB_FILE = "dexhub.lua"
 DEXPAID_FILE = "dexpaid.lua"
+DEXAUTOROLL_FILE = "dexautoroll.lua"
 
 DEFAULT_DEXCHILLI = "-- DexChilli loader script not set yet. Add scripts/dexchilli.lua to the GitHub repo."
 DEFAULT_DEXFREE = "-- DexFree loader script not set yet. Add scripts/dexfree.lua to the GitHub repo."
 DEFAULT_DEXSERVERHOP = "-- DexServerHop loader script not set yet. Add scripts/dexserverhop.lua to the GitHub repo."
 DEFAULT_DEXHUB = "-- DexHub loader script not set yet. Add scripts/dexhub.lua to the GitHub repo."
 DEFAULT_DEXPAID = "-- DexPaid loader script not set yet. Add scripts/dexpaid.lua to the GitHub repo."
+DEFAULT_DEXAUTOROLL = "-- DexAutoRoll loader script not set yet. Add scripts/dexautoroll.lua to the GitHub repo."
 
 # Central place mapping each fixed script name to its local fallback file + default.
 FIXED_SCRIPTS: Dict[str, Dict[str, str]] = {
@@ -554,6 +557,7 @@ FIXED_SCRIPTS: Dict[str, Dict[str, str]] = {
     "dexserverhop": {"file": DEXSERVERHOP_FILE, "default": DEFAULT_DEXSERVERHOP, "label": "DexServerHop"},
     "dexhub": {"file": DEXHUB_FILE, "default": DEFAULT_DEXHUB, "label": "DexHub"},
     "dexpaid": {"file": DEXPAID_FILE, "default": DEFAULT_DEXPAID, "label": "DexPaid"},
+    "dexautoroll": {"file": DEXAUTOROLL_FILE, "default": DEFAULT_DEXAUTOROLL, "label": "DexAutoRoll"},
 }
 
 viewers: Set[WebSocket] = set()
@@ -810,13 +814,13 @@ scripts = load_scripts_from_file()
 RESERVED_PATHS = {
     "", "home", "admin", "logs", "usernames", "blacklisted", "announcements",
     "ws", "secure", "dexfree", "dexchilli", "dexserverhop", "dexhub", "dexpaid",
-    "admin/stats", "admin/update", "favicon.ico", "robots.txt",
+    "dexautoroll", "admin/stats", "admin/update", "favicon.ico", "robots.txt",
 }
 RESERVED_PATHS_LOWER = {p.lower() for p in RESERVED_PATHS}
 
 
 def ensure_builtin_scripts():
-    """Registers the five fixed scripts in the `scripts` dict for the admin
+    """Registers the fixed scripts in the `scripts` dict for the admin
     overview listing only. Their actual served content always comes from
     get_github_script() at request time, never from this dict."""
     builtin = [
@@ -824,6 +828,7 @@ def ensure_builtin_scripts():
         ("DexChilli", "dexchilli", DEXCHILLI_FILE, DEFAULT_DEXCHILLI),
         ("DexServerHop", "dexserverhop", DEXSERVERHOP_FILE, DEFAULT_DEXSERVERHOP),
         ("DexHub", "dexhub", DEXHUB_FILE, DEFAULT_DEXHUB),
+        ("DexAutoRoll", "dexautoroll", DEXAUTOROLL_FILE, DEFAULT_DEXAUTOROLL),
     ]
     for name, slug, path, default in builtin:
         if slug not in scripts:
@@ -1527,7 +1532,7 @@ async def index(request: Request):
                 <p>This backend powers dynamic loader endpoints.</p>
                 <div class="code-box">
 Public endpoints (browser view):<br>
-/dexfree, /dexchilli, /dexserverhop, /dexhub, /dexpaid, /&lt;your-endpoint&gt; -> "Private Script"<br><br>
+/dexfree, /dexchilli, /dexserverhop, /dexhub, /dexpaid, /dexautoroll, /&lt;your-endpoint&gt; -> "Private Script"<br><br>
 Executor usage:<br>
 loadstring(game:HttpGet("{BASE_URL}/dexfree"))()<br><br>
 Paid usage:<br>
@@ -2197,7 +2202,7 @@ async def build_fixed_script_card(name: str) -> str:
 
 async def build_admin_dashboard_body() -> str:
     fixed_cards_html = ""
-    for name in ("dexchilli", "dexfree", "dexserverhop", "dexhub", "dexpaid"):
+    for name in ("dexchilli", "dexfree", "dexserverhop", "dexhub", "dexpaid", "dexautoroll"):
         fixed_cards_html += await build_fixed_script_card(name)
 
     keys_preview_lines = []
@@ -2237,6 +2242,7 @@ async def build_admin_dashboard_body() -> str:
             <span class="pill">/dexserverhop</span>
             <span class="pill purple">/dexhub</span>
             <span class="pill green">/dexpaid</span>
+            <span class="pill green">/dexautoroll</span>
         </p>
         <p class="label">This dashboard is read-only. Nothing here can change any data - there is
         no form on this page that submits anywhere. To change announcements, the blacklist,
@@ -2517,6 +2523,16 @@ async def dexhub(request: Request):
     if not is_executor(request):
         return PlainTextResponse("Private Script")
     return PlainTextResponse(await get_github_script("dexhub", DEXHUB_FILE, DEFAULT_DEXHUB))
+
+
+@app.get("/dexautoroll")
+async def dexautoroll(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+    if not is_executor(request):
+        return PlainTextResponse("Private Script")
+    return PlainTextResponse(await get_github_script("dexautoroll", DEXAUTOROLL_FILE, DEFAULT_DEXAUTOROLL))
 
 
 # Paid-key guessing gets its own failed-attempt lockout (separate from the
