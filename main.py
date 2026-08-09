@@ -466,6 +466,7 @@ MAX_FORM_BODY = 2 * 1024 * 1024 + (100 * 1024)  # form posts (script code + othe
 MAX_PASSWORD_LEN = 128
 MAX_LOG_LEN = 4096                   # a single /logs line - generous but bounded
 MAX_USERNAME_LEN = 32
+MAX_BANNER_LEN = 500                 # /banner text shown on the /scripts page
 
 
 def is_valid_username(username: str) -> bool:
@@ -520,6 +521,7 @@ USERNAME_FILE = "usernames.txt"
 BLACKLIST_FILE = "blacklisted.txt"
 LOGS_FILE = "logs.txt"
 DEXPAID_KEYS_FILE = "dexpaid_keys.json"
+BANNER_FILE = "banner.txt"
 
 USERS_FILE = "users.json"
 SCRIPTS_FILE = "scripts.json"
@@ -532,6 +534,7 @@ dexpaid_keys_lock = asyncio.Lock()
 users_lock = asyncio.Lock()
 scripts_lock = asyncio.Lock()
 ws_count_lock = asyncio.Lock()
+banner_lock = asyncio.Lock()
 
 # These local files are now ONLY a read fallback (last-known-good mirror of
 # GitHub) - nothing in this app writes to them except get_github_script()
@@ -558,6 +561,16 @@ FIXED_SCRIPTS: Dict[str, Dict[str, str]] = {
     "dexhub": {"file": DEXHUB_FILE, "default": DEFAULT_DEXHUB, "label": "DexHub"},
     "dexpaid": {"file": DEXPAID_FILE, "default": DEFAULT_DEXPAID, "label": "DexPaid"},
     "dexautoroll": {"file": DEXAUTOROLL_FILE, "default": DEFAULT_DEXAUTOROLL, "label": "DexAutoRoll"},
+}
+
+# Short taglines shown on the public /scripts page - purely cosmetic, no
+# behavior depends on this.
+SCRIPT_TAGLINES: Dict[str, str] = {
+    "dexchilli": "Smooth, reliable, and free to run.",
+    "dexfree": "The classic free loader - no key required.",
+    "dexserverhop": "Automatic server hopping on demand.",
+    "dexhub": "The full hub experience, free tier.",
+    "dexautoroll": "Set it and forget it automation.",
 }
 
 viewers: Set[WebSocket] = set()
@@ -692,6 +705,27 @@ def save_blacklist_to_file(names: set):
 blacklisted_usernames: set = load_blacklist_from_file()
 
 # -----------------------------
+# BANNER FILE HELPERS
+# -----------------------------
+# The banner is a short, admin-controlled line of text shown at the top of
+# the public /scripts page. It's persisted to disk (unlike the ephemeral
+# /announcements popup) so it survives restarts. Only POST /banner (with a
+# valid X-Api-Key) can change it - there is no unauthenticated write path.
+
+def load_banner_from_file() -> str:
+    if not os.path.exists(BANNER_FILE):
+        return ""
+    with open(BANNER_FILE, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def save_banner_to_file(text: str):
+    _atomic_write(BANNER_FILE, text, mode=0o644)
+
+
+banner_text: str = load_banner_from_file()
+
+# -----------------------------
 # GENERIC FILE HELPERS
 # -----------------------------
 
@@ -815,6 +849,7 @@ RESERVED_PATHS = {
     "", "home", "admin", "logs", "usernames", "blacklisted", "announcements",
     "ws", "secure", "dexfree", "dexchilli", "dexserverhop", "dexhub", "dexpaid",
     "dexautoroll", "admin/stats", "admin/update", "favicon.ico", "robots.txt",
+    "scripts", "banner", "github/refresh", "dexpaid/keys",
 }
 RESERVED_PATHS_LOWER = {p.lower() for p in RESERVED_PATHS}
 
@@ -1404,6 +1439,69 @@ async def get_announcement(request: Request):
             return PlainTextResponse("")
 
 # -----------------------------
+# /banner ENDPOINT - the persistent banner shown at the top of /scripts.
+# POST is key-protected + rate-limited (this is the endpoint the admin
+# panel instructions point at); GET is public + rate-limited so the
+# /scripts page (or anything else) can read the current value.
+# -----------------------------
+
+BANNER_POST_RATE_LIMIT = 10
+BANNER_POST_RATE_WINDOW = 10.0
+BANNER_GET_RATE_LIMIT = 60
+BANNER_GET_RATE_WINDOW = 10.0
+
+
+@app.post("/banner")
+async def post_banner(request: Request):
+    global banner_text
+
+    ip = _client_ip(request)
+    if rate_limited(ip, "banner_post", max_requests=BANNER_POST_RATE_LIMIT, window_seconds=BANNER_POST_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
+    # Key required - this is the only write path for the banner. No key,
+    # no post: an invalid or missing X-Api-Key is rejected outright and
+    # nothing is ever stored.
+    api_key = request.headers.get("X-Api-Key", "")
+    if not is_valid_key(api_key):
+        await record_failed_attempt("banner_auth", ip)
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    if reject_if_oversized(request, MAX_GENERIC_BODY):
+        return PlainTextResponse("PAYLOAD_TOO_LARGE", status_code=413)
+
+    raw = await request.body()
+    if len(raw) > MAX_GENERIC_BODY:
+        return PlainTextResponse("PAYLOAD_TOO_LARGE", status_code=413)
+
+    msg = normalize_field(raw.decode("utf-8", errors="ignore").strip())
+
+    if len(msg) > MAX_BANNER_LEN:
+        return PlainTextResponse("TOO_LONG", status_code=400)
+
+    # Banner is rendered on a public page - block control characters even
+    # though the admin is trusted, as defense in depth against a leaked/
+    # mistyped key being used to inject junk into stored HTML-adjacent text.
+    if _CONTROL_CHAR_PATTERN.search(msg):
+        return PlainTextResponse("REJECTED_INVALID_CHARACTERS", status_code=400)
+
+    async with banner_lock:
+        banner_text = msg
+        save_banner_to_file(banner_text)
+
+    await clear_attempts("banner_auth", ip)
+    return PlainTextResponse("OK")
+
+
+@app.get("/banner")
+async def get_banner(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "banner_get", max_requests=BANNER_GET_RATE_LIMIT, window_seconds=BANNER_GET_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+    async with banner_lock:
+        return PlainTextResponse(banner_text)
+
+# -----------------------------
 # DEXPAID GLOBAL KEY GENERATION - moved out of /admin (which is view-only now)
 # -----------------------------
 
@@ -1536,7 +1634,9 @@ Public endpoints (browser view):<br>
 Executor usage:<br>
 loadstring(game:HttpGet("{BASE_URL}/dexfree"))()<br><br>
 Paid usage:<br>
-loadstring(game:HttpGet("{BASE_URL}/dexpaid?key=YOUR_KEY"))()
+loadstring(game:HttpGet("{BASE_URL}/dexpaid?key=YOUR_KEY"))()<br><br>
+Browse all free scripts (nice UI):<br>
+{BASE_URL}/scripts
                 </div>
             </div>
         </div>
@@ -1544,6 +1644,209 @@ loadstring(game:HttpGet("{BASE_URL}/dexpaid?key=YOUR_KEY"))()
     </html>
     """
     return HTMLResponse(html_page)
+
+# -----------------------------
+# /scripts PAGE - public, read-only showcase of every free/public loader
+# script (everything except /dexpaid, which needs a key and lives on its
+# own endpoint). Shows the admin-settable banner (see POST /banner above)
+# plus a loadstring + copy button per script.
+# -----------------------------
+
+SCRIPTS_GET_RATE_LIMIT = 30
+SCRIPTS_GET_RATE_WINDOW = 10.0
+
+SCRIPTS_PAGE_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>DEX SCRIPTS</title>
+    <style>
+        :root {{
+            --bg: #050509; --accent1: #4fc3f7; --accent2: #7c4dff;
+            --accent3: #ff5252; --accent4: #00e676; --border: #1c1c24;
+        }}
+        * {{ box-sizing: border-box; }}
+        body {{
+            margin: 0;
+            min-height: 100vh;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+            background:
+                radial-gradient(circle at top left, #202040 0, #050509 40%, #000000 100%),
+                linear-gradient(135deg, rgba(79,195,247,0.08), rgba(255,82,82,0.08));
+            color: #e6e6e6;
+        }}
+        .wrap {{ max-width: 1180px; margin: 0 auto; padding: 48px 22px 60px; }}
+
+        .hero {{ text-align: center; margin-bottom: 34px; }}
+        .hero h1 {{
+            margin: 0; font-size: 46px; font-weight: 800; letter-spacing: 0.08em;
+            background: linear-gradient(135deg, var(--accent1), var(--accent2));
+            -webkit-background-clip: text; background-clip: text; color: transparent;
+        }}
+        .hero p {{ margin: 10px 0 0; color: #9a9ab0; font-size: 15px; }}
+        .hero .pills {{ margin-top: 16px; }}
+        .pill {{
+            display: inline-block; padding: 5px 14px; border-radius: 999px; font-size: 12px;
+            background: rgba(79,195,247,0.14); border: 1px solid rgba(79,195,247,0.35);
+            color: #e6f7ff; margin: 0 4px;
+        }}
+        .pill.green {{ background: rgba(0,230,118,0.14); border-color: rgba(0,230,118,0.35); color: #e6fff3; }}
+        .pill.purple {{ background: rgba(124,77,255,0.14); border-color: rgba(124,77,255,0.35); color: #f0e6ff; }}
+
+        .banner {{
+            max-width: 900px; margin: 0 auto 34px; padding: 14px 20px; border-radius: 14px;
+            background: linear-gradient(135deg, rgba(124,77,255,0.16), rgba(79,195,247,0.16));
+            border: 1px solid rgba(124,77,255,0.35); color: #f2f2ff; font-size: 14px;
+            text-align: center; box-shadow: 0 12px 30px rgba(0,0,0,0.35);
+        }}
+
+        .grid {{
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 22px;
+        }}
+        .script-card {{
+            background: linear-gradient(150deg, rgba(16,16,24,0.96), rgba(9,9,15,0.96));
+            border: 1px solid rgba(79,195,247,0.16); border-radius: 18px; padding: 22px;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.55);
+            position: relative; overflow: hidden; transition: transform 0.15s ease, border-color 0.15s ease;
+        }}
+        .script-card:hover {{ transform: translateY(-3px); border-color: rgba(79,195,247,0.4); }}
+        .script-card::before {{
+            content: ""; position: absolute; inset: -40% -40% auto auto; width: 160px; height: 160px;
+            background: radial-gradient(circle, rgba(79,195,247,0.18), transparent 70%); pointer-events: none;
+        }}
+        .script-card-header {{
+            display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;
+        }}
+        .script-card-header h2 {{ margin: 0; font-size: 19px; letter-spacing: 0.01em; }}
+        .tagline {{ color: #9a9ab0; font-size: 13px; margin: 4px 0 14px; }}
+        .endpoint-row {{ font-size: 12px; color: #8a8aa0; margin-bottom: 12px; }}
+        .endpoint-row code {{
+            background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 6px; color: #c9c9e0;
+        }}
+
+        .code-row {{
+            display: flex; align-items: center; gap: 10px;
+            background: rgba(8,8,13,0.95); border: 1px solid #262636; border-radius: 12px;
+            padding: 12px 12px; overflow: hidden;
+        }}
+        .code-row code {{
+            flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 12.5px; color: #9eff9e; white-space: nowrap; overflow-x: auto;
+        }}
+        .copy-btn {{
+            flex-shrink: 0; border: none; border-radius: 999px; padding: 8px 16px; font-weight: 600;
+            font-size: 12px; cursor: pointer; color: #050509;
+            background: linear-gradient(135deg, var(--accent1), var(--accent2));
+            transition: opacity 0.15s ease;
+        }}
+        .copy-btn:hover {{ opacity: 0.85; }}
+        .copy-btn.copied {{ background: linear-gradient(135deg, var(--accent4), #00c853); }}
+
+        .paid-note {{
+            max-width: 900px; margin: 34px auto 0; text-align: center; font-size: 13px; color: #8a8aa0;
+        }}
+        .paid-note a {{ color: var(--accent1); text-decoration: none; }}
+        .paid-note a:hover {{ text-decoration: underline; }}
+
+        footer {{ text-align: center; margin-top: 46px; font-size: 12px; color: #5c5c70; }}
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <div class="hero">
+            <h1>DEX SCRIPTS</h1>
+            <p>Every free Dex loader, ready to copy into your executor.</p>
+            <div class="pills">
+                <span class="pill green">Free</span>
+                <span class="pill">No key required</span>
+                <span class="pill purple">Always up to date</span>
+            </div>
+        </div>
+        {banner_html}
+        <div class="grid">
+            {cards}
+        </div>
+        <p class="paid-note">Looking for the paid script? Head to <a href="/dexpaid?key=YOUR_KEY">/dexpaid</a> with your key instead.</p>
+        <footer>Dex API</footer>
+    </div>
+    <script>
+        function copyScript(id, btn) {{
+            const el = document.getElementById('code-' + id);
+            if (!el) return;
+            const text = el.textContent;
+            const done = () => {{
+                const original = btn.textContent;
+                btn.textContent = 'Copied!';
+                btn.classList.add('copied');
+                setTimeout(() => {{
+                    btn.textContent = original;
+                    btn.classList.remove('copied');
+                }}, 1500);
+            }};
+            if (navigator.clipboard && navigator.clipboard.writeText) {{
+                navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+            }} else {{
+                fallbackCopy(text, done);
+            }}
+        }}
+        function fallbackCopy(text, done) {{
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            try {{ document.execCommand('copy'); }} catch (e) {{}}
+            document.body.removeChild(ta);
+            done();
+        }}
+    </script>
+</body>
+</html>
+"""
+
+
+def build_scripts_page_html() -> str:
+    banner_html = ""
+    if banner_text:
+        banner_html = f'<div class="banner">{html.escape(banner_text)}</div>'
+
+    cards = ""
+    for name, meta in FIXED_SCRIPTS.items():
+        if name == "dexpaid":
+            continue
+        endpoint = f"{BASE_URL}/{name}"
+        loadstring = f'loadstring(game:HttpGet("{html.escape(endpoint)}"))()'
+        tagline = SCRIPT_TAGLINES.get(name, "")
+        cards += f"""
+        <div class="script-card">
+            <div class="script-card-header">
+                <h2>{html.escape(meta['label'])}</h2>
+                <span class="pill green">Free</span>
+            </div>
+            <p class="tagline">{html.escape(tagline)}</p>
+            <p class="endpoint-row">Endpoint: <code>/{html.escape(name)}</code></p>
+            <div class="code-row">
+                <code id="code-{html.escape(name)}">{loadstring}</code>
+                <button class="copy-btn" onclick="copyScript('{html.escape(name)}', this)">Copy</button>
+            </div>
+        </div>
+        """
+
+    return SCRIPTS_PAGE_HTML.format(banner_html=banner_html, cards=cards)
+
+
+@app.get("/scripts")
+async def scripts_page(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "scripts_get", max_requests=SCRIPTS_GET_RATE_LIMIT, window_seconds=SCRIPTS_GET_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
+    async with banner_lock:
+        page = build_scripts_page_html()
+    return HTMLResponse(page)
 
 # -----------------------------
 # /HOME USER SCRIPT PANEL
@@ -2085,6 +2388,7 @@ ADMIN_BASE_HTML = """
                 document.getElementById('last-log-box').textContent = data.last_log || 'No logs yet.';
                 document.getElementById('recent-logs-box').textContent = data.recent_logs || 'No logs.';
                 document.getElementById('announcement-preview-box').textContent = data.announcement || 'No active announcement.';
+                document.getElementById('banner-preview-box').textContent = data.banner || 'No banner set.';
                 document.getElementById('blacklist-preview-box').textContent = data.blacklisted_list || '';
                 document.getElementById('dexpaid-keys-box').textContent = data.dexpaid_keys_preview || 'No paid keys.';
                 document.getElementById('dexpaid-last-key-box').textContent = data.dexpaid_last_key || 'No key generated yet.';
@@ -2121,7 +2425,7 @@ def admin_login_form(error: str = "") -> str:
             <span class="pill green">Loader Scripts</span>
             <span class="pill purple">Control Center</span>
         </p>
-        <p class="label">Enter the key to view loader scripts, blacklist, announcements, paid keys, users, and system stats. This dashboard is view-only.</p>
+        <p class="label">Enter the key to view loader scripts, blacklist, announcements, the site banner, paid keys, users, and system stats. This dashboard is view-only.</p>
         <form method="post">
             <label class="label">Admin Key</label><br>
             <input type="password" name="key" placeholder="Enter admin key">
@@ -2243,17 +2547,20 @@ async def build_admin_dashboard_body() -> str:
             <span class="pill purple">/dexhub</span>
             <span class="pill green">/dexpaid</span>
             <span class="pill green">/dexautoroll</span>
+            <span class="pill purple">/scripts</span>
         </p>
         <p class="label">This dashboard is read-only. Nothing here can change any data - there is
-        no form on this page that submits anywhere. To change announcements, the blacklist,
-        paid keys, or the GitHub cache, call the API directly with header <code>X-Api-Key</code>:</p>
+        no form on this page that submits anywhere. To change announcements, the site banner, the
+        blacklist, paid keys, or the GitHub cache, call the API directly with header <code>X-Api-Key</code>:</p>
         <div class="logs-box">
 POST /announcements     (raw text body = announcement)
+POST /banner             (raw text body = banner shown on /scripts, up to {MAX_BANNER_LEN} chars)
 POST /blacklisted        (raw text body = username to add)
 POST /unblacklisted      (raw text body = username to remove)
 POST /dexpaid/keys       (raw text body = duration in hours)
 POST /github/refresh     (no body needed)
 NOTE: POST /usernames and POST /logs are intentionally open (no key).
+NOTE: POST /banner is key-protected - no valid X-Api-Key, no post; nothing is stored.
         </div>
         <p class="small-text" style="margin-top:10px;">GitHub source: {github_status}</p>
         <div class="stats-grid">
@@ -2276,6 +2583,11 @@ NOTE: POST /usernames and POST /logs are intentionally open (no key).
             <h2>Announcements</h2>
             <p class="small-text">Current announcement preview (read-only):</p>
             <div class="logs-box" id="announcement-preview-box">No active announcement.</div>
+        </div>
+        <div class="card">
+            <h2>Site Banner (/scripts page)</h2>
+            <p class="small-text">Read-only preview. Set via POST /banner with header X-Api-Key - no key, no post.</p>
+            <div class="logs-box" id="banner-preview-box">No banner set.</div>
         </div>
         <div class="card">
             <h2>Blacklisted Users</h2>
@@ -2355,14 +2667,14 @@ async def admin_update(request: Request):
     # NO mutation of any kind, regardless of what's posted to it - it exists
     # only so old bookmarks/requests get a clear explanation instead of a
     # confusing 404. Use the dedicated API endpoints (with X-Api-Key) instead:
-    #   POST /announcements, /blacklisted, /unblacklisted, /dexpaid/keys,
-    #   /github/refresh
+    #   POST /announcements, /banner, /blacklisted, /unblacklisted,
+    #   /dexpaid/keys, /github/refresh
     if not require_admin_session(request):
         return PlainTextResponse("Unauthorized - please log in at /admin again.", status_code=401)
 
     return PlainTextResponse(
         "The admin panel is view-only. Nothing can be changed from /admin or /admin/update. "
-        "Use the API directly with header X-Api-Key: POST /announcements, /blacklisted, "
+        "Use the API directly with header X-Api-Key: POST /announcements, /banner, /blacklisted, "
         "/unblacklisted, /dexpaid/keys, or /github/refresh.",
         status_code=403,
     )
@@ -2412,6 +2724,8 @@ async def admin_stats(request: Request):
         blacklisted_list = "\n".join(sorted(blacklisted_usernames))
     async with announcement_lock:
         announcement = announcement_text
+    async with banner_lock:
+        banner = banner_text
     async with dexpaid_keys_lock:
         cleanup_expired_paid_keys()
         now = time.time()
@@ -2455,6 +2769,7 @@ async def admin_stats(request: Request):
             "last_log": last_log,
             "recent_logs": recent_logs,
             "announcement": announcement,
+            "banner": banner,
             "blacklisted_list": blacklisted_list,
             "dexpaid_keys_preview": dexpaid_keys_preview,
             "dexpaid_last_key": last_generated_paid_key,
