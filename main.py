@@ -17,10 +17,11 @@ from typing import Set, Dict, Any, Optional
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse, RedirectResponse
 import uvicorn
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+START_TIME = time.time()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -110,6 +111,7 @@ body:has(.workspace) .go{background:linear-gradient(135deg,#8b5cf6,#6366f1 60%,#
 body:has(.stats-grid) .wrap,body:has(form[action="/home"]) .wrap{max-width:1220px!important}
 body:has(.stats-grid) h1{font-size:clamp(28px,4vw,42px)!important}
 /* Mobile */
+.me-admin-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}.me-admin-form,.me-members{padding:15px;border:1px solid rgba(255,255,255,.065);border-radius:16px;background:rgba(255,255,255,.025)}.me-admin-form label{display:block;color:#cbd5e1;font-size:12px;font-weight:850;margin-bottom:8px}.me-add-row{display:flex;gap:8px}.me-add-row select{flex:1;min-width:0}.me-member{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.055)}.me-member:last-child{border-bottom:0}.me-member strong{display:block;color:#fff;font-size:12px}.me-member span{display:block;color:#687489;font-size:10px;margin-top:3px}.me-remove{background:rgba(251,113,133,.08)!important;color:#fecdd3!important;border-color:rgba(251,113,133,.18)!important;box-shadow:none!important;padding:8px 10px!important;font-size:11px}.me-empty{color:#667286;font-size:12px}@media(max-width:760px){.me-admin-grid{grid-template-columns:1fr}.me-add-row{flex-direction:column}.me-add-row button{width:100%;min-height:44px}}
 @media(max-width:760px){
   .dn-chrome{width:calc(100% - 20px);margin:10px auto 18px;padding:9px;border-radius:15px}
   .dn-chrome-links{display:none}.dn-chrome-status{margin-left:auto}
@@ -151,6 +153,8 @@ GLOBAL_UI_JS = r"""
       ['/obfustucate','Obfustucate'],
       ['/scripts','Scripts'],
       ['/home','Dashboard'],
+      ['/chat','Chat'],
+      ['/ME-chat','ME-Chat'],
       ['/admin','Admin']
     ];
     const nav = document.createElement('header');
@@ -1376,6 +1380,21 @@ BANNER_FILE = "banner.txt"
 
 USERS_FILE = "users.json"
 SCRIPTS_FILE = "scripts.json"
+CHAT_DATA_DIR = os.environ.get("DEX_CHAT_DATA_DIR", "chat_data").strip() or "chat_data"
+CHAT_MEDIA_DIR = os.path.join(CHAT_DATA_DIR, "media")
+CHAT_HISTORY_FILE = os.path.join(CHAT_DATA_DIR, "chat_messages.json")
+ME_CHAT_HISTORY_FILE = os.path.join(CHAT_DATA_DIR, "me_chat_messages.json")
+ME_GROUP_FILE = os.path.join(CHAT_DATA_DIR, "me_group.json")
+CHAT_HISTORY_MAX = 3000
+CHAT_MAX_MESSAGE = 4000
+CHAT_MAX_JSON = 12 * 1024 * 1024
+CHAT_MAX_MEDIA_BYTES = 8 * 1024 * 1024
+CHAT_RATE_LIMIT = 25
+CHAT_RATE_WINDOW = 10.0
+CHAT_ALLOWED_MEDIA = {"image/jpeg":".jpg","image/png":".png","image/gif":".gif","image/webp":".webp","video/mp4":".mp4","video/webm":".webm","video/quicktime":".mov"}
+chat_lock=asyncio.Lock(); me_chat_lock=asyncio.Lock(); me_group_lock=asyncio.Lock()
+chat_connections:Set[WebSocket]=set(); me_chat_connections:Set[WebSocket]=set()
+os.makedirs(CHAT_DATA_DIR,exist_ok=True); os.makedirs(CHAT_MEDIA_DIR,exist_ok=True)
 
 lock = asyncio.Lock()
 blacklist_lock = asyncio.Lock()
@@ -1677,6 +1696,30 @@ def load_users_from_file() -> Dict[str, Dict[str, Any]]:
 def save_users_to_file():
     _atomic_write(USERS_FILE, json.dumps(users), mode=0o600)
 
+def _load_me_group_file() -> Set[str]:
+    if not os.path.exists(ME_GROUP_FILE): return set()
+    try:
+        with open(ME_GROUP_FILE,"r",encoding="utf-8") as f: data=json.load(f)
+        return {str(x) for x in data} if isinstance(data,list) else set()
+    except Exception: return set()
+
+def _save_me_group_file() -> None:
+    _atomic_write(ME_GROUP_FILE,json.dumps(sorted(me_group_users),ensure_ascii=False),mode=0o600)
+
+def load_chat_history_file(path: str) -> list:
+    if not os.path.exists(path): return []
+    try:
+        with open(path,"r",encoding="utf-8") as f: data=json.load(f)
+        return data if isinstance(data,list) else []
+    except Exception: return []
+
+def save_chat_history_file(path: str, history: list) -> None:
+    _atomic_write(path,json.dumps(history[-CHAT_HISTORY_MAX:],ensure_ascii=False),mode=0o600)
+
+def _media_extension(mime: str) -> Optional[str]: return CHAT_ALLOWED_MEDIA.get(mime.lower())
+def _safe_chat_filename(filename: str) -> str:
+    base=os.path.basename(str(filename or "file")); base=re.sub(r"[^A-Za-z0-9._-]+","_",base); return base[:120] or "file"
+
 
 def load_scripts_from_file() -> Dict[str, Dict[str, Any]]:
     if not os.path.exists(SCRIPTS_FILE):
@@ -1695,12 +1738,14 @@ def save_scripts_to_file():
 
 users = load_users_from_file()
 scripts = load_scripts_from_file()
+me_group_users:Set[str]={u for u in _load_me_group_file() if u in users}
+_save_me_group_file()
 
 RESERVED_PATHS = {
     "", "home", "admin", "logs", "usernames", "blacklisted", "announcements",
     "ws", "secure", "dexfree", "dexchilli", "dexserverhop", "dexhub", "dexpaid",
     "dexautoroll", "admin/stats", "admin/update", "favicon.ico", "robots.txt",
-    "scripts", "banner", "github/refresh", "dexpaid/keys",
+    "scripts", "banner", "github/refresh", "dexpaid/keys", "chat", "me-chat", "ws/chat", "ws/me-chat", "chat/media", "admin/me-group",
 }
 RESERVED_PATHS_LOWER = {p.lower() for p in RESERVED_PATHS}
 
@@ -2795,6 +2840,20 @@ HOME_BASE_HTML = """
             background:rgba(8,8,13,0.95); border-radius:12px; border:1px solid #262636; padding:12px;
             font-family:monospace; font-size:12px; max-height:240px; overflow:auto; white-space:pre-wrap;
         }}
+        .obf-history-card{{margin-top:24px}}
+        .obf-history-list{{display:grid;gap:10px;margin-top:16px}}
+        .obf-history-item{{padding:14px 16px;border:1px solid rgba(255,255,255,.08);border-radius:14px;background:rgba(3,5,9,.62);transition:transform .2s ease,border-color .2s ease}}
+        .obf-history-item:hover{{transform:translateY(-2px);border-color:rgba(139,92,246,.3)}}
+        .obf-history-top{{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}}
+        .obf-history-top strong{{display:block;color:#fff;font-size:13px}}
+        .obf-history-top .small-text{{display:block;margin-top:3px}}
+        .obf-history-meta{{margin-top:9px;color:#7f899c;font-size:11px}}
+        .obf-history-meta code{{color:#c4b5fd}}
+        .obf-raw-link{{display:inline-flex!important;align-items:center;padding:8px 10px;border-radius:10px;background:rgba(139,92,246,.09)!important;border:1px solid rgba(139,92,246,.18)!important;color:#c4b5fd!important;font-size:11px!important;font-weight:850!important}}
+        .obf-raw-link:hover{{background:rgba(139,92,246,.15)!important;color:#fff!important}}
+        .obf-source-details{{margin-top:12px;border-top:1px solid rgba(255,255,255,.06);padding-top:10px}}
+        .obf-source-details summary{{cursor:pointer;color:#a5b4fc;font-size:11px;font-weight:850;user-select:none}}
+        .obf-source-preview{{margin:10px 0 0;padding:12px;border-radius:12px;background:#020409;border:1px solid rgba(255,255,255,.06);color:#cbd5e1;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow:auto;max-height:420px}}
         .error {{ margin-top:10px; color:#ff5252; font-size:13px; }}
         .success {{ margin-top:10px; color:#00e676; font-size:13px; }}
     </style>
@@ -3289,6 +3348,41 @@ ADMIN_BASE_HTML = """
                 document.getElementById('dexpaid-last-loadstring-box').textContent = data.dexpaid_last_loadstring || 'No loadstring generated yet.';
                 document.getElementById('admin-users-box').textContent = data.users_preview || 'No users.';
                 document.getElementById('admin-scripts-box').textContent = data.scripts_preview || 'No scripts.';
+                const history = Array.isArray(data.obfuscation_history) ? data.obfuscation_history : [];
+                const countEl = document.getElementById('obf-history-count');
+                if (countEl) countEl.textContent = `${{data.obfuscation_history_count || 0}} submissions`;
+                const historyEl = document.getElementById('obf-history-box');
+                if (historyEl) {{
+                    if (!history.length) {{
+                        historyEl.innerHTML = '<div class="small-text">No Obfustucate submissions yet.</div>';
+                    }} else {{
+                        historyEl.innerHTML = history.map((item) => {{
+                            const when = new Date((Number(item.created_at) || 0) * 1000).toLocaleString();
+                            const bytes = Number(item.source_bytes) || 0;
+                            const raw = String(item.raw_url || '#');
+                            const id = String(item.id || '');
+                            const sha = String(item.source_sha256 || '').slice(0, 16);
+                            return `<div class="obf-history-item" data-obf-id="${{id}}"><div class="obf-history-top"><div><strong>${{id}}</strong><span class="small-text">${{when}} · ${{bytes.toLocaleString()}} bytes</span></div><a class="obf-raw-link" href="${{raw}}" target="_blank" rel="noopener">Open /raw payload ↗</a></div><div class="obf-history-meta">SHA-256: <code>${{sha}}…</code></div><details class="obf-source-details"><summary>Show raw source code</summary><pre class="obf-source-preview">Click to load source…</pre></details></div>`;
+                        }}).join('');
+                    }}
+                    historyEl.querySelectorAll('.obf-source-details').forEach((details) => {{
+                        details.addEventListener('toggle', async () => {{
+                            if (!details.open || details.dataset.loaded === '1') return;
+                            const item = details.closest('.obf-history-item');
+                            const id = item ? item.getAttribute('data-obf-id') : '';
+                            const pre = details.querySelector('.obf-source-preview');
+                            if (!id || !pre) return;
+                            try {{
+                                const response = await fetch(`/admin/obfustucate/${{encodeURIComponent(id)}}/source`, {{credentials:'same-origin', cache:'no-store'}});
+                                if (!response.ok) throw new Error('Could not load source');
+                                pre.textContent = await response.text();
+                                details.dataset.loaded = '1';
+                            }} catch (err) {{
+                                pre.textContent = 'Unable to load source.';
+                            }}
+                        }});
+                    }});
+                }}
             }} catch (e) {{
                 console.error(e);
             }}
@@ -3398,6 +3492,38 @@ async def build_fixed_script_card(name: str) -> str:
     """
 
 
+async def build_me_group_admin_panel() -> str:
+    async with users_lock:
+        registered = sorted(users.keys(), key=str.lower)
+    async with me_group_lock:
+        members = sorted(me_group_users, key=str.lower)
+    member_set = set(members)
+    options = "".join(f'<option value="{html.escape(u, quote=True)}">{html.escape(u)}</option>' for u in registered if u not in member_set) or '<option value="">All registered users are already in ME-Group</option>'
+    member_cards = "".join(f'''<div class="me-member"><div><strong>{html.escape(u)}</strong><span>Registered account</span></div><button type="button" class="me-remove" data-user="{html.escape(u, quote=True)}">Remove</button></div>''' for u in members) or '<div class="me-empty">No members have been added yet.</div>'
+    return f'''\
+    <section class="card me-group-admin" style="margin-top:18px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;">
+        <div><span class="pill purple">PRIVATE ACCESS</span><h2 style="margin:10px 0 5px;">ME-Group</h2><p class="small-text">Only accounts listed here can open <code>/ME-chat</code> or its WebSocket. Changes are saved to disk.</p></div>
+        <span class="pill green">{len(members)} member{'s' if len(members)!=1 else ''}</span>
+      </div>
+      <div class="me-admin-grid">
+        <form id="me-group-add-form" class="me-admin-form">
+          <label>Add registered user</label>
+          <div class="me-add-row"><select id="me-group-user">{options}</select><button type="submit">Add to group</button></div>
+          <div id="me-group-status" class="small-text" style="margin-top:9px;">Choose a registered account.</div>
+        </form>
+        <div class="me-members"><div class="small-text" style="margin-bottom:9px;">Current members</div>{member_cards}</div>
+      </div>
+      <script>
+      (()=>{{
+        const form=document.getElementById('me-group-add-form'), sel=document.getElementById('me-group-user'), status=document.getElementById('me-group-status');
+        if(form) form.addEventListener('submit',async e=>{{e.preventDefault();const username=sel.value;if(!username)return;status.textContent='Adding…';const r=await fetch('/admin/me-group',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams({{action:'add',username}})}});const d=await r.json().catch(()=>({{}}));if(!r.ok){{status.textContent=d.error||'Could not add user';return}}location.reload();}});
+        document.querySelectorAll('.me-remove').forEach(btn=>btn.addEventListener('click',async()=>{{const username=btn.dataset.user;if(!confirm('Remove '+username+' from ME-Group?'))return;const r=await fetch('/admin/me-group',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams({{action:'remove',username}})}});const d=await r.json().catch(()=>({{}}));if(!r.ok){{alert(d.error||'Could not remove user');return}}location.reload();}}));
+      }})();
+      </script>
+    </section>
+    '''
+
 async def build_admin_dashboard_body() -> str:
     fixed_cards_html = ""
     for name in ("dexchilli", "dexfree", "dexserverhop", "dexhub", "dexpaid", "dexautoroll"):
@@ -3494,6 +3620,14 @@ NOTE: POST /banner is key-protected - no valid X-Api-Key, no post; nothing is st
         </div>
     </div>
 
+    <div class="card obf-history-card">
+        <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;">
+            <div><h2 style="margin-bottom:6px;">Obfustucate History</h2><p class="small-text">Every submission made through <code>/obfustucate</code>. The public page does not display this history.</p></div>
+            <span class="pill purple" id="obf-history-count">0 submissions</span>
+        </div>
+        <div id="obf-history-box" class="obf-history-list">No Obfustucate submissions yet.</div>
+    </div>
+
     <div class="grid">
         <div class="card">
             <h2>DexPaid Keys</h2>
@@ -3516,6 +3650,7 @@ NOTE: POST /banner is key-protected - no valid X-Api-Key, no post; nothing is st
         </div>
     </div>
     """
+    body += await build_me_group_admin_panel()
     return body
 
 
@@ -3554,6 +3689,25 @@ def require_admin_session(request: Request) -> bool:
     token = request.cookies.get("dex_admin_session")
     return verify_session_token(token, ADMIN_SESSION_MAX_AGE) == "admin"
 
+@app.post("/admin/me-group")
+async def admin_me_group(request: Request):
+    if not require_admin_session(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    data=parse_qs((await request.body()).decode(errors="ignore")); action=data.get("action",[""])[0].strip().lower(); username=data.get("username",[""])[0].strip()
+    if not username or len(username)>64: return JSONResponse({"error":"invalid username"},status_code=400)
+    async with users_lock: registered=username in users
+    if not registered: return JSONResponse({"error":"that username is not registered"},status_code=404)
+    async with me_group_lock:
+        if action=="add": me_group_users.add(username)
+        elif action=="remove": me_group_users.discard(username)
+        else: return JSONResponse({"error":"action must be add or remove"},status_code=400)
+        _save_me_group_file(); members=sorted(me_group_users,key=str.lower)
+    return JSONResponse({"ok":True,"members":members})
+
+@app.get("/admin/me-group")
+async def admin_me_group_get(request: Request):
+    if not require_admin_session(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    async with me_group_lock: members=sorted(me_group_users,key=str.lower)
+    return JSONResponse({"ok":True,"members":members})
 
 @app.post("/admin/update")
 async def admin_update(request: Request):
@@ -3652,6 +3806,10 @@ async def admin_stats(request: Request):
     messages_count = remote.get("total_messages_broadcasted", logs_count)
     usernames_count = remote.get("stored_usernames_count", local_usernames_count)
 
+    async with obf_history_lock:
+        history = _load_obf_history()
+    obf_preview = [{k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url")} for item in reversed(history[-OBF_HISTORY_META_PREVIEW:])]
+
     return JSONResponse(
         {
             "usernames_count": usernames_count,
@@ -3670,6 +3828,8 @@ async def admin_stats(request: Request):
             "dexpaid_last_loadstring": last_generated_paid_loadstring,
             "users_preview": users_preview,
             "scripts_preview": scripts_preview,
+            "obfuscation_history": obf_preview,
+            "obfuscation_history_count": len(history),
         },
         headers={"Cache-Control": "no-store"},
     )
@@ -3805,6 +3965,45 @@ RAW_LOADER_POST_RATE_WINDOW = 60.0
 RAW_LOADER_GET_RATE_LIMIT = 120
 RAW_LOADER_GET_RATE_WINDOW = 10.0
 RAW_LOADER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+
+OBF_HISTORY_DIR = os.environ.get("DEX_OBF_HISTORY_DIR", "obf_history").strip() or "obf_history"
+OBF_HISTORY_FILE = os.path.join(OBF_HISTORY_DIR, "index.json")
+OBF_HISTORY_MAX = 5000
+OBF_HISTORY_META_PREVIEW = 100
+obf_history_lock = asyncio.Lock()
+
+def _load_obf_history() -> list:
+    try:
+        with open(OBF_HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def _save_obf_history(data: list):
+    os.makedirs(OBF_HISTORY_DIR, exist_ok=True)
+    _atomic_write(OBF_HISTORY_FILE, json.dumps(data, ensure_ascii=False), mode=0o600)
+
+def _obf_source_path(submission_id: str) -> str:
+    if not RAW_LOADER_ID_PATTERN.fullmatch(submission_id):
+        raise ValueError("Invalid submission id.")
+    os.makedirs(OBF_HISTORY_DIR, exist_ok=True)
+    return os.path.join(OBF_HISTORY_DIR, submission_id + ".lua")
+
+def _record_obfustucate_submission(source: str, loader_id: str, raw_url: str) -> dict:
+    source_path = _obf_source_path(loader_id)
+    _atomic_write(source_path, source, mode=0o600)
+    entry = {"id": loader_id, "created_at": time.time(), "source_bytes": len(source.encode("utf-8")), "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(), "raw_url": raw_url, "source_path": source_path}
+    history = _load_obf_history()
+    history.append(entry)
+    if len(history) > OBF_HISTORY_MAX:
+        stale = history[:-OBF_HISTORY_MAX]
+        history = history[-OBF_HISTORY_MAX:]
+        for old in stale:
+            try: os.remove(old.get("source_path", ""))
+            except Exception: pass
+    _save_obf_history(history)
+    return entry
 
 
 def _publish_local_payload(payload: str):
@@ -5160,6 +5359,8 @@ def obfuscate_lua_bundle(source, publish=True, level="hard"):
         "pc_copy": loader_text,
         "mobile_copy": loader_text,
         "display_text": display_text,
+        "loader_id": _loader_id if publish else "",
+        "raw_url": raw_url if publish else "",
     }
 
 
@@ -5227,10 +5428,34 @@ async def obfuscate_api(request: Request):
     try:
         # One public protection profile. The old client-selectable level is gone.
         bundle = obfuscate_lua_bundle(source, publish=True, level="medium")
+        if bundle.get("loader_id") and bundle.get("raw_url"):
+            try:
+                async with obf_history_lock:
+                    _record_obfustucate_submission(source, bundle["loader_id"], bundle["raw_url"])
+            except Exception as history_exc:
+                print(f"[OBF_HISTORY] failed to record submission: {history_exc}")
         return JSONResponse({"ok": True, "loadstring": bundle["loadstring"], "payload": bundle["lua_file"]})
     except Exception as exc:
         print(f"[OBF] failed: {exc}")
         return JSONResponse({"error": "Obfuscation failed. Check that the source is valid Lua."}, status_code=400)
+
+
+# -----------------------------
+# ADMIN-ONLY OBFUSTUCATE SOURCE VIEW
+# -----------------------------
+@app.get("/admin/obfustucate/{submission_id}/source")
+async def admin_obfustucate_source(submission_id: str, request: Request):
+    if not require_admin_session(request):
+        return PlainTextResponse("Unauthorized", status_code=401)
+    if not RAW_LOADER_ID_PATTERN.fullmatch(submission_id):
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+    try:
+        with open(_obf_source_path(submission_id), "r", encoding="utf-8") as f:
+            return PlainTextResponse(f.read(), media_type="text/plain; charset=utf-8")
+    except FileNotFoundError:
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+    except Exception:
+        return PlainTextResponse("Could not read source", status_code=500)
 
 
 # -----------------------------
@@ -5258,7 +5483,9 @@ async def private_info(request: Request):
         log_count = len(stored_logs)
     async with ws_count_lock:
         ws_connections = sum(ws_ip_connection_counts.values())
-    return JSONResponse({"ok":True,"service":"DexNotifier","service_version":"4.0","timestamp":int(time.time()),"scripts":script_count,"stored_logs":log_count,"websocket_connections":ws_connections,"base_url":BASE_URL})
+    async with obf_history_lock:
+        obf_count = len(_load_obf_history())
+    return JSONResponse({"ok":True,"service":"DexNotifier","service_version":"4.1","timestamp":int(time.time()),"scripts":script_count,"stored_logs":log_count,"websocket_connections":ws_connections,"obfuscation_submissions":obf_count,"base_url":BASE_URL})
 
 @app.get("/metrics")
 async def private_metrics(request: Request):
@@ -5266,7 +5493,7 @@ async def private_metrics(request: Request):
         return PlainTextResponse("UNAUTHORIZED", status_code=401)
     async with logs_lock:
         log_count = len(stored_logs)
-    async with viewers_lock:
+    async with ws_count_lock:
         viewer_count = len(viewers)
     return JSONResponse({"ok":True,"viewers":viewer_count,"stored_logs":log_count,"uptime_seconds":int(time.time()-START_TIME) if 'START_TIME' in globals() else None})
 
@@ -5279,18 +5506,181 @@ async def internal_status(request: Request):
     if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"},status_code=401)
     async with scripts_lock: sc=len(scripts)
     async with logs_lock: lc=len(stored_logs)
-    async with viewers_lock: vc=len(viewers)
+    async with ws_count_lock: vc=len(viewers)
     return JSONResponse({"ok":True,"service":"DexNotifier","status":"online","uptime_seconds":int(time.time()-START_TIME) if "START_TIME" in globals() else None,"scripts":sc,"logs":lc,"viewers":vc})
 
 @app.get("/internal/routes")
 async def internal_routes(request: Request):
     if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"},status_code=401)
-    return JSONResponse({"ok":True,"routes":[{"path":getattr(r,"path",None),"methods":sorted(getattr(r,"methods",set()))} for r in app.routes if getattr(r,"path",None) and getattr(r,"methods",None)]})
+    hidden_prefixes = ("/internal", "/info", "/metrics", "/admin/stats", "/admin/obfustucate/", "/admin/me-group")
+    routes = []
+    for r in app.routes:
+        path = getattr(r, "path", None)
+        methods = getattr(r, "methods", None)
+        if not path or not methods or any(path.startswith(prefix) for prefix in hidden_prefixes):
+            continue
+        routes.append({"path": path, "methods": sorted(methods)})
+    return JSONResponse({"ok":True,"routes":routes})
+
+
+@app.get("/internal/obfustucate/history")
+async def internal_obfustucate_history(request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"}, status_code=401)
+    async with obf_history_lock:
+        history = _load_obf_history()
+    safe = [{k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url")} for item in reversed(history)]
+    return JSONResponse({"ok": True, "count": len(safe), "submissions": safe})
+
+
+@app.get("/internal/obfustucate/history/{submission_id}")
+async def internal_obfustucate_history_item(submission_id: str, request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"}, status_code=401)
+    if not RAW_LOADER_ID_PATTERN.fullmatch(submission_id): return JSONResponse({"error":"not found"}, status_code=404)
+    async with obf_history_lock:
+        history = _load_obf_history()
+    for item in history:
+        if item.get("id") == submission_id:
+            return JSONResponse({"ok": True, "submission": {k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url")}})
+    return JSONResponse({"error":"not found"}, status_code=404)
+
+
+@app.get("/internal/obfustucate/source/{submission_id}")
+async def internal_obfustucate_source(submission_id: str, request: Request):
+    if not _private_key_ok(request): return PlainTextResponse("UNAUTHORIZED", status_code=401)
+    if not RAW_LOADER_ID_PATTERN.fullmatch(submission_id): return PlainTextResponse("NOT_FOUND", status_code=404)
+    try:
+        with open(_obf_source_path(submission_id), "r", encoding="utf-8") as f:
+            return PlainTextResponse(f.read(), media_type="text/plain; charset=utf-8")
+    except FileNotFoundError:
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+    except Exception:
+        return PlainTextResponse("Could not read source", status_code=500)
+
+
+@app.get("/internal/healthz")
+async def internal_healthz(request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"}, status_code=401)
+    return JSONResponse({"ok": True, "service": "DexNotifier", "status": "healthy", "timestamp": int(time.time())})
+
+
+@app.get("/internal/version")
+async def internal_version(request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"}, status_code=401)
+    return JSONResponse({"ok": True, "service": "DexNotifier", "service_version": "4.1", "obfuscator": "Obfustucate", "chat": "/chat", "me_chat": "/ME-chat"})
 
 @app.get("/internal/config")
 async def internal_config(request: Request):
     if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"},status_code=401)
-    return JSONResponse({"ok":True,"base_url":BASE_URL,"github_configured":github_configured(),"github_branch":GITHUB_BRANCH,"obfuscation_max_source_bytes":OBF_MAX_SOURCE,"public_obfuscator":"/obfustucate"})
+    return JSONResponse({"ok":True,"base_url":BASE_URL,"github_configured":github_configured(),"github_branch":GITHUB_BRANCH,"obfuscation_max_source_bytes":OBF_MAX_SOURCE,"public_obfuscator":"/obfustucate","chat":"/chat","me_chat":"/ME-chat"})
+
+# ============================================================================
+# LIVE CHAT / ME-CHAT
+# ============================================================================
+CHAT_PAGE_CSS = r'''
+.chat-page{min-height:calc(100vh - 120px);width:min(1180px,calc(100% - 24px));margin:0 auto 50px}.chat-hero{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin:22px 0 18px}.chat-hero h1{font-size:clamp(32px,5vw,58px);margin:8px 0 7px}.chat-hero p{max-width:700px;margin:0;color:#8f98a9}.chat-badge{display:inline-flex;align-items:center;gap:8px;border:1px solid rgba(139,92,246,.22);background:rgba(139,92,246,.08);color:#ddd6fe;padding:7px 10px;border-radius:999px;font-size:11px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.chat-shell{height:min(720px,calc(100vh - 250px));min-height:520px;display:grid;grid-template-columns:245px 1fr;overflow:hidden;border:1px solid rgba(255,255,255,.085);border-radius:25px;background:linear-gradient(145deg,rgba(14,17,24,.95),rgba(6,8,12,.96));box-shadow:0 35px 110px rgba(0,0,0,.48);backdrop-filter:blur(22px)}.chat-side{border-right:1px solid rgba(255,255,255,.07);padding:18px;background:linear-gradient(180deg,rgba(18,21,30,.72),rgba(8,10,14,.72))}.chat-side-card{padding:15px;border:1px solid rgba(255,255,255,.065);border-radius:17px;background:rgba(255,255,255,.025);margin-bottom:12px}.chat-side-card strong{display:block;color:#fff;font-size:13px}.chat-side-card span{display:block;color:#788397;font-size:11px;margin-top:4px}.chat-online{display:inline-flex;align-items:center;gap:7px;color:#a7f3d0!important}.chat-online i{width:7px;height:7px;background:#34d399;border-radius:50%;box-shadow:0 0 14px #34d399}.chat-main{min-width:0;display:flex;flex-direction:column}.chat-top{padding:16px 18px;border-bottom:1px solid rgba(255,255,255,.07);display:flex;align-items:center;justify-content:space-between;gap:12px}.chat-top strong{font-size:14px}.chat-top small{display:block;color:#687489;margin-top:4px}.chat-count{font-size:11px;color:#a7f3d0;border:1px solid rgba(52,211,153,.16);background:rgba(52,211,153,.05);padding:7px 10px;border-radius:999px}.chat-messages{flex:1;overflow:auto;padding:22px;display:flex;flex-direction:column;gap:10px;scroll-behavior:smooth}.chat-empty{margin:auto;text-align:center;color:#667286;max-width:360px}.chat-empty b{display:block;color:#dce4f5;margin-bottom:6px}.msg{max-width:min(76%,720px);padding:11px 13px;border:1px solid rgba(255,255,255,.065);border-radius:17px;background:rgba(255,255,255,.035);animation:chatIn .22s ease both}.msg.me{align-self:flex-end;background:linear-gradient(145deg,rgba(99,102,241,.17),rgba(139,92,246,.09));border-color:rgba(139,92,246,.16)}.msg-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}.msg-name{font-size:11px;font-weight:950;color:#c4b5fd}.msg-time{font-size:9px;color:#5f6a7d}.msg-text{white-space:pre-wrap;word-break:break-word;color:#e8edf7;font-size:13px;line-height:1.55}.msg-media{display:block;max-width:100%;max-height:330px;border-radius:13px;border:1px solid rgba(255,255,255,.08);margin-top:5px;background:#02040a}.chat-compose{border-top:1px solid rgba(255,255,255,.07);padding:14px;background:rgba(5,7,11,.75)}.chat-input-row{display:flex;align-items:flex-end;gap:9px}.chat-input{flex:1;min-height:48px;max-height:140px;resize:vertical;padding:13px 14px!important;border-radius:15px!important}.chat-icon-btn{width:45px;height:45px;display:grid;place-items:center;flex:0 0 45px;background:rgba(255,255,255,.045)!important;border:1px solid rgba(255,255,255,.08)!important;box-shadow:none!important}.chat-send{height:45px;padding:0 18px;white-space:nowrap}.chat-file-name{font-size:10px;color:#788397;margin-top:7px;min-height:14px}.chat-toast{position:fixed;right:20px;bottom:20px;z-index:100;padding:11px 14px;border-radius:13px;background:#10141d;border:1px solid rgba(255,255,255,.1);color:#e5e7eb;box-shadow:0 15px 50px rgba(0,0,0,.35);animation:chatIn .2s ease}@keyframes chatIn{from{opacity:0;transform:translateY(7px) scale(.985)}to{opacity:1;transform:none}}@media(max-width:800px){.chat-page{width:calc(100% - 16px)}.chat-hero{align-items:flex-start;flex-direction:column}.chat-shell{grid-template-columns:1fr;height:calc(100vh - 185px);min-height:540px}.chat-side{display:none}.msg{max-width:88%}.chat-input-row{gap:7px}.chat-send{padding:0 13px}.chat-top{padding:13px 14px}.chat-messages{padding:15px}.chat-compose{padding:10px}}
+'''
+CHAT_PAGE_JS = r'''
+<script>
+(()=>{const cfg=window.__DN_CHAT_CONFIG__||{},box=document.getElementById('chat-messages'),input=document.getElementById('chat-input'),file=document.getElementById('chat-file'),fileName=document.getElementById('chat-file-name'),send=document.getElementById('chat-send'),count=document.getElementById('chat-count'),status=document.getElementById('chat-status');let ws=null,selectedFile=null;const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));const t=v=>new Date((Number(v)||Date.now())*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});function toast(x){const e=document.createElement('div');e.className='chat-toast';e.textContent=x;document.body.appendChild(e);setTimeout(()=>e.remove(),2500)}function render(m){if(box.querySelector('.chat-empty'))box.innerHTML='';const mine=m.username===cfg.username,e=document.createElement('article');e.className='msg'+(mine?' me':'');let c='';if(m.type==='Message'||m.type==='ME-Chat')c='<div class="msg-text">'+esc(m.message)+'</div>';else if(m.type==='Picture'||m.type==='ME-Photo')c='<img class="msg-media" loading="lazy" src="'+esc(m.url)+'" alt="'+esc(m.filename||'picture')+'">';else if(m.type==='Video'||m.type==='ME-Video')c='<video class="msg-media" controls preload="metadata" src="'+esc(m.url)+'"></video>';e.innerHTML='<div class="msg-head"><span class="msg-name">'+esc(m.display_name||m.username)+'</span><span class="msg-time">@'+esc(m.account_username||m.username)+' · '+esc(t(m.timestamp))+'</span></div>'+c;box.appendChild(e);box.scrollTop=box.scrollHeight}function connect(){const proto=location.protocol==='https:'?'wss':'ws',path=cfg.me?'/ws/me-chat':'/ws/chat';ws=new WebSocket(proto+'://'+location.host+path);ws.onopen=()=>{status.textContent='Live';status.className='chat-count chat-online';send.disabled=false};ws.onclose=()=>{status.textContent='Reconnecting…';status.className='chat-count';send.disabled=true;setTimeout(connect,1800)};ws.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.type==='System')return toast(d.message||'');if(d.type==='Presence'){count.textContent=(d.online||0)+' online';return}render(d)}catch{}}}function clearFile(){selectedFile=null;if(file)file.value='';if(fileName)fileName.textContent=''}async function submit(){if(!ws||ws.readyState!==1)return toast('Chat is reconnecting…');const text=input.value.trim();if(selectedFile){const f=selectedFile;if(f.size>cfg.maxMedia)return toast('That file is too large.');const mime=f.type.toLowerCase();if(!/^image\/(jpeg|png|gif|webp)$/.test(mime)&&!/^video\/(mp4|webm|quicktime)$/.test(mime))return toast('Unsupported media type.');const r=new FileReader();r.onload=()=>{const b64=String(r.result).split(',')[1]||'',type=cfg.me?(mime.startsWith('image/')?'ME-Photo':'ME-Video'):(mime.startsWith('image/')?'Picture':'Video');ws.send(JSON.stringify({type,data:b64,mime,filename:f.name}));if(text)ws.send(JSON.stringify({type:cfg.me?'ME-Chat':'Message',message:text}));clearFile();input.value=''};r.readAsDataURL(f);return}if(text){ws.send(JSON.stringify({type:cfg.me?'ME-Chat':'Message',message:text}));input.value=''}}file?.addEventListener('change',()=>{selectedFile=file.files?.[0]||null;if(fileName)fileName.textContent=selectedFile?selectedFile.name:''});send?.addEventListener('click',submit);input?.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit()}});connect()})();
+</script>
+'''
+
+async def _chat_user_from_ws(websocket: WebSocket, me: bool = False) -> Optional[str]:
+    token = websocket.cookies.get("dex_session")
+    username = verify_session_token(token, SESSION_MAX_AGE)
+    if not username or username not in users: return None
+    if me:
+        async with me_group_lock:
+            if username not in me_group_users: return None
+    return username
+
+def _chat_page_html(username: str, me: bool = False) -> str:
+    title = "ME-Chat" if me else "Chat"; subtitle = "Private ME-Group live chat" if me else "Live community chat"; badge = "ME-GROUP • PRIVATE" if me else "LIVE • COMMUNITY"; types = "ME-Chat · ME-Photo · ME-Video" if me else "Message · Picture · Video"
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#050608"><title>{title} — DexNotifier</title><style>{CHAT_PAGE_CSS}</style></head><body><main class="chat-page"><section class="chat-hero"><div><span class="chat-badge">{badge}</span><h1>{title}</h1><p>{subtitle}. Signed in as <strong>{html.escape(username)}</strong>.</p></div><div class="pill {'purple' if me else 'green'}">WebSocket • JSON</div></section><section class="chat-shell"><aside class="chat-side"><div class="chat-side-card"><strong>{html.escape(username)}</strong><span>Account username</span><span class="chat-online" style="margin-top:10px"><i></i> Connected account</span></div><div class="chat-side-card"><strong>{'ME-Group access' if me else 'Everyone signed in'}</strong><span>{'Only users selected by an admin can participate.' if me else 'Only registered, signed-in accounts can send messages.'}</span></div><div class="chat-side-card"><strong>Message types</strong><span>{types}</span></div></aside><section class="chat-main"><header class="chat-top"><div><strong>{title}</strong><small id="chat-status">Connecting…</small></div><span id="chat-count" class="chat-count">0 online</span></header><div id="chat-messages" class="chat-messages"><div class="chat-empty"><b>Welcome to {title}</b><span>Messages are live over WebSocket and saved for the next session.</span></div></div><footer class="chat-compose"><div class="chat-input-row"><input id="chat-file" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime" hidden><button type="button" class="chat-icon-btn" onclick="document.getElementById('chat-file').click()" title="Attach photo or video">＋</button><textarea id="chat-input" class="chat-input" placeholder="Write a message…" maxlength="{CHAT_MAX_MESSAGE}"></textarea><button id="chat-send" class="chat-send" disabled>Send</button></div><div id="chat-file-name" class="chat-file-name"></div></footer></section></section></main><script>window.__DN_CHAT_CONFIG__={{me:{str(me).lower()},username:{json.dumps(username)},maxMedia:{CHAT_MAX_MEDIA_BYTES}}};</script>{CHAT_PAGE_JS}</body></html>'''
+
+@app.get("/chat")
+async def chat_page(request: Request):
+    username = get_logged_in_user(request)
+    if not username: return RedirectResponse("/home?next=/chat", status_code=303)
+    return HTMLResponse(_chat_page_html(username, False))
+
+@app.get("/ME-chat")
+async def me_chat_page(request: Request):
+    username = get_logged_in_user(request)
+    if not username: return RedirectResponse("/", status_code=303)
+    async with me_group_lock: allowed = username in me_group_users
+    if not allowed: return RedirectResponse("/", status_code=303)
+    return HTMLResponse(_chat_page_html(username, True))
+
+@app.get("/chat/media/{room}/{filename}")
+async def chat_media(room: str, filename: str, request: Request):
+    username = get_logged_in_user(request)
+    if not username: return PlainTextResponse("Unauthorized", status_code=401)
+    if room not in {"chat","me"} or not re.fullmatch(r"[A-Za-z0-9_.-]{1,180}", filename): return PlainTextResponse("NOT_FOUND", status_code=404)
+    if room == "me":
+        async with me_group_lock:
+            if username not in me_group_users: return PlainTextResponse("NOT_FOUND", status_code=404)
+    path=os.path.join(CHAT_MEDIA_DIR,room,filename)
+    if not os.path.isfile(path): return PlainTextResponse("NOT_FOUND", status_code=404)
+    import mimetypes
+    from starlette.responses import FileResponse
+    return FileResponse(path, media_type=mimetypes.guess_type(path)[0] or "application/octet-stream")
+
+async def _broadcast_chat(connections: Set[WebSocket], payload: dict) -> None:
+    text=json.dumps(payload,ensure_ascii=False); dead=[]
+    for ws in list(connections):
+        try: await ws.send_text(text)
+        except Exception: dead.append(ws)
+    for ws in dead: connections.discard(ws)
+
+async def _load_and_send_history(ws: WebSocket, path: str) -> None:
+    for item in load_chat_history_file(path)[-CHAT_HISTORY_MAX:]:
+        try: await ws.send_text(json.dumps(item,ensure_ascii=False))
+        except Exception: break
+
+async def _handle_chat_ws(websocket: WebSocket, me: bool = False):
+    username=await _chat_user_from_ws(websocket,me)
+    if not username: await websocket.close(code=4403); return
+    connections=me_chat_connections if me else chat_connections; history_file=ME_CHAT_HISTORY_FILE if me else CHAT_HISTORY_FILE; lock_obj=me_chat_lock if me else chat_lock
+    await websocket.accept(); connections.add(websocket); await _load_and_send_history(websocket,history_file); await _broadcast_chat(connections,{"type":"Presence","online":len(connections)})
+    try:
+        while True:
+            raw=await websocket.receive_text()
+            if len(raw.encode("utf-8"))>CHAT_MAX_JSON: await websocket.send_text(json.dumps({"type":"System","message":"Message too large."})); continue
+            if rate_limited(_ws_client_ip(websocket),"me_chat_send" if me else "chat_send",CHAT_RATE_LIMIT,CHAT_RATE_WINDOW): await websocket.send_text(json.dumps({"type":"System","message":"Slow down for a moment."})); continue
+            try: data=json.loads(raw)
+            except Exception: await websocket.send_text(json.dumps({"type":"System","message":"Invalid JSON."})); continue
+            if not isinstance(data,dict): continue
+            typ=str(data.get("type","")); allowed={"ME-Chat","ME-Photo","ME-Video"} if me else {"Message","Picture","Video"}
+            if typ not in allowed: await websocket.send_text(json.dumps({"type":"System","message":"Unsupported message type."})); continue
+            base={"type":typ,"id":secrets.token_urlsafe(10),"username":username,"account_username":username,"display_name":username,"timestamp":time.time()}
+            if typ in {"Message","ME-Chat"}:
+                message=str(data.get("message",""))[:CHAT_MAX_MESSAGE].strip()
+                if not message: continue
+                base["message"]=message
+            else:
+                mime=str(data.get("mime","")).lower().strip(); ext=_media_extension(mime); encoded=data.get("data","")
+                if not ext or not isinstance(encoded,str) or len(encoded)>CHAT_MAX_MEDIA_BYTES*2: await websocket.send_text(json.dumps({"type":"System","message":"Unsupported or oversized media."})); continue
+                try:
+                    import base64; blob=base64.b64decode(encoded,validate=True)
+                except Exception: await websocket.send_text(json.dumps({"type":"System","message":"Invalid media data."})); continue
+                if len(blob)>CHAT_MAX_MEDIA_BYTES: await websocket.send_text(json.dumps({"type":"System","message":"That file is too large."})); continue
+                room="me" if me else "chat"; os.makedirs(os.path.join(CHAT_MEDIA_DIR,room),exist_ok=True); filename=secrets.token_hex(16)+ext
+                with open(os.path.join(CHAT_MEDIA_DIR,room,filename),"wb") as f: f.write(blob)
+                base.update({"url":f"/chat/media/{room}/{filename}","filename":_safe_chat_filename(data.get("filename","attachment")),"mime":mime,"size":len(blob)})
+            async with lock_obj:
+                history=load_chat_history_file(history_file); history.append(base); save_chat_history_file(history_file,history[-CHAT_HISTORY_MAX:])
+            await _broadcast_chat(connections,base)
+    except WebSocketDisconnect: pass
+    except Exception: pass
+    finally:
+        connections.discard(websocket); await _broadcast_chat(connections,{"type":"Presence","online":len(connections)})
+
+@app.websocket("/ws/chat")
+async def websocket_chat(websocket: WebSocket): await _handle_chat_ws(websocket,False)
+
+@app.websocket("/ws/me-chat")
+async def websocket_me_chat(websocket: WebSocket): await _handle_chat_ws(websocket,True)
 
 # -----------------------------
 # DYNAMIC LOADER ENDPOINTS - rate-limited, with a separate failed-attempt
