@@ -6,6 +6,8 @@ import time
 import json
 import hmac
 import hashlib
+import random
+import string
 import secrets
 import re
 import unicodedata
@@ -19,6 +21,671 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 import uvicorn
 
 app = FastAPI()
+
+# ═════════════════════════════════════════════════════════════════════════════
+# RANDOMNESS
+# ═════════════════════════════════════════════════════════════════════════════
+
+_RNG = random.SystemRandom()
+
+_IDENTIFIER_CHARS = string.ascii_letters
+
+_U8 = 0x100
+_U16 = 0x10000
+
+_PRNG_MULT = 25173
+_PRNG_ADD = 13849
+
+_MIX_A = 197
+_MIX_B = 113
+_MIX_C = 71
+_MIX_D = 43
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# IDENTIFIERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _rand_name(length=None):
+    if length is None:
+        length = _RNG.randint(9, 17)
+
+    length = max(2, int(length))
+
+    confusing = (
+        string.ascii_letters
+        + "IlIOoO"
+        + "lI1"
+        + "oO0"
+    )
+
+    result = _RNG.choice(string.ascii_letters)
+
+    for _ in range(length - 1):
+        result += _RNG.choice(confusing)
+
+    return result
+
+
+def _unique_name(used):
+    while True:
+        name = _rand_name()
+
+        if name not in used:
+            used.add(name)
+            return name
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# INTEGER HELPERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _u8(value):
+    return int(value) & 0xFF
+
+
+def _u16(value):
+    return int(value) & 0xFFFF
+
+
+def _prng_step(state, extra=0):
+    return (
+        int(state) * _PRNG_MULT
+        + _PRNG_ADD
+        + int(extra)
+    ) % _U16
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ROTATION
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _rotl8(value, amount):
+    value = _u8(value)
+    amount = int(amount) & 7
+
+    if amount == 0:
+        return value
+
+    return (
+        ((value << amount) & 0xFF)
+        | (value >> (8 - amount))
+    )
+
+
+def _rotr8(value, amount):
+    value = _u8(value)
+    amount = int(amount) & 7
+
+    if amount == 0:
+        return value
+
+    return (
+        (value >> amount)
+        | ((value << (8 - amount)) & 0xFF)
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# PERMUTATION
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _make_permutation(length, seed):
+    length = int(length)
+    state = _u16(seed)
+
+    permutation = list(range(length))
+
+    for position in range(length - 1, 0, -1):
+        state = _prng_step(
+            state,
+            position * 97
+        )
+
+        swap_index = state % (position + 1)
+
+        permutation[position], permutation[swap_index] = (
+            permutation[swap_index],
+            permutation[position],
+        )
+
+    return permutation
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ONE CIPHER ROUND
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _encrypt_round(
+    source,
+    seed1,
+    seed2,
+    seed3,
+    seed4,
+    block_size
+):
+    encrypted = bytearray()
+
+    for block_start in range(
+        0,
+        len(source),
+        block_size
+    ):
+        block = source[
+            block_start:
+            block_start + block_size
+        ]
+
+        block_length = len(block)
+
+        permutation_seed = (
+            seed1
+            + seed2
+            + seed3 * (block_start + 1)
+            + seed4 * block_length
+            + block_start * _MIX_A
+        ) % _U16
+
+        permutation = _make_permutation(
+            block_length,
+            permutation_seed
+        )
+
+        state = (
+            seed1
+            + seed3
+            + ((block_start + 1) * 17)
+            + (block_length * _MIX_B)
+        ) % _U16
+
+        previous_cipher = (
+            seed4
+            + block_start
+            + block_length
+        ) & 0xFF
+
+        transformed = [0] * block_length
+
+        for destination in range(block_length):
+            original_index = permutation[destination]
+
+            absolute_index = (
+                block_start
+                + original_index
+                + 1
+            )
+
+            state = _prng_step(
+                state,
+                original_index
+                + destination
+                + block_length
+            )
+
+            value = block[original_index]
+
+            rotation = (
+                seed2
+                + original_index
+                + destination
+                + state
+                + block_length
+            ) & 7
+
+            value = _rotl8(
+                value,
+                rotation
+            )
+
+            add_value = (
+                (state >> 8)
+                ^ (seed4 & 0xFF)
+                ^ (absolute_index * 13)
+                ^ (destination * _MIX_C)
+            ) & 0xFF
+
+            value = (
+                value + add_value
+            ) & 0xFF
+
+            xor_value = (
+                (seed3 & 0xFF)
+                + destination * 29
+                + (state & 0xFF)
+                + absolute_index * 7
+                + block_length * _MIX_D
+            ) & 0xFF
+
+            value ^= xor_value
+
+            feedback = (
+                previous_cipher
+                ^ ((state >> 8) & 0xFF)
+                ^ (seed1 & 0xFF)
+                ^ ((absolute_index * 11) & 0xFF)
+            ) & 0xFF
+
+            value ^= feedback
+
+            final_mix = (
+                (seed4 >> 8)
+                + destination * 17
+                + original_index * 31
+                + state
+            ) & 0xFF
+
+            value ^= final_mix
+            value &= 0xFF
+
+            previous_cipher = value
+            transformed[destination] = value
+
+        encrypted.extend(transformed)
+
+    return bytes(encrypted)
+
+
+def _decrypt_round(
+    encrypted,
+    seed1,
+    seed2,
+    seed3,
+    seed4,
+    block_size
+):
+    decrypted = bytearray()
+
+    for block_start in range(
+        0,
+        len(encrypted),
+        block_size
+    ):
+        block = encrypted[
+            block_start:
+            block_start + block_size
+        ]
+
+        block_length = len(block)
+
+        permutation_seed = (
+            seed1
+            + seed2
+            + seed3 * (block_start + 1)
+            + seed4 * block_length
+            + block_start * _MIX_A
+        ) % _U16
+
+        permutation = _make_permutation(
+            block_length,
+            permutation_seed
+        )
+
+        state = (
+            seed1
+            + seed3
+            + ((block_start + 1) * 17)
+            + (block_length * _MIX_B)
+        ) % _U16
+
+        previous_cipher = (
+            seed4
+            + block_start
+            + block_length
+        ) & 0xFF
+
+        output = [0] * block_length
+
+        for destination in range(block_length):
+            original_index = permutation[destination]
+
+            absolute_index = (
+                block_start
+                + original_index
+                + 1
+            )
+
+            state = _prng_step(
+                state,
+                original_index
+                + destination
+                + block_length
+            )
+
+            value = block[destination]
+
+            current_cipher = value
+
+            final_mix = (
+                (seed4 >> 8)
+                + destination * 17
+                + original_index * 31
+                + state
+            ) & 0xFF
+
+            value ^= final_mix
+
+            feedback = (
+                previous_cipher
+                ^ ((state >> 8) & 0xFF)
+                ^ (seed1 & 0xFF)
+                ^ ((absolute_index * 11) & 0xFF)
+            ) & 0xFF
+
+            value ^= feedback
+
+            xor_value = (
+                (seed3 & 0xFF)
+                + destination * 29
+                + (state & 0xFF)
+                + absolute_index * 7
+                + block_length * _MIX_D
+            ) & 0xFF
+
+            value ^= xor_value
+
+            add_value = (
+                (state >> 8)
+                ^ (seed4 & 0xFF)
+                ^ (absolute_index * 13)
+                ^ (destination * _MIX_C)
+            ) & 0xFF
+
+            value = (
+                value - add_value
+            ) & 0xFF
+
+            rotation = (
+                seed2
+                + original_index
+                + destination
+                + state
+                + block_length
+            ) & 7
+
+            value = _rotr8(
+                value,
+                rotation
+            )
+
+            output[original_index] = value
+
+            previous_cipher = current_cipher
+
+        decrypted.extend(output)
+
+    return bytes(decrypted)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# INTEGRITY
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _integrity_digest(data):
+    h1 = 0x1357
+    h2 = 0x2468
+    h3 = 0x369C
+    h4 = 0x4ACE
+
+    for index, value in enumerate(data, 1):
+        value = int(value)
+
+        h1 = (
+            h1 * 257
+            + value
+            + index
+        ) % _U16
+
+        h2 = (
+            h2 * 263
+            + value * 3
+            + index * 7
+        ) % _U16
+
+        h3 = (
+            h3 * 269
+            + value * 5
+            + index * 11
+        ) % _U16
+
+        h4 = (
+            h4 * 271
+            + value * 7
+            + index * 17
+        ) % _U16
+
+    return h1, h2, h3, h4
+
+
+def _cipher_digest(data):
+    h1 = 0x5A31
+    h2 = 0x71C9
+    h3 = 0x42D7
+
+    for index, value in enumerate(data, 1):
+        value = int(value)
+
+        h1 = (
+            h1 * 251
+            + value
+            + index * 3
+        ) % _U16
+
+        h2 = (
+            h2 * 277
+            + value * 7
+            + index * 13
+        ) % _U16
+
+        h3 = (
+            h3 * 283
+            + value * 11
+            + index * 19
+        ) % _U16
+
+    return h1, h2, h3
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OPAQUE NUMBERS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _num_expr(value):
+    value = int(value)
+
+    if value == 0:
+        a = _RNG.randint(100, 9000)
+        return f"({a}-{a})"
+
+    if value < 0:
+        return f"-({_num_expr(-value)})"
+
+    style = _RNG.randint(0, 8)
+
+    if style == 0:
+        a = _RNG.randint(1, 5000)
+        return f"({a}+({value-a}))"
+
+    if style == 1:
+        a = _RNG.randint(value + 1, value + 5000)
+        return f"({a}-{a-value})"
+
+    if style == 2:
+        a = _RNG.randint(1, 1000)
+        return f"(({value+a})-{a})"
+
+    if style == 3:
+        a = _RNG.randint(1, 200)
+        b = _RNG.randint(1, 200)
+        return f"(({value+a})+{b}-{a}-{b})"
+
+    if style == 4:
+        a = _RNG.randint(1, 100)
+        return f"(({value}*1)+{a}-{a})"
+
+    if style == 5:
+        a = _RNG.randint(2, 31)
+        return f"(({value}*{a})/{a})"
+
+    if style == 6:
+        a = _RNG.randint(1, 300)
+        return f"(({value}~={value+a}) and {value} or {value})"
+
+    if style == 7:
+        a = _RNG.randint(1, 1000)
+        return f"(({value}+{a})-{a})"
+
+    a = _RNG.randint(2, 19)
+    return f"(({value}*{a})/{a})"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LUA ESCAPING
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _lua_escape_bytes(data):
+    return "".join(
+        f"\\{int(value):03d}"
+        for value in data
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# RANDOM TOKEN ALPHABET
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _make_token_alphabet():
+    candidates = list(
+        "!#$%&()*+,-./:;<=>?@[]^_{|}~"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+    )
+
+    token_zero = _RNG.choice(candidates)
+
+    remaining = [
+        character
+        for character in candidates
+        if character != token_zero
+    ]
+
+    token_one = _RNG.choice(remaining)
+
+    return token_zero, token_one
+
+
+def _encode_binary_tokens(
+    data,
+    token_zero,
+    token_one
+):
+    output = []
+
+    for value in data:
+        value = _u8(value)
+
+        for shift in range(7, -1, -1):
+            if value & (1 << shift):
+                output.append(token_one)
+            else:
+                output.append(token_zero)
+
+    return "".join(output)
+
+
+def _decode_binary_tokens(
+    tokens,
+    token_zero,
+    token_one
+):
+    if not isinstance(tokens, str):
+        raise TypeError(
+            "Token payload must be a string."
+        )
+
+    if len(tokens) % 8 != 0:
+        raise ValueError(
+            "Token payload is not byte aligned."
+        )
+
+    output = bytearray()
+
+    for cursor in range(
+        0,
+        len(tokens),
+        8
+    ):
+        value = 0
+
+        for character in tokens[
+            cursor:
+            cursor + 8
+        ]:
+            value <<= 1
+
+            if character == token_one:
+                value |= 1
+
+            elif character != token_zero:
+                raise ValueError(
+                    "Invalid token character."
+                )
+
+        output.append(value)
+
+    return bytes(output)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# RANDOM FRAGMENTATION
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _fragment_tokens(encoded, min_chunks=13, max_chunks=113):
+    fragments = []
+    cursor = 0
+
+    while cursor < len(encoded):
+        amount = (
+            _RNG.randint(min_chunks, max_chunks)
+            * 8
+        )
+
+        fragments.append(
+            encoded[
+                cursor:
+                cursor + amount
+            ]
+        )
+
+        cursor += amount
+
+    indexed = list(
+        enumerate(fragments)
+    )
+
+    _RNG.shuffle(indexed)
+
+    return indexed
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# RUNTIME NOISE
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _make_noise_expression():
+    a = _RNG.randint(1000, 9000)
+    b = _RNG.randint(1000, 9000)
+
+    return (
+        f"(({a}*{b})-"
+        f"({a}*{b}))"
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# RAW PUBLISHING IS OVERRIDDEN BELOW TO USE THIS SERVICE'S OWN /raw STORE.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
 
 def _get_or_create_secret(env_name: str, file_name: str) -> str:
     """Load a secret from env, else from a local file, else generate+persist one."""
@@ -2913,6 +3580,16 @@ RAW_LOADER_GET_RATE_WINDOW = 10.0
 RAW_LOADER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
 
+def _publish_local_payload(payload: str):
+    if not isinstance(payload, str) or not payload.strip():
+        raise ValueError("Raw payload is empty.")
+    loader_id = _create_raw_loader_id()
+    path = _raw_loader_path(loader_id)
+    _atomic_write(path, payload, mode=0o600)
+    raw_url = f"https://dexnotifier.xyz/raw/{loader_id}"
+    return raw_url, loader_id
+
+
 def _raw_loader_path(loader_id: str) -> str:
     if not RAW_LOADER_ID_PATTERN.fullmatch(loader_id):
         raise ValueError("Invalid loader id.")
@@ -3024,6 +3701,1307 @@ async def get_raw_loader(loader_id: str, request: Request):
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+OBF_LEVELS = {
+    "light": {"block1": (31, 53), "block2": (35, 59), "decoys": (16, 24), "fragment": (45, 85)},
+    "medium": {"block1": (23, 49), "block2": (27, 55), "decoys": (64, 96), "fragment": (25, 65)},
+    "hard": {"block1": (17, 53), "block2": (19, 59), "decoys": (128, 192), "fragment": (13, 113)},
+}
+
+def normalize_obf_level(level):
+    level = str(level or "hard").strip().lower()
+    if level in {"lightly", "light"}:
+        return "light"
+    if level in {"medium"}:
+        return "medium"
+    if level in {"hard"}:
+        return "hard"
+    raise ValueError("Invalid obfuscation level. Choose lightly, medium, or hard.")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OBFUSCATOR
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _build_loadstring(raw_url):
+    """Build the exact loader text shown to the user/copy controls."""
+    if not isinstance(raw_url, str):
+        raw_url = str(raw_url)
+
+    raw_url = raw_url.strip()
+    if not raw_url:
+        raise ValueError("Raw loader URL is empty.")
+
+    # JSON string quoting is also valid Lua string quoting for URLs and avoids
+    # accidental breakage if the URL ever contains a quote or backslash.
+    return "loadstring(game:HttpGet(" + json.dumps(raw_url) + "))()"
+
+
+def obfuscate_lua(source: str, publish=True, level="hard") -> str:
+
+    if source is None:
+        raise ValueError(
+            "No Lua source was supplied."
+        )
+
+    if not isinstance(source, str):
+        source = str(source)
+
+    if not source.strip():
+        raise ValueError(
+            "Lua source is empty."
+        )
+
+    level = normalize_obf_level(level)
+    profile = OBF_LEVELS[level]
+
+    src = source.encode("utf-8")
+
+    if not src:
+        raise ValueError(
+            "Lua source is empty."
+        )
+
+    used = set()
+
+    def N():
+        return _unique_name(used)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # RANDOM IDENTIFIERS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    V_BYTE       = N()
+    V_CHAR       = N()
+    V_LEN        = N()
+    V_CONCAT     = N()
+    V_INSERT     = N()
+    V_FLOOR      = N()
+    V_LOAD       = N()
+
+    V_XOR        = N()
+
+    V_SEED1      = N()
+    V_SEED2      = N()
+    V_SEED3      = N()
+    V_SEED4      = N()
+
+    V_SEED5      = N()
+    V_SEED6      = N()
+    V_SEED7      = N()
+    V_SEED8      = N()
+
+    V_BLOCKSIZE  = N()
+    V_BLOCKSIZE2 = N()
+
+    V_PARTS      = N()
+    V_PAYLOAD    = N()
+    V_DECODED    = N()
+    V_SOURCE     = N()
+    V_RESULT     = N()
+
+    V_BLOCKLEN   = N()
+    V_STATE      = N()
+    V_PERM       = N()
+
+    V_I          = N()
+    V_J          = N()
+    V_K          = N()
+
+    V_ORIGINAL   = N()
+    V_ABSOLUTE   = N()
+
+    V_VALUE      = N()
+    V_ROTATION   = N()
+    V_ADD        = N()
+    V_X          = N()
+
+    V_PREVIOUS   = N()
+    V_CURRENT    = N()
+    V_FEEDBACK   = N()
+    V_FINALMIX   = N()
+
+    V_H1         = N()
+    V_H2         = N()
+    V_H3         = N()
+    V_H4         = N()
+
+    V_EXPECT1    = N()
+    V_EXPECT2    = N()
+    V_EXPECT3    = N()
+    V_EXPECT4    = N()
+
+    V_CH1        = N()
+    V_CH2        = N()
+    V_CH3        = N()
+
+    V_CEXPECT1   = N()
+    V_CEXPECT2   = N()
+    V_CEXPECT3   = N()
+
+    V_LENGTH     = N()
+    V_EXPECTLEN  = N()
+
+    V_NOISE      = N()
+
+    V_FN         = N()
+    V_ERR        = N()
+
+    V_BITCOUNT   = N()
+    V_BYTEVALUE  = N()
+    V_TOKEN     = N()
+
+    V_ZEROCHAR   = N()
+    V_ONECHAR    = N()
+
+    V_GUARD      = N()
+    V_GUARD2     = N()
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # RANDOM BUILD STATE
+    # ═══════════════════════════════════════════════════════════════════════
+
+    seed1 = _RNG.randint(0, 0xFFFF)
+    seed2 = _RNG.randint(0, 0xFFFF)
+    seed3 = _RNG.randint(0, 0xFFFF)
+    seed4 = _RNG.randint(0, 0xFFFF)
+
+    seed5 = _RNG.randint(0, 0xFFFF)
+    seed6 = _RNG.randint(0, 0xFFFF)
+    seed7 = _RNG.randint(0, 0xFFFF)
+    seed8 = _RNG.randint(0, 0xFFFF)
+
+    block_size = _RNG.randint(*profile["block1"])
+    block_size2 = _RNG.randint(*profile["block2"])
+
+    token_zero, token_one = (
+        _make_token_alphabet()
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # FIRST CIPHER LAYER
+    # ═══════════════════════════════════════════════════════════════════════
+
+    encrypted1 = _encrypt_round(
+        src,
+        seed1,
+        seed2,
+        seed3,
+        seed4,
+        block_size
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SECOND CIPHER LAYER
+    # ═══════════════════════════════════════════════════════════════════════
+
+    encrypted2 = _encrypt_round(
+        encrypted1,
+        seed5,
+        seed6,
+        seed7,
+        seed8,
+        block_size2
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # INTERNAL ROUND-TRIP TEST
+    # ═══════════════════════════════════════════════════════════════════════
+
+    test1 = _decrypt_round(
+        encrypted2,
+        seed5,
+        seed6,
+        seed7,
+        seed8,
+        block_size2
+    )
+
+    test2 = _decrypt_round(
+        test1,
+        seed1,
+        seed2,
+        seed3,
+        seed4,
+        block_size
+    )
+
+    if test2 != src:
+        raise RuntimeError(
+            "Internal encryption/decryption error."
+        )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # INTEGRITY VALUES
+    # ═══════════════════════════════════════════════════════════════════════
+
+    expected_h1, expected_h2, expected_h3, expected_h4 = (
+        _integrity_digest(src)
+    )
+
+    expected_ch1, expected_ch2, expected_ch3 = (
+        _cipher_digest(encrypted2)
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TOKEN ENCODING
+    # ═══════════════════════════════════════════════════════════════════════
+
+    token_payload = _encode_binary_tokens(
+        encrypted2,
+        token_zero,
+        token_one
+    )
+
+    if _decode_binary_tokens(
+        token_payload,
+        token_zero,
+        token_one
+    ) != encrypted2:
+        raise RuntimeError(
+            "Binary token encoder failure."
+        )
+
+    indexed_fragments = _fragment_tokens(
+        token_payload, profile["fragment"][0], profile["fragment"][1]
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # OUTPUT
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines = []
+
+    lines.append(
+        "-- This file was protected using Dex Obfustucator v3.2 [.gg/dexfinder]"
+    )
+
+    lines.append("")
+    lines.append("")
+
+    lines.append(
+        "return(function(...)"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # STANDARD FUNCTIONS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_BYTE}=string.byte"
+    )
+
+    lines.append(
+        f"local {V_CHAR}=string.char"
+    )
+
+    lines.append(
+        f"local {V_LEN}=string.len"
+    )
+
+    lines.append(
+        f"local {V_CONCAT}=table.concat"
+    )
+
+    lines.append(
+        f"local {V_INSERT}=table.insert"
+    )
+
+    lines.append(
+        f"local {V_FLOOR}=math.floor"
+    )
+
+    lines.append(
+        f"local {V_LOAD}=loadstring or load"
+    )
+
+    lines.append(
+        f"if not {V_LOAD} then "
+        f"error('Loadstring Is Not Supported On This Executer') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PURE LUA XOR
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local function {V_XOR}({V_I},{V_J})"
+    )
+
+    lines.append(
+        f"{V_I}={V_I}%256"
+    )
+
+    lines.append(
+        f"{V_J}={V_J}%256"
+    )
+
+    lines.append(
+        f"local {V_K}=0"
+    )
+
+    lines.append(
+        f"local {V_X}=1"
+    )
+
+    lines.append(
+        f"while {V_I}>0 or {V_J}>0 do"
+    )
+
+    lines.append(
+        f"local {V_VALUE}={V_I}%2"
+    )
+
+    lines.append(
+        f"local {V_ADD}={V_J}%2"
+    )
+
+    lines.append(
+        f"if {V_VALUE}~={V_ADD} then "
+        f"{V_K}={V_K}+{V_X} "
+        f"end"
+    )
+
+    lines.append(
+        f"{V_I}={V_FLOOR}({V_I}/2)"
+    )
+
+    lines.append(
+        f"{V_J}={V_FLOOR}({V_J}/2)"
+    )
+
+    lines.append(
+        f"{V_X}={V_X}*2"
+    )
+
+    lines.append("end")
+
+    lines.append(
+        f"return {V_K}%256"
+    )
+
+    lines.append("end")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SEEDS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    for variable, value in (
+        (V_SEED1, seed1),
+        (V_SEED2, seed2),
+        (V_SEED3, seed3),
+        (V_SEED4, seed4),
+        (V_SEED5, seed5),
+        (V_SEED6, seed6),
+        (V_SEED7, seed7),
+        (V_SEED8, seed8),
+        (V_BLOCKSIZE, block_size),
+        (V_BLOCKSIZE2, block_size2),
+    ):
+        lines.append(
+            f"local {variable}={_num_expr(value)}"
+        )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TOKEN ALPHABET
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_ZEROCHAR}={_num_expr(ord(token_zero))}"
+    )
+
+    lines.append(
+        f"local {V_ONECHAR}={_num_expr(ord(token_one))}"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # RUNTIME GUARDS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    noise_a = _RNG.randint(1000, 9000)
+    noise_b = _RNG.randint(1000, 9000)
+
+    lines.append(
+        f"local {V_NOISE}=("
+        f"{_num_expr(noise_a)}*"
+        f"{_num_expr(noise_b)}-"
+        f"{_num_expr(noise_a)}*"
+        f"{_num_expr(noise_b)}"
+        f")"
+    )
+
+    lines.append(
+        f"if {V_NOISE}~={_num_expr(0)} then "
+        f"return nil "
+        f"end"
+    )
+
+    guard_value = _RNG.randint(
+        1000,
+        50000
+    )
+
+    guard_a = _RNG.randint(
+        100,
+        10000
+    )
+
+    guard_b = guard_value - guard_a
+
+    lines.append(
+        f"local {V_GUARD}=("
+        f"{_num_expr(guard_a)}+"
+        f"{_num_expr(guard_b)}"
+        f")"
+    )
+
+    lines.append(
+        f"if {V_GUARD}~={_num_expr(guard_value)} then "
+        f"error('Internal Error') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # DECOY RUNTIME ENVIRONMENT
+    # ═══════════════════════════════════════════════════════════════════════
+    #
+    # Non-semantic local environment noise. These fields are unrelated to the
+    # payload/decryption state and are discarded before decoding.
+
+    V_FENV      = N()
+    V_FACC      = N()
+    V_FTMP      = N()
+
+    decoy_count = _RNG.randint(*profile["decoys"])
+    decoys = []
+
+    lines.append(
+        f"local {V_FENV}={{}}"
+    )
+
+    lines.append(
+        f"local {V_FACC}=0"
+    )
+
+    for _ in range(decoy_count):
+        field = _rand_name(_RNG.randint(9, 17))
+        value = _RNG.randint(0, 65535)
+        add = _RNG.randint(1, 65535)
+
+        decoys.append((field, value))
+
+        lines.append(
+            f"{V_FENV}.{field}={_num_expr(value)}"
+        )
+
+        lines.append(
+            f"{V_FENV}.{field}={V_FENV}.{field}+"
+            f"{_num_expr(add)}-{_num_expr(add)}"
+        )
+
+        lines.append(
+            f"{V_FACC}={V_FACC}+({V_FENV}.{field}%257)"
+        )
+
+    expected_acc = sum(
+        value % 257
+        for _, value in decoys
+    )
+
+    lines.append(
+        f"local {V_FTMP}=({V_FACC}%{_num_expr(1000003)})"
+    )
+
+    lines.append(
+        f"if {V_FTMP}~={_num_expr(expected_acc % 1000003)} then "
+        f"error('Internal Error') end"
+    )
+
+    lines.append(
+        f"{V_FENV}=nil"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TOKEN PAYLOAD
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_PARTS}={{}}"
+    )
+
+    for index, fragment in indexed_fragments:
+
+        escaped = _lua_escape_bytes(
+            fragment.encode("ascii")
+        )
+
+        lines.append(
+            f"{V_PARTS}[{index+1}]=\"{escaped}\""
+        )
+
+    lines.append(
+        f"local {V_PAYLOAD}="
+        f"{V_CONCAT}({V_PARTS})"
+    )
+
+    lines.append(
+        f"local {V_EXPECTLEN}="
+        f"{_num_expr(len(encrypted2))}"
+    )
+
+    lines.append(
+        f"if {V_LEN}({V_PAYLOAD})~="
+        f"({V_EXPECTLEN}*8) then "
+        f"error('Protected payload length failure') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TOKEN DECODER
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_DECODED}={{}}"
+    )
+
+    lines.append(
+        f"local {V_I}=1"
+    )
+
+    lines.append(
+        f"local {V_LENGTH}={V_LEN}({V_PAYLOAD})"
+    )
+
+    lines.append(
+        f"while {V_I}<={V_LENGTH} do"
+    )
+
+    lines.append(
+        f"local {V_BYTEVALUE}=0"
+    )
+
+    lines.append(
+        f"for {V_BITCOUNT}=1,8 do"
+    )
+
+    lines.append(
+        f"local {V_TOKEN}="
+        f"{V_BYTE}("
+        f"{V_PAYLOAD},"
+        f"{V_I}+{V_BITCOUNT}-1"
+        f")"
+    )
+
+    lines.append(
+        f"if {V_TOKEN}=={V_ONECHAR} then "
+        f"{V_BYTEVALUE}="
+        f"{V_BYTEVALUE}*2+1 "
+        f"elseif {V_TOKEN}=={V_ZEROCHAR} then "
+        f"{V_BYTEVALUE}="
+        f"{V_BYTEVALUE}*2 "
+        f"else "
+        f"error('Protected token validation failure') "
+        f"end"
+    )
+
+    lines.append("end")
+
+    lines.append(
+        f"{V_INSERT}("
+        f"{V_DECODED},"
+        f"{V_CHAR}({V_BYTEVALUE})"
+        f")"
+    )
+
+    lines.append(
+        f"{V_I}={V_I}+8"
+    )
+
+    lines.append("end")
+
+    lines.append(
+        f"local {V_SOURCE}="
+        f"{V_CONCAT}({V_DECODED})"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # CIPHER LENGTH
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"if {V_LEN}({V_SOURCE})~="
+        f"{V_EXPECTLEN} then "
+        f"error('Internal Error') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # CIPHER INTEGRITY
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_CH1}=0x5A31"
+    )
+
+    lines.append(
+        f"local {V_CH2}=0x71C9"
+    )
+
+    lines.append(
+        f"local {V_CH3}=0x42D7"
+    )
+
+    lines.append(
+        f"for {V_I}=1,{V_LEN}({V_SOURCE}) do"
+    )
+
+    lines.append(
+        f"local {V_VALUE}="
+        f"{V_BYTE}({V_SOURCE},{V_I})"
+    )
+
+    lines.append(
+        f"{V_CH1}=("
+        f"{V_CH1}*251+"
+        f"{V_VALUE}+"
+        f"{V_I}*3"
+        f")%65536"
+    )
+
+    lines.append(
+        f"{V_CH2}=("
+        f"{V_CH2}*277+"
+        f"{V_VALUE}*7+"
+        f"{V_I}*13"
+        f")%65536"
+    )
+
+    lines.append(
+        f"{V_CH3}=("
+        f"{V_CH3}*283+"
+        f"{V_VALUE}*11+"
+        f"{V_I}*19"
+        f")%65536"
+    )
+
+    lines.append("end")
+
+    lines.append(
+        f"local {V_CEXPECT1}="
+        f"{_num_expr(expected_ch1)}"
+    )
+
+    lines.append(
+        f"local {V_CEXPECT2}="
+        f"{_num_expr(expected_ch2)}"
+    )
+
+    lines.append(
+        f"local {V_CEXPECT3}="
+        f"{_num_expr(expected_ch3)}"
+    )
+
+    lines.append(
+        f"if {V_CH1}~={V_CEXPECT1} or "
+        f"{V_CH2}~={V_CEXPECT2} or "
+        f"{V_CH3}~={V_CEXPECT3} then "
+        f"error('Internal Error') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TWO-LAYER DECRYPTION
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def emit_decryption_layer(
+        layer_seed1,
+        layer_seed2,
+        layer_seed3,
+        layer_seed4,
+        layer_block_size,
+    ):
+        lines.append(
+            f"local {V_RESULT}={{}}"
+        )
+
+        lines.append(
+            f"local {V_I}=1"
+        )
+
+        lines.append(
+            f"while {V_I}<={V_LEN}({V_SOURCE}) do"
+        )
+
+        lines.append(
+            f"local {V_BLOCKLEN}=math.min("
+            f"{layer_block_size},"
+            f"{V_LEN}({V_SOURCE})-{V_I}+1"
+            f")"
+        )
+
+        lines.append(
+            f"local {V_PERM}={{}}"
+        )
+
+        lines.append(
+            f"for {V_J}=1,{V_BLOCKLEN} do "
+            f"{V_PERM}[{V_J}]={V_J}-1 "
+            f"end"
+        )
+
+        lines.append(
+            f"{V_STATE}=("
+            f"{layer_seed1}+"
+            f"{layer_seed2}+"
+            f"{layer_seed3}*{V_I}+"
+            f"{layer_seed4}*{V_BLOCKLEN}+"
+            f"({V_I}-1)*{_MIX_A}"
+            f")%65536"
+        )
+
+        lines.append(
+            f"for {V_J}={V_BLOCKLEN},2,-1 do"
+        )
+
+        lines.append(
+            f"{V_STATE}=("
+            f"{V_STATE}*25173+"
+            f"13849+"
+            f"({V_J}-1)*97"
+            f")%65536"
+        )
+
+        lines.append(
+            f"local {V_K}=({V_STATE}%{V_J})+1"
+        )
+
+        lines.append(
+            f"local {V_X}={V_PERM}[{V_J}]"
+        )
+
+        lines.append(
+            f"{V_PERM}[{V_J}]={V_PERM}[{V_K}]"
+        )
+
+        lines.append(
+            f"{V_PERM}[{V_K}]={V_X}"
+        )
+
+        lines.append("end")
+
+        lines.append(
+            f"{V_STATE}=("
+            f"{layer_seed1}+"
+            f"{layer_seed3}+"
+            f"{V_I}*17+"
+            f"{V_BLOCKLEN}*{_MIX_B}"
+            f")%65536"
+        )
+
+        lines.append(
+            f"local {V_PREVIOUS}=("
+            f"{layer_seed4}+"
+            f"{V_I}-1+"
+            f"{V_BLOCKLEN}"
+            f")%256"
+        )
+
+        lines.append(
+            f"local {V_DECODED}={{}}"
+        )
+
+        lines.append(
+            f"for {V_J}=1,{V_BLOCKLEN} do"
+        )
+
+        lines.append(
+            f"local {V_ORIGINAL}="
+            f"{V_PERM}[{V_J}]"
+        )
+
+        lines.append(
+            f"local {V_ABSOLUTE}="
+            f"{V_I}+{V_ORIGINAL}"
+        )
+
+        lines.append(
+            f"{V_STATE}=("
+            f"{V_STATE}*25173+"
+            f"13849+"
+            f"{V_ORIGINAL}+"
+            f"({V_J}-1)+"
+            f"{V_BLOCKLEN}"
+            f")%65536"
+        )
+
+        lines.append(
+            f"local {V_VALUE}="
+            f"{V_BYTE}("
+            f"{V_SOURCE},"
+            f"{V_I}+{V_J}-1"
+            f")"
+        )
+
+        lines.append(
+            f"{V_CURRENT}={V_VALUE}"
+        )
+
+        lines.append(
+            f"local {V_FINALMIX}=("
+            f"math.floor({layer_seed4}/256)+"
+            f"({V_J}-1)*17+"
+            f"{V_ORIGINAL}*31+"
+            f"{V_STATE}"
+            f")%256"
+        )
+
+        lines.append(
+            f"{V_VALUE}="
+            f"{V_XOR}("
+            f"{V_VALUE},"
+            f"{V_FINALMIX}"
+            f")"
+        )
+
+        lines.append(
+            f"{V_FEEDBACK}="
+            f"{V_XOR}("
+            f"{V_PREVIOUS},"
+            f"math.floor({V_STATE}/256)"
+            f")"
+        )
+
+        lines.append(
+            f"{V_FEEDBACK}="
+            f"{V_XOR}("
+            f"{V_FEEDBACK},"
+            f"{layer_seed1}%256"
+            f")"
+        )
+
+        lines.append(
+            f"{V_FEEDBACK}="
+            f"{V_XOR}("
+            f"{V_FEEDBACK},"
+            f"{V_ABSOLUTE}*11"
+            f")%256"
+        )
+
+        lines.append(
+            f"{V_VALUE}="
+            f"{V_XOR}("
+            f"{V_VALUE},"
+            f"{V_FEEDBACK}"
+            f")"
+        )
+
+        lines.append(
+            f"local {V_X}=("
+            f"({layer_seed3}%256)+"
+            f"({V_J}-1)*29+"
+            f"({V_STATE}%256)+"
+            f"{V_ABSOLUTE}*7+"
+            f"{V_BLOCKLEN}*{_MIX_D}"
+            f")%256"
+        )
+
+        lines.append(
+            f"{V_VALUE}="
+            f"{V_XOR}("
+            f"{V_VALUE},"
+            f"{V_X}"
+            f")"
+        )
+
+        lines.append(
+            f"local {V_ADD}="
+            f"{V_XOR}("
+            f"{V_XOR}("
+            f"math.floor({V_STATE}/256)%256,"
+            f"{layer_seed4}%256"
+            f"),"
+            f"{V_ABSOLUTE}*13"
+            f")"
+        )
+
+        lines.append(
+            f"{V_ADD}="
+            f"{V_XOR}("
+            f"{V_ADD},"
+            f"({V_J}-1)*{_MIX_C}"
+            f")%256"
+        )
+
+        lines.append(
+            f"{V_VALUE}=("
+            f"{V_VALUE}-{V_ADD}"
+            f")%256"
+        )
+
+        lines.append(
+            f"local {V_ROTATION}=("
+            f"{layer_seed2}+"
+            f"{V_ORIGINAL}+"
+            f"({V_J}-1)+"
+            f"{V_STATE}+"
+            f"{V_BLOCKLEN}"
+            f")%8"
+        )
+
+        lines.append(
+            f"if {V_ROTATION}~=0 then"
+        )
+
+        lines.append(
+            f"local {V_X}=2^{V_ROTATION}"
+        )
+
+        lines.append(
+            f"local {V_ADD}=2^(8-{V_ROTATION})"
+        )
+
+        lines.append(
+            f"{V_VALUE}=("
+            f"{V_FLOOR}("
+            f"{V_VALUE}/{V_X}"
+            f")+"
+            f"(({V_VALUE}%{V_X})*{V_ADD})"
+            f")%256"
+        )
+
+        lines.append("end")
+
+        lines.append(
+            f"{V_DECODED}[{V_ORIGINAL}+1]="
+            f"{V_VALUE}"
+        )
+
+        lines.append(
+            f"{V_PREVIOUS}={V_CURRENT}"
+        )
+
+        lines.append("end")
+
+        lines.append(
+            f"for {V_J}=1,{V_BLOCKLEN} do"
+        )
+
+        lines.append(
+            f"{V_INSERT}("
+            f"{V_RESULT},"
+            f"{V_CHAR}("
+            f"{V_DECODED}[{V_J}]"
+            f")"
+            f")"
+        )
+
+        lines.append("end")
+
+        lines.append(
+            f"{V_I}={V_I}+{V_BLOCKLEN}"
+        )
+
+        lines.append("end")
+
+        lines.append(
+            f"{V_SOURCE}="
+            f"{V_CONCAT}({V_RESULT})"
+        )
+
+    emit_decryption_layer(
+        f"{V_SEED5}",
+        f"{V_SEED6}",
+        f"{V_SEED7}",
+        f"{V_SEED8}",
+        f"{V_BLOCKSIZE2}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED1}",
+        f"{V_SEED2}",
+        f"{V_SEED3}",
+        f"{V_SEED4}",
+        f"{V_BLOCKSIZE}",
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PLAINTEXT INTEGRITY
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_H1}=0x1357"
+    )
+
+    lines.append(
+        f"local {V_H2}=0x2468"
+    )
+
+    lines.append(
+        f"local {V_H3}=0x369C"
+    )
+
+    lines.append(
+        f"local {V_H4}=0x4ACE"
+    )
+
+    lines.append(
+        f"for {V_I}=1,{V_LEN}({V_SOURCE}) do"
+    )
+
+    lines.append(
+        f"local {V_VALUE}="
+        f"{V_BYTE}({V_SOURCE},{V_I})"
+    )
+
+    lines.append(
+        f"{V_H1}=("
+        f"{V_H1}*257+"
+        f"{V_VALUE}+"
+        f"{V_I}"
+        f")%65536"
+    )
+
+    lines.append(
+        f"{V_H2}=("
+        f"{V_H2}*263+"
+        f"{V_VALUE}*3+"
+        f"{V_I}*7"
+        f")%65536"
+    )
+
+    lines.append(
+        f"{V_H3}=("
+        f"{V_H3}*269+"
+        f"{V_VALUE}*5+"
+        f"{V_I}*11"
+        f")%65536"
+    )
+
+    lines.append(
+        f"{V_H4}=("
+        f"{V_H4}*271+"
+        f"{V_VALUE}*7+"
+        f"{V_I}*17"
+        f")%65536"
+    )
+
+    lines.append("end")
+
+    for variable, value in (
+        (V_EXPECT1, expected_h1),
+        (V_EXPECT2, expected_h2),
+        (V_EXPECT3, expected_h3),
+        (V_EXPECT4, expected_h4),
+    ):
+        lines.append(
+            f"local {variable}="
+            f"{_num_expr(value)}"
+        )
+
+    lines.append(
+        f"if {V_H1}~={V_EXPECT1} or "
+        f"{V_H2}~={V_EXPECT2} or "
+        f"{V_H3}~={V_EXPECT3} or "
+        f"{V_H4}~={V_EXPECT4} then "
+        f"error('Internal Error') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # FINAL LENGTH
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"if {V_LEN}({V_SOURCE})~="
+        f"{_num_expr(len(src))} then "
+        f"error('Internal Error') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # FINAL LOAD
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_FN},{V_ERR}="
+        f"{V_LOAD}({V_SOURCE})"
+    )
+
+    lines.append(
+        f"if not {V_FN} then "
+        f"error('Internal Error: '..tostring({V_ERR})) "
+        f"end"
+    )
+
+    lines.append(
+        f"return {V_FN}(...)"
+    )
+
+    lines.append(
+        "end)(...)"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # COMPACT OUTPUT
+    # ═══════════════════════════════════════════════════════════════════════
+
+    header = lines[0]
+
+    # TWO EMPTY LINES ARE INTENTIONAL.
+
+    opener = lines[3]
+
+    body = " ".join(
+        line.strip()
+        for line in lines[4:]
+        if line.strip()
+    )
+
+    payload = (
+        header
+        + "\n\n"
+        + opener
+        + body
+    )
+
+    if publish:
+        # The raw backend receives the complete executable payload. The Lua
+        # file itself must contain that payload, never the user-facing loader.
+        # The loader is exposed separately by obfuscate_lua_bundle().
+        _raw_backend_publish(payload)
+
+    return payload
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SAFE PUBLIC API
+# ═════════════════════════════════════════════════════════════════════════════
+
+def obfuscate_lua_bundle(source, publish=True, level="hard"):
+    """
+    Return the three separate pieces the Discord/UI layer needs.
+
+    lua_file
+        The actual .lua file. It contains:
+          line 1: header
+          line 2: blank
+          line 3: return:function(...) payload
+
+    pc_copy / mobile_copy
+        Plain text containing ONLY the loadstring. These are intentionally
+        outside the Lua file so the UI can provide independent PC/mobile
+        copy controls. Both values are identical by design.
+    """
+    if source is None:
+        raise ValueError(
+            "No Lua source was supplied."
+        )
+
+    if not isinstance(source, str):
+        source = str(source)
+
+    if not source.strip():
+        raise ValueError(
+            "Lua source is empty."
+        )
+
+    src = source.encode("utf-8")
+
+    # Build the protected Lua payload without publishing it twice.
+    level = normalize_obf_level(level)
+    lua_file = obfuscate_lua(source, publish=False, level=level)
+
+    if publish:
+        raw_url, _loader_id = _publish_local_payload(lua_file)
+        loader_text = _build_loadstring(raw_url)
+    else:
+        # A deterministic local placeholder is useful for tests. No fake
+        # loader is emitted to the Lua file.
+        loader_text = ""
+
+    # User-facing output for the Discord/UI layer.
+    # IMPORTANT: this does NOT change the actual Lua file.
+    display_text = (
+        "Loadstring Copy:\n"
+        + loader_text
+    )
+
+    return {
+        "lua_file": lua_file,
+        "loadstring": loader_text,
+        "pc_copy": loader_text,
+        "mobile_copy": loader_text,
+        "display_text": display_text,
+    }
+
+
+def obfuscate_lua_safe(source, publish=True):
+    """Legacy-safe API: returns ONLY the Lua file text."""
+    return obfuscate_lua(source, publish=publish)
+
+
+
+
+# -----------------------------
+# PUBLIC OBFUSCATOR WEBSITE + API
+# -----------------------------
+
+OBF_RATE_LIMIT = 8
+OBF_RATE_WINDOW = 60.0
+OBF_MAX_SOURCE = 2 * 1024 * 1024
+
+OBF_PAGE = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dex Obfuscator</title>
+<style>
+:root{color-scheme:dark;--bg:#070b14;--card:#0d1424;--line:#1d2940;--text:#edf3ff;--muted:#91a0bb;--accent:#7c5cff;--accent2:#22d3ee;--good:#35d07f}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 20% 0%,#18234a 0,#070b14 42%);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;color:var(--text);min-height:100vh}.wrap{width:min(980px,92%);margin:0 auto;padding:42px 0 70px}.hero{text-align:center;margin-bottom:28px}.badge{display:inline-flex;padding:7px 12px;border:1px solid #293654;border-radius:999px;color:#b8c6e2;background:#0c1323;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.hero h1{font-size:clamp(32px,7vw,56px);margin:14px 0 8px;letter-spacing:-.04em}.hero p{margin:0 auto;color:var(--muted);max-width:650px;line-height:1.6}.card{background:rgba(13,20,36,.9);border:1px solid var(--line);border-radius:22px;padding:22px;box-shadow:0 20px 70px rgba(0,0,0,.3);backdrop-filter:blur(12px)}label{display:block;font-weight:800;margin-bottom:10px}.editor{width:100%;min-height:330px;resize:vertical;border:1px solid #263552;border-radius:16px;background:#070c16;color:#dce7ff;padding:16px;font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;outline:none}.editor:focus{border-color:var(--accent)}.levels{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:16px 0}.level{position:relative}.level input{position:absolute;opacity:0}.level label{margin:0;padding:14px;border:1px solid #263552;border-radius:14px;cursor:pointer;background:#0a1120}.level input:checked+label{border-color:var(--accent);background:#17142d;box-shadow:0 0 0 1px var(--accent) inset}.level small{display:block;color:var(--muted);font-weight:500;margin-top:4px}.actions{display:flex;gap:10px;align-items:center}.btn{border:0;border-radius:14px;padding:14px 20px;font-weight:900;cursor:pointer;background:linear-gradient(135deg,var(--accent),#5c8dff);color:white;flex:1}.btn:disabled{opacity:.55;cursor:not-allowed}.status{color:var(--muted);font-size:13px}.results{display:none;margin-top:18px;gap:14px}.resultbox{border:1px solid var(--line);border-radius:16px;background:#080e1a;padding:14px}.resultbox h3{margin:0 0 9px;font-size:14px}.copyrow{display:flex;gap:8px}.out{flex:1;min-width:0;border:1px solid #263552;border-radius:10px;padding:11px;background:#050a12;color:#cfe0ff;font:13px/1.45 ui-monospace,monospace;word-break:break-all}.copy{border:1px solid #344563;background:#111a2d;color:#fff;border-radius:10px;padding:0 14px;font-weight:800;cursor:pointer}.hint{color:var(--muted);font-size:12px;margin-top:12px}.error{color:#ff8d9b}.ok{color:var(--good)}@media(max-width:640px){.wrap{padding-top:24px}.card{padding:15px;border-radius:18px}.editor{min-height:270px}.levels{grid-template-columns:1fr}.actions{flex-direction:column;align-items:stretch}.btn{width:100%}.copyrow{flex-direction:column}.copy{padding:12px}.hero h1{font-size:38px}}
+</style></head>
+<body><main class="wrap"><section class="hero"><span class="badge">Dex Obfuscator</span><h1>Protect your Lua</h1><p>Paste your raw Lua, choose a protection level, and get a ready-to-copy raw loadstring plus the protected payload.</p></section>
+<section class="card"><label for="source">Raw Lua source</label><textarea id="source" class="editor" spellcheck="false" placeholder="-- paste your Lua code here"></textarea>
+<div class="levels">
+<div class="level"><input id="light" name="level" type="radio" value="light"><label for="light">Lightly<small>Fastest • smaller output</small></label></div>
+<div class="level"><input id="medium" name="level" type="radio" value="medium" checked><label for="medium">Medium<small>Balanced protection</small></label></div>
+<div class="level"><input id="hard" name="level" type="radio" value="hard"><label for="hard">Hard<small>Maximum built-in noise</small></label></div>
+</div><div class="actions"><button class="btn" id="go">Obfuscate Lua</button><span class="status" id="status">Ready</span></div>
+<div class="results" id="results"><div class="resultbox"><h3>Raw loadstring</h3><div class="copyrow"><div class="out" id="loadstring"></div><button class="copy" data-copy="loadstring">Copy</button></div></div><div class="resultbox"><h3>Protected payload</h3><div class="copyrow"><div class="out" id="payload"></div><button class="copy" data-copy="payload">Copy</button></div><div class="hint">The downloadable payload contains the protected Lua itself. The loadstring only points at the raw endpoint.</div></div></div></section></main>
+<script>
+const $=id=>document.getElementById(id);const status=$('status');
+$('go').onclick=async()=>{const source=$('source').value;const level=document.querySelector('input[name=level]:checked').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return} $('go').disabled=true;status.textContent='Obfuscating…';status.className='status';try{const r=await fetch('/obfuscate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,level})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfuscation failed');$('loadstring').textContent=d.loadstring;$('payload').textContent=d.payload;$('results').style.display='grid';status.textContent='Done';status.className='status ok'}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
+document.querySelectorAll('.copy').forEach(b=>b.onclick=async()=>{const text=$(b.dataset.copy).textContent;await navigator.clipboard.writeText(text);const old=b.textContent;b.textContent='Copied';setTimeout(()=>b.textContent=old,900)});
+</script></body></html>'''
+
+@app.get("/obfuscate")
+async def obfuscate_page():
+    return HTMLResponse(OBF_PAGE)
+
+@app.post("/obfuscate")
+async def obfuscate_api(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "obfuscate", OBF_RATE_LIMIT, OBF_RATE_WINDOW):
+        return JSONResponse({"error": "Too many obfuscation requests. Try again shortly."}, status_code=429)
+    if reject_if_oversized(request, OBF_MAX_SOURCE + 32 * 1024):
+        return JSONResponse({"error": "Source is too large."}, status_code=413)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Expected JSON with source and level."}, status_code=400)
+    source = body.get("source", "") if isinstance(body, dict) else ""
+    level = body.get("level", "medium") if isinstance(body, dict) else "medium"
+    if not isinstance(source, str) or not source.strip():
+        return JSONResponse({"error": "Lua source is empty."}, status_code=400)
+    if len(source.encode("utf-8")) > OBF_MAX_SOURCE:
+        return JSONResponse({"error": "Source is too large (2 MB maximum)."}, status_code=413)
+    try:
+        level = normalize_obf_level(level)
+        bundle = obfuscate_lua_bundle(source, publish=True, level=level)
+        return JSONResponse({"ok": True, "level": level, "loadstring": bundle["loadstring"], "payload": bundle["lua_file"]})
+    except Exception as exc:
+        print(f"[OBF] failed: {exc}")
+        return JSONResponse({"error": "Obfuscation failed. Check that the source is valid Lua."}, status_code=400)
 
 
 # -----------------------------
