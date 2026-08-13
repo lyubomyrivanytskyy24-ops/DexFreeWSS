@@ -2896,6 +2896,137 @@ async def dexpaid(request: Request):
     return PlainTextResponse(await get_github_script("dexpaid", DEXPAID_FILE, DEFAULT_DEXPAID))
 
 # -----------------------------
+# RAW LOADER BACKEND
+# -----------------------------
+# The obfuscator POSTs the final Lua text here. This backend stores the
+# exact payload under a random loader id and returns a stable raw URL:
+#   https://dexapi1.up.railway.app/raw/<LOADER_ID>
+#
+# Set DEX_API_KEY on this service. The obfuscator sends the same value in
+# X-Api-Key (or its own DEX_RAW_BACKEND_API_KEY if you want a separate key).
+
+RAW_LOADER_DIR = os.environ.get("DEX_RAW_LOADER_DIR", "raw_loaders").strip() or "raw_loaders"
+RAW_LOADER_POST_RATE_LIMIT = 30
+RAW_LOADER_POST_RATE_WINDOW = 60.0
+RAW_LOADER_GET_RATE_LIMIT = 120
+RAW_LOADER_GET_RATE_WINDOW = 10.0
+RAW_LOADER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+
+
+def _raw_loader_path(loader_id: str) -> str:
+    if not RAW_LOADER_ID_PATTERN.fullmatch(loader_id):
+        raise ValueError("Invalid loader id.")
+    return os.path.join(RAW_LOADER_DIR, loader_id + ".lua")
+
+
+def _create_raw_loader_id() -> str:
+    os.makedirs(RAW_LOADER_DIR, exist_ok=True)
+    for _ in range(10):
+        loader_id = secrets.token_urlsafe(18).rstrip("=")
+        if RAW_LOADER_ID_PATTERN.fullmatch(loader_id):
+            path = _raw_loader_path(loader_id)
+            if not os.path.exists(path):
+                return loader_id
+    raise RuntimeError("Could not allocate a unique loader id.")
+
+
+@app.post("/raw")
+async def create_raw_loader(request: Request):
+    ip = _client_ip(request)
+
+    if rate_limited(
+        ip,
+        "raw_loader_post",
+        max_requests=RAW_LOADER_POST_RATE_LIMIT,
+        window_seconds=RAW_LOADER_POST_RATE_WINDOW,
+    ):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    api_key = request.headers.get("X-Api-Key", "")
+    if not is_valid_key(api_key):
+        await record_failed_attempt("raw_loader_auth", ip)
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    if reject_if_oversized(request, MAX_SCRIPT_BODY):
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
+    try:
+        body = await request.body()
+    except Exception:
+        return JSONResponse({"error": "invalid request body"}, status_code=400)
+
+    if len(body) > MAX_SCRIPT_BODY:
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
+    try:
+        payload = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return JSONResponse({"error": "payload must be UTF-8 text"}, status_code=400)
+
+    if not payload.strip():
+        return JSONResponse({"error": "payload is empty"}, status_code=400)
+
+    if _NUL_BYTE_PATTERN.search(payload):
+        return JSONResponse({"error": "payload contains NUL bytes"}, status_code=400)
+
+    try:
+        loader_id = _create_raw_loader_id()
+        path = _raw_loader_path(loader_id)
+        _atomic_write(path, payload, mode=0o600)
+    except Exception as exc:
+        print(f"[RAW_LOADER] Failed to store payload: {exc}")
+        return JSONResponse({"error": "could not store payload"}, status_code=500)
+
+    await clear_attempts("raw_loader_auth", ip)
+
+    raw_url = f"{BASE_URL}/raw/{loader_id}"
+    return JSONResponse(
+        {
+            "ok": True,
+            "loader_id": loader_id,
+            "raw_url": raw_url,
+            "loadstring": f'loadstring(game:HttpGet("{raw_url}"))()',
+        }
+    )
+
+
+@app.get("/raw/{loader_id}")
+async def get_raw_loader(loader_id: str, request: Request):
+    ip = _client_ip(request)
+
+    if rate_limited(
+        ip,
+        "raw_loader_get",
+        max_requests=RAW_LOADER_GET_RATE_LIMIT,
+        window_seconds=RAW_LOADER_GET_RATE_WINDOW,
+    ):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
+    if not RAW_LOADER_ID_PATTERN.fullmatch(loader_id):
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+
+    path = _raw_loader_path(loader_id)
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = f.read()
+    except FileNotFoundError:
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+    except Exception as exc:
+        print(f"[RAW_LOADER] Failed to read {loader_id}: {exc}")
+        return PlainTextResponse("INTERNAL_ERROR", status_code=500)
+
+    return PlainTextResponse(
+        payload,
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+# -----------------------------
 # DYNAMIC LOADER ENDPOINTS - rate-limited, with a separate failed-attempt
 # lockout on wrong paid keys / HWID mismatches per IP.
 # -----------------------------
