@@ -17,10 +17,45 @@ from typing import Set, Dict, Any, Optional
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse, RedirectResponse
 import uvicorn
 
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+
+class AnnouncementHTMLMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        content_type = response.headers.get("content-type", "").lower()
+        if "text/html" not in content_type:
+            return response
+        body = b""
+        async for chunk in response.body_iterator:
+            body += chunk
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
+            return response
+        async with announcement_lock:
+            msg = announcement_text
+        if msg and "</body>" in text:
+            aid = hashlib.sha256(msg.encode("utf-8")).hexdigest()[:16]
+            safe = html.escape(msg)
+            widget = (
+                '<div id="dn-site-announcement" data-id="'+aid+'" role="status">'
+                '<div class="dn-ann-icon">!</div><div class="dn-ann-copy"><span>DEXNOTIFIER</span><strong>'+safe+'</strong></div>'
+                '<button id="dn-ann-close" type="button" aria-label="Dismiss">&times;</button></div>'
+                '<style>#dn-site-announcement{position:fixed;z-index:999999;top:18px;left:50%;transform:translate(-50%,-18px);width:min(calc(100% - 24px),900px);display:flex;align-items:center;gap:13px;padding:13px 14px;border:1px solid rgba(129,140,248,.32);border-radius:18px;background:rgba(8,10,16,.90);box-shadow:0 24px 80px rgba(0,0,0,.48),0 0 50px rgba(99,102,241,.12);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);color:#fff;font-family:Inter,system-ui,sans-serif;opacity:0;animation:dnAnnIn .38s ease .05s forwards}.dn-ann-icon{width:34px;height:34px;flex:0 0 34px;border-radius:11px;display:grid;place-items:center;background:linear-gradient(135deg,#6366f1,#22d3ee);font-weight:900}.dn-ann-copy{min-width:0;flex:1;display:flex;flex-direction:column;gap:2px}.dn-ann-copy span{font-size:9px;letter-spacing:.18em;font-weight:900;color:#9ca3ff}.dn-ann-copy strong{font-size:13px;line-height:1.45;color:#f8fafc;overflow-wrap:anywhere}#dn-ann-close{width:34px;height:34px;flex:0 0 34px;border:1px solid rgba(255,255,255,.10);border-radius:10px;background:rgba(255,255,255,.05);color:#cbd5e1;font-size:21px;cursor:pointer;transition:.18s ease}#dn-ann-close:hover{color:#fff;background:rgba(255,255,255,.10);transform:scale(1.05)}@keyframes dnAnnIn{to{opacity:1;transform:translate(-50%,0)}}#dn-site-announcement.dn-hide{animation:dnAnnOut .22s ease forwards}@keyframes dnAnnOut{to{opacity:0;transform:translate(-50%,-12px)}}@media(max-width:640px){#dn-site-announcement{top:10px;width:calc(100% - 16px);padding:10px;border-radius:15px}.dn-ann-icon{width:30px;height:30px;flex-basis:30px}.dn-ann-copy strong{font-size:12px}#dn-ann-close{width:30px;height:30px;flex-basis:30px}}}</style>'
+                '<script>(()=>{const e=document.getElementById("dn-site-announcement");if(!e)return;const k="dn-announcement-dismissed:"+e.dataset.id;if(localStorage.getItem(k)==="1"){e.remove();return}document.getElementById("dn-ann-close").onclick=()=>{e.classList.add("dn-hide");localStorage.setItem(k,"1");setTimeout(()=>e.remove(),240)}})();</script>'
+            )
+            text = text.replace("</body>", widget + "</body>", 1)
+        from starlette.responses import Response
+        headers = dict(response.headers)
+        headers.pop("content-length", None)
+        return Response(content=text.encode("utf-8"), status_code=response.status_code, headers=headers, media_type=response.media_type)
+
+app.add_middleware(AnnouncementHTMLMiddleware)
 START_TIME = time.time()
 
 
@@ -905,6 +940,7 @@ def _get_or_create_secret(env_name: str, file_name: str) -> str:
 # you want to actually secure (this default is visible to anyone who can
 # read this source file).
 API_KEY = (os.environ.get("DEX_API_KEY", "").strip() or "")
+ADMIN_PASSWORD = (os.environ.get("DEX_ADMIN_PASSWORD", "").strip() or API_KEY)
 SECRET_KEY = _get_or_create_secret("DEX_SECRET_KEY", ".dex_secret_key")
 BASE_URL = os.environ.get("DEX_BASE_URL", "https://dexapi1.up.railway.app").rstrip("/")
 
@@ -1377,6 +1413,7 @@ BLACKLIST_FILE = "blacklisted.txt"
 LOGS_FILE = "logs.txt"
 DEXPAID_KEYS_FILE = "dexpaid_keys.json"
 BANNER_FILE = "banner.txt"
+ANNOUNCEMENT_FILE = "announcement.txt"
 
 USERS_FILE = "users.json"
 SCRIPTS_FILE = "scripts.json"
@@ -1447,8 +1484,18 @@ viewers: Set[WebSocket] = set()
 sender_ws: Optional[WebSocket] = None
 ws_ip_connection_counts: Dict[str, int] = defaultdict(int)
 
-announcement_text: str = ""
-announcement_timestamp: float = 0.0
+def load_announcement_from_file() -> str:
+    if not os.path.exists(ANNOUNCEMENT_FILE):
+        return ""
+    try:
+        with open(ANNOUNCEMENT_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+announcement_text: str = load_announcement_from_file()
+announcement_timestamp: float = time.time() if announcement_text else 0.0
 
 dexpaid_keys: Dict[str, float] = {}
 last_generated_paid_key: str = ""
@@ -1592,6 +1639,18 @@ def load_banner_from_file() -> str:
 def save_banner_to_file(text: str):
     _atomic_write(BANNER_FILE, text, mode=0o644)
 
+
+def load_announcement_from_file() -> str:
+    if not os.path.exists(ANNOUNCEMENT_FILE):
+        return ""
+    try:
+        with open(ANNOUNCEMENT_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+def save_announcement_to_file(text: str):
+    _atomic_write(ANNOUNCEMENT_FILE, text, mode=0o644)
 
 banner_text: str = load_banner_from_file()
 
@@ -1845,7 +1904,7 @@ hr{border:0!important;border-top:1px solid rgba(75,94,130,.25)!important}
 .badge,.pill,.tag{border-radius:999px!important;background:rgba(124,92,255,.12)!important;border:1px solid rgba(124,92,255,.30)!important;color:#cfd5ff!important}
 .status.ok,.success{color:var(--dex-green)!important}.status.error,.error{color:var(--dex-red)!important}
 ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-track{background:#060a12}::-webkit-scrollbar-thumb{background:#243453;border-radius:999px;border:2px solid #060a12}::-webkit-scrollbar-thumb:hover{background:#354a73}
-@media(max-width:700px){body{font-size:14px}.wrap,.container{width:min(100% - 24px,1180px)!important;margin-left:auto!important;margin-right:auto!important}.card,.panel,.container,.box,.resultbox,.result,.script-card,.admin-card,.section,.hero-card,.feature,.stat,.table-wrap,.auth-card{border-radius:16px!important}.grid{grid-template-columns:1fr!important}.copyrow{flex-direction:column!important}.actions{flex-direction:column!important;align-items:stretch!important}button,.btn,input[type=submit],input[type=button]{min-height:46px}}
+@media(max-width:1100px){.wrap,.container{width:min(100% - 32px,1180px)!important;margin-left:auto!important;margin-right:auto!important}.grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}.table-wrap{overflow-x:auto!important}.dn-home-inner{width:100%!important}.dn-hero{grid-template-columns:1fr!important}.dn-bottom{grid-template-columns:repeat(2,minmax(0,1fr))!important}}@media(max-width:700px){body{font-size:14px}.wrap,.container{width:min(100% - 24px,1180px)!important;margin-left:auto!important;margin-right:auto!important}.card,.panel,.container,.box,.resultbox,.result,.script-card,.admin-card,.section,.hero-card,.feature,.stat,.table-wrap,.auth-card{border-radius:16px!important}.grid{grid-template-columns:1fr!important}.copyrow{flex-direction:column!important}.actions{flex-direction:column!important;align-items:stretch!important}.dn-bottom{grid-template-columns:1fr!important}.dn-nav{flex-wrap:wrap}.dn-actions{flex-direction:column}.dn-actions a{width:100%}button,.btn,input[type=submit],input[type=button]{min-height:46px}}
 </style>"""
         body = response.body
         if b"dex-global-skin" not in body:
@@ -2350,12 +2409,16 @@ async def post_announcement(request: Request):
     raw = await request.body()
     if len(raw) > MAX_GENERIC_BODY:
         return PlainTextResponse("PAYLOAD TOO LARGE", status_code=413)
-    msg = raw.decode(errors="ignore").strip()
-
+    msg = normalize_field(raw.decode("utf-8", errors="ignore").strip())
+    if len(msg) > MAX_BANNER_LEN:
+        return PlainTextResponse("TOO_LONG", status_code=400)
+    if _CONTROL_CHAR_PATTERN.search(msg):
+        return PlainTextResponse("REJECTED_INVALID_CHARACTERS", status_code=400)
     async with announcement_lock:
         announcement_text = msg
-        announcement_timestamp = time.time()
-
+        announcement_timestamp = time.time() if msg else 0.0
+        save_announcement_to_file(announcement_text)
+    await clear_attempts("announcement_auth", ip)
     return PlainTextResponse("OK")
 
 
@@ -2365,11 +2428,7 @@ async def get_announcement(request: Request):
     if rate_limited(ip, "announcement_get", max_requests=ANNOUNCEMENT_GET_RATE_LIMIT, window_seconds=ANNOUNCEMENT_GET_RATE_WINDOW):
         return PlainTextResponse("", status_code=429)
     async with announcement_lock:
-        now = time.time()
-        if announcement_text and (now - announcement_timestamp) <= 1.0:
-            return PlainTextResponse(announcement_text)
-        else:
-            return PlainTextResponse("")
+        return PlainTextResponse(announcement_text)
 
 # -----------------------------
 # /banner ENDPOINT - the persistent banner shown at the top of /scripts.
@@ -3330,7 +3389,8 @@ ADMIN_BASE_HTML = """
             font-family:monospace; font-size:12px; max-height:240px; overflow:auto; white-space:pre-wrap;
         }}
         a.repo-link {{ color:#4fc3f7; }}
-    </style>
+    .admin-announcement-card{{position:relative;overflow:hidden}}.admin-control-form{{margin-top:16px}}.admin-control-form textarea{{width:100%;min-height:105px;resize:vertical;padding:14px 15px;border-radius:15px;border:1px solid rgba(148,163,184,.16);background:rgba(4,7,12,.72);color:#f8fafc;outline:none;font:inherit;transition:.2s ease}}.admin-control-form textarea:focus{{border-color:rgba(129,140,248,.65);box-shadow:0 0 0 4px rgba(99,102,241,.10)}}.admin-control-row{{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:11px;flex-wrap:wrap}}.admin-control-row>div{{display:flex;gap:8px}}.admin-control-row button{{min-width:145px}}.admin-control-row .ghost-btn{{background:rgba(255,255,255,.045)!important;border-color:rgba(255,255,255,.10)!important;box-shadow:none!important}}
+</style>
     <script>
         async function refreshStats() {{
             try {{
@@ -3391,9 +3451,17 @@ ADMIN_BASE_HTML = """
                 console.error(e);
             }}
         }}
+        function wireAdminControl(formId, endpoint, textareaId, statusId, clearId) {{
+            const form=document.getElementById(formId), area=document.getElementById(textareaId), status=document.getElementById(statusId), clear=document.getElementById(clearId);
+            if(!form) return;
+            form.addEventListener('submit', async (e)=>{{e.preventDefault();status.textContent='Saving…';const r=await fetch(endpoint,{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams({{text:area.value}}),credentials:'same-origin'}});const d=await r.json().catch(()=>({{}}));if(!r.ok){{status.textContent=d.error||'Could not save.';return}}status.textContent='Saved';area.value=d.text||'';refreshStats();}});
+            clear.addEventListener('click',()=>{{area.value='';form.requestSubmit();}});
+        }}
         document.addEventListener('DOMContentLoaded', () => {{
+            wireAdminControl('admin-announcement-form','/admin/announcement','admin-announcement-text','admin-announcement-status','admin-clear-announcement');
+            wireAdminControl('admin-banner-form','/admin/banner','admin-banner-text','admin-banner-status','admin-clear-banner');
             refreshStats();
-            setInterval(refreshStats, 2000);
+            setInterval(refreshStats, 3000);
         }});
     </script>
 </head>
@@ -3417,10 +3485,10 @@ def admin_login_form(error: str = "") -> str:
             <span class="pill green">Loader Scripts</span>
             <span class="pill purple">Control Center</span>
         </p>
-        <p class="label">Use the admin credential configured in Railway for this service. The credential is never displayed or stored in the page.</p>
+        <p class="label">Use the admin password configured in Railway for this service. You must authenticate before any admin changes can be made.</p>
         <form method="post">
-            <label class="label">Railway Admin Password / Key</label><br>
-            <input type="password" name="key" placeholder="Enter your Railway admin credential" autocomplete="current-password">
+            <label class="label">Railway Admin Password</label><br>
+            <input type="password" name="key" placeholder="Enter your Railway admin password" autocomplete="current-password">
             <button type="submit">Open Control Center</button>
         </form>
         {err_html}
@@ -3528,6 +3596,41 @@ async def build_me_group_admin_panel() -> str:
     </section>
     '''
 
+async def _admin_form_action(request: Request, action: str):
+    if not require_admin_session(request):
+        return JSONResponse({"error": "admin login required"}, status_code=401)
+    if reject_if_oversized(request, MAX_GENERIC_BODY):
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+    raw = await request.body()
+    if len(raw) > MAX_GENERIC_BODY:
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+    data = parse_qs(raw.decode("utf-8", errors="ignore"))
+    text = normalize_field(data.get("text", [""])[0].strip())
+    if len(text) > MAX_BANNER_LEN:
+        return JSONResponse({"error": f"maximum {MAX_BANNER_LEN} characters"}, status_code=400)
+    if _CONTROL_CHAR_PATTERN.search(text):
+        return JSONResponse({"error": "invalid control characters"}, status_code=400)
+    global announcement_text, announcement_timestamp, banner_text
+    if action == "announcement":
+        async with announcement_lock:
+            announcement_text = text
+            announcement_timestamp = time.time() if text else 0.0
+            save_announcement_to_file(announcement_text)
+    else:
+        async with banner_lock:
+            banner_text = text
+            save_banner_to_file(banner_text)
+    return JSONResponse({"ok": True, "text": text})
+
+@app.post("/admin/announcement")
+async def admin_set_announcement(request: Request):
+    return await _admin_form_action(request, "announcement")
+
+@app.post("/admin/banner")
+async def admin_set_banner(request: Request):
+    return await _admin_form_action(request, "banner")
+
+
 async def build_admin_dashboard_body() -> str:
     fixed_cards_html = ""
     for name in ("dexchilli", "dexfree", "dexserverhop", "dexhub", "dexpaid", "dexautoroll"):
@@ -3573,19 +3676,8 @@ async def build_admin_dashboard_body() -> str:
             <span class="pill green">/dexautoroll</span>
             <span class="pill purple">/scripts</span>
         </p>
-        <p class="label">This dashboard is read-only. Nothing here can change any data - there is
-        no form on this page that submits anywhere. To change announcements, the site banner, the
-        blacklist, paid keys, or the GitHub cache, call the API directly with header <code>X-Api-Key</code>:</p>
-        <div class="logs-box">
-POST /announcements     (raw text body = announcement)
-POST /banner             (raw text body = banner shown on /scripts, up to {MAX_BANNER_LEN} chars)
-POST /blacklisted        (raw text body = username to add)
-POST /unblacklisted      (raw text body = username to remove)
-POST /dexpaid/keys       (raw text body = duration in hours)
-POST /github/refresh     (no body needed)
-NOTE: POST /usernames and POST /logs are intentionally open (no key).
-NOTE: POST /banner is key-protected - no valid X-Api-Key, no post; nothing is stored.
-        </div>
+        <p class="label">Authenticated control center. Your Railway admin password is required to open this page, and every dashboard change is protected by the admin session.</p>
+        <div class="logs-box">Admin session: ACTIVE · Changes made below are saved immediately.</div>
         <p class="small-text" style="margin-top:10px;">GitHub source: {github_status}</p>
         <div class="stats-grid">
             <div class="stat-box"><div class="stat-label">Registered Usernames</div><div class="stat-value" id="stat-usernames">0</div></div>
@@ -3603,15 +3695,13 @@ NOTE: POST /banner is key-protected - no valid X-Api-Key, no post; nothing is st
     </div>
 
     <div class="grid">
-        <div class="card">
-            <h2>Announcements</h2>
-            <p class="small-text">Current announcement preview (read-only):</p>
-            <div class="logs-box" id="announcement-preview-box">No active announcement.</div>
+        <div class="card admin-announcement-card">
+            <span class="pill purple">SITE-WIDE</span><h2 style="margin:10px 0 5px;">Announcement</h2><p class="small-text">Shows as a dismissible announcement across the site's HTML pages. Leave empty to clear it.</p>
+            <form id="admin-announcement-form" class="admin-control-form"><textarea name="text" id="admin-announcement-text" maxlength="{MAX_BANNER_LEN}" placeholder="Write the announcement everyone should see…"></textarea><div class="admin-control-row"><span id="admin-announcement-status" class="small-text">Current: <b id="announcement-preview-inline">No active announcement.</b></span><div><button type="button" class="ghost-btn" id="admin-clear-announcement">Clear</button><button type="submit">Publish Announcement</button></div></div></form>
         </div>
-        <div class="card">
-            <h2>Site Banner (/scripts page)</h2>
-            <p class="small-text">Read-only preview. Set via POST /banner with header X-Api-Key - no key, no post.</p>
-            <div class="logs-box" id="banner-preview-box">No banner set.</div>
+        <div class="card admin-announcement-card">
+            <span class="pill green">PERSISTENT</span><h2 style="margin:10px 0 5px;">Site Banner</h2><p class="small-text">The existing persistent banner value used by the site. Leave empty to remove it.</p>
+            <form id="admin-banner-form" class="admin-control-form"><textarea name="text" id="admin-banner-text" maxlength="{MAX_BANNER_LEN}" placeholder="Write a persistent site banner…"></textarea><div class="admin-control-row"><span id="admin-banner-status" class="small-text">Current: <b id="banner-preview-inline">No banner set.</b></span><div><button type="button" class="ghost-btn" id="admin-clear-banner">Clear</button><button type="submit">Save Banner</button></div></div></form>
         </div>
         <div class="card">
             <h2>Blacklisted Users</h2>
@@ -3674,9 +3764,9 @@ async def admin_post(request: Request):
     data = parse_qs(raw.decode(errors="ignore"))
     key = data.get("key", [""])[0]
 
-    if not is_valid_key(key):
+    if not key or not constant_time_eq(key, ADMIN_PASSWORD):
         await record_failed_attempt("admin_login", ip)
-        return HTMLResponse(ADMIN_BASE_HTML.format(body=admin_login_form("Invalid key.")))
+        return HTMLResponse(ADMIN_BASE_HTML.format(body=admin_login_form("Invalid admin password.")))
 
     await clear_attempts("admin_login", ip)
     resp = HTMLResponse(ADMIN_BASE_HTML.format(body=await build_admin_dashboard_body()))
@@ -5388,11 +5478,10 @@ OBF_PAGE = r"""<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#070a12"><title>Obfustucate — DexNotifier</title>
 <style>
-*{box-sizing:border-box}body{margin:0!important;color:#f8fafc;display:block!important;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#050713;overflow-x:hidden}
-.page{display:block!important;width:100%!important;max-width:none!important;min-height:100vh;padding:28px 28px 70px;position:relative;margin:0!important;text-align:initial!important}.page:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circle at 20% 10%,rgba(124,92,246,.24),transparent 28%),radial-gradient(circle at 85% 20%,rgba(34,211,238,.14),transparent 24%);filter:blur(20px);animation:aurora 12s ease-in-out infinite alternate;pointer-events:none}
-.shell{display:block!important;width:min(1320px,calc(100% - 40px))!important;max-width:1320px!important;margin:0 auto!important;position:relative!important}.nav{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:62px}.brand{display:flex;align-items:center;gap:11px;font-weight:950}.logo{width:42px;height:42px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#8b5cf6,#22d3ee);box-shadow:0 15px 45px rgba(99,102,241,.35);animation:float 4s ease-in-out infinite}.navlinks{display:flex;gap:8px}.navlinks a{padding:10px 13px;border-radius:12px;border:1px solid rgba(148,163,184,.12);background:rgba(12,17,33,.65);color:#cbd5e1;text-decoration:none;font-size:13px;font-weight:800}.hero{text-align:center;max-width:850px;margin:0 auto 34px}.eyebrow{display:inline-flex;align-items:center;gap:8px;color:#c4b5fd;text-transform:uppercase;letter-spacing:.16em;font-size:11px;font-weight:950}.live{width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 16px #34d399}.hero h1{font-size:clamp(54px,9vw,92px);line-height:.92;letter-spacing:-.075em;margin:17px 0 18px}.hero h1 span{background:linear-gradient(100deg,#fff,#c4b5fd 48%,#67e8f9);-webkit-background-clip:text;background-clip:text;color:transparent}.hero p{margin:auto;max-width:670px;color:#96a2bb;font-size:16px;line-height:1.7}.workspace{display:block;width:100%!important;max-width:1320px!important;margin:36px auto 0!important;padding:18px;border:1px solid rgba(148,163,184,.14);border-radius:28px;background:linear-gradient(145deg,rgba(15,21,40,.86),rgba(7,11,22,.86));box-shadow:0 35px 100px rgba(0,0,0,.45);backdrop-filter:blur(22px)}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:3px 4px 15px}.traffic{display:flex;gap:7px}.traffic i{width:9px;height:9px;border-radius:50%;background:#334155}.traffic i:nth-child(1){background:#fb7185}.traffic i:nth-child(2){background:#fbbf24}.traffic i:nth-child(3){background:#34d399}.toolbar-title{font-size:12px;color:#8793ac;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.editor-card{padding:18px;border-radius:20px;background:rgba(3,7,16,.72);border:1px solid rgba(148,163,184,.12)}.label{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px;font-weight:900}.hint{color:#69758d;font-weight:700}.editor{display:block;width:100%!important;min-height:460px;resize:vertical;border:1px solid #24314a;border-radius:16px;background:#040811;color:#dbeafe;padding:18px;font:14px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;outline:none;transition:.25s}.editor:focus{border-color:#8b5cf6;box-shadow:0 0 0 4px rgba(139,92,246,.11),0 0 45px rgba(139,92,246,.08)}.actionbar{display:flex;align-items:center;gap:12px;margin-top:14px}.go{flex:1;min-height:54px;border:0;border-radius:15px;color:white;font-weight:950;font-size:14px;cursor:pointer;background:linear-gradient(110deg,#8b5cf6,#6366f1,#22d3ee);background-size:200% 100%;box-shadow:0 16px 45px rgba(99,102,241,.25);transition:.25s}.go:hover{transform:translateY(-2px);background-position:100% 0}.go:disabled{opacity:.65;cursor:wait;transform:none}.status{min-width:120px;text-align:right;color:#77839b;font-size:12px;font-weight:800}.status.ok{color:#6ee7b7}.status.error{color:#fb7185}.results{display:grid;gap:14px;margin-top:14px}.result{padding:17px;border-radius:19px;background:rgba(4,8,17,.78);border:1px solid rgba(148,163,184,.12)}.result-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.result-head strong{font-size:13px}.result-head span{font-size:11px;color:#64748b}.copyrow{display:flex;gap:9px}.out{flex:1;min-width:0;min-height:74px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:13px;border:1px solid #1f2b41;border-radius:13px;background:#03070f;color:#cfe0ff;font:12px/1.55 ui-monospace,monospace}.copy{min-width:86px;border:1px solid rgba(148,163,184,.14);border-radius:13px;background:#11192b;color:white;font-weight:900;cursor:pointer}.footer{text-align:center;color:#536078;font-size:11px;margin-top:20px}
+*{box-sizing:border-box}html,body{width:100%;min-width:0}body{margin:0!important;color:#f8fafc;display:block!important;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#050713;overflow-x:hidden}
+.page{display:flex!important;flex-direction:column!important;align-items:center!important;width:100%!important;max-width:none!important;min-height:100vh;padding:28px clamp(14px,3vw,42px) 70px;position:relative;margin:0 auto!important;text-align:initial!important}.page:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circle at 20% 10%,rgba(124,92,246,.24),transparent 28%),radial-gradient(circle at 85% 20%,rgba(34,211,238,.14),transparent 24%);filter:blur(20px);animation:aurora 12s ease-in-out infinite alternate;pointer-events:none}.shell{display:block!important;width:100%!important;max-width:1320px!important;margin:0 auto!important;position:relative!important}.nav{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:62px}.brand{display:flex;align-items:center;gap:11px;font-weight:950}.logo{width:42px;height:42px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#8b5cf6,#22d3ee);box-shadow:0 15px 45px rgba(99,102,241,.35);animation:float 4s ease-in-out infinite}.navlinks{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.navlinks a{padding:10px 13px;border-radius:12px;border:1px solid rgba(148,163,184,.12);background:rgba(12,17,33,.65);color:#cbd5e1;text-decoration:none;font-size:13px;font-weight:800}.hero{text-align:center;max-width:850px;margin:0 auto 34px;width:100%}.eyebrow{display:inline-flex;align-items:center;gap:8px;color:#c4b5fd;text-transform:uppercase;letter-spacing:.16em;font-size:11px;font-weight:950}.live{width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 16px #34d399}.hero h1{font-size:clamp(54px,9vw,92px);line-height:.92;letter-spacing:-.075em;margin:17px 0 18px}.hero h1 span{background:linear-gradient(100deg,#fff,#c4b5fd 48%,#67e8f9);-webkit-background-clip:text;background-clip:text;color:transparent}.hero p{margin:auto;max-width:670px;color:#96a2bb;font-size:16px;line-height:1.7}.workspace{display:block;width:100%!important;max-width:1320px!important;margin:36px auto 0!important;padding:18px;border:1px solid rgba(148,163,184,.14);border-radius:28px;background:linear-gradient(145deg,rgba(15,21,40,.86),rgba(7,11,22,.86));box-shadow:0 35px 100px rgba(0,0,0,.45);backdrop-filter:blur(22px);align-self:center}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:3px 4px 15px}.traffic{display:flex;gap:7px}.traffic i{width:9px;height:9px;border-radius:50%;background:#334155}.traffic i:nth-child(1){background:#fb7185}.traffic i:nth-child(2){background:#fbbf24}.traffic i:nth-child(3){background:#34d399}.toolbar-title{font-size:12px;color:#8793ac;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.editor-card{padding:18px;border-radius:20px;background:rgba(3,7,16,.72);border:1px solid rgba(148,163,184,.12)}.label{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px;font-weight:900}.hint{color:#69758d;font-weight:700}.editor{display:block;width:100%!important;min-height:460px;resize:vertical;border:1px solid #24314a;border-radius:16px;background:#040811;color:#dbeafe;padding:18px;font:14px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;outline:none;transition:.25s}.editor:focus{border-color:#8b5cf6;box-shadow:0 0 0 4px rgba(139,92,246,.11),0 0 45px rgba(139,92,246,.08)}.actionbar{display:flex;align-items:center;gap:12px;margin-top:14px}.go{flex:1;min-height:54px;border:0;border-radius:15px;color:white;font-weight:950;font-size:14px;cursor:pointer;background:linear-gradient(110deg,#8b5cf6,#6366f1,#22d3ee);background-size:200% 100%;box-shadow:0 16px 45px rgba(99,102,241,.25);transition:.25s}.go:hover{transform:translateY(-2px);background-position:100% 0}.go:disabled{opacity:.65;cursor:wait;transform:none}.status{min-width:120px;text-align:right;color:#77839b;font-size:12px;font-weight:800}.status.ok{color:#6ee7b7}.status.error{color:#fb7185}.results{display:grid;gap:14px;margin-top:14px}.result{padding:17px;border-radius:19px;background:rgba(4,8,17,.78);border:1px solid rgba(148,163,184,.12)}.result-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.result-head strong{font-size:13px}.result-head span{font-size:11px;color:#64748b}.copyrow{display:flex;gap:9px}.out{flex:1;min-width:0;min-height:74px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:13px;border:1px solid #1f2b41;border-radius:13px;background:#03070f;color:#cfe0ff;font:12px/1.55 ui-monospace,monospace}.copy{min-width:86px;border:1px solid rgba(148,163,184,.14);border-radius:13px;background:#11192b;color:white;font-weight:900;cursor:pointer}.footer{text-align:center;color:#536078;font-size:11px;margin-top:20px}
 @keyframes aurora{from{transform:translate3d(-2%,0,0) scale(1)}to{transform:translate3d(2%,2%,0) scale(1.06)}}@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
-@media(max-width:900px){.page{width:100%!important;max-width:none!important;padding:18px 12px 45px}.shell{width:100%!important;max-width:none!important}.nav{margin-bottom:45px}.navlinks{display:none}.hero h1{font-size:clamp(50px,17vw,72px)}.hero p{font-size:14px}.workspace{padding:11px;border-radius:22px}.editor-card{padding:12px}.editor{min-height:300px;font-size:12px}.actionbar{flex-direction:column;align-items:stretch}.go{width:100%}.status{text-align:center;min-width:0}.copyrow{flex-direction:column}.copy{width:100%;min-height:44px}.toolbar{padding-bottom:11px}}
+@media(max-width:1100px){.page{padding-left:20px;padding-right:20px}.shell{max-width:100%!important}.workspace{width:100%!important}.hero{max-width:780px}.nav{margin-bottom:48px}}@media(max-width:900px){.page{width:100%!important;max-width:none!important;padding:18px 14px 45px}.shell{width:100%!important;max-width:none!important}.nav{margin-bottom:38px}.navlinks{display:none}.hero{width:100%;padding:0 4px}.hero h1{font-size:clamp(48px,15vw,72px)}.hero p{font-size:14px;max-width:620px}.workspace{width:100%!important;max-width:100%!important;margin:26px auto 0!important;padding:11px;border-radius:22px}.editor-card{padding:12px}.editor{min-height:300px;font-size:12px}.actionbar{flex-direction:column;align-items:stretch}.go{width:100%}.status{text-align:center;min-width:0}.copyrow{flex-direction:column}.copy{width:100%;min-height:44px}.toolbar{padding-bottom:11px}}@media(max-width:520px){.page{padding:14px 10px 34px}.brand{font-size:14px}.logo{width:38px;height:38px;border-radius:12px}.hero h1{font-size:clamp(42px,16vw,60px)}.hero p{font-size:13px}.workspace{padding:9px;border-radius:19px}.editor{min-height:260px;padding:14px}.result{padding:13px}.result-head{align-items:flex-start;flex-direction:column;gap:4px}.footer{font-size:10px}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head>
 <body><main class="page"><div class="shell">
