@@ -1586,6 +1586,40 @@ async def global_rate_limit_and_security_headers(request: Request, call_next):
     # intermediary; static loader responses are short-lived anyway.
     if "Cache-Control" not in response.headers:
         response.headers["Cache-Control"] = "no-store"
+
+    # Consistent DexNotifier visual skin for every HTML endpoint.
+    media = response.headers.get("content-type", "")
+    if "text/html" in media and getattr(response, "body", None):
+        skin = b"""<style id="dex-global-skin">
+:root{color-scheme:dark;--dex-bg:#060913;--dex-bg2:#0a1020;--dex-card:rgba(13,20,36,.88);--dex-card2:rgba(10,16,29,.92);--dex-line:#22304b;--dex-line2:#2c3d5e;--dex-text:#f4f7ff;--dex-muted:#91a0bb;--dex-accent:#7c5cff;--dex-cyan:#22d3ee;--dex-green:#35d07f;--dex-red:#ff6b81}
+*{box-sizing:border-box}
+html{background:var(--dex-bg)}
+body{background:radial-gradient(900px 520px at 8% -10%,rgba(124,92,255,.20),transparent 62%),radial-gradient(760px 500px at 92% 0%,rgba(34,211,238,.12),transparent 58%),linear-gradient(145deg,#050812,#090f1d 55%,#060913)!important;color:var(--dex-text)!important;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;min-height:100vh;letter-spacing:.005em}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;background-image:linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);background-size:36px 36px;mask-image:linear-gradient(to bottom,black,transparent 78%);z-index:0}
+body>*{position:relative;z-index:1}
+a{color:#9db4ff!important;text-decoration:none;transition:.18s ease}a:hover{color:#d5ddff!important}
+h1,h2,h3,h4{color:#f7f9ff!important;letter-spacing:-.025em}
+p,small,.muted,.subtitle,.hint{color:var(--dex-muted)!important;line-height:1.65}
+button,.btn,input[type=submit],input[type=button]{border-radius:12px!important;border:1px solid rgba(124,92,255,.35)!important;background:linear-gradient(135deg,#7657f4,#4d79ff)!important;color:#fff!important;font-weight:800!important;box-shadow:0 10px 28px rgba(70,80,220,.18);transition:transform .15s ease,box-shadow .15s ease,filter .15s ease;cursor:pointer}
+button:hover,.btn:hover,input[type=submit]:hover,input[type=button]:hover{transform:translateY(-1px);filter:brightness(1.08);box-shadow:0 14px 34px rgba(70,80,220,.26)}
+button:disabled,.btn:disabled{opacity:.55;transform:none;cursor:not-allowed}
+input,textarea,select{border-radius:12px!important;border:1px solid var(--dex-line2)!important;background:rgba(5,10,19,.82)!important;color:#e8efff!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.025),0 8px 28px rgba(0,0,0,.12);outline:none}
+input:focus,textarea:focus,select:focus{border-color:rgba(124,92,255,.8)!important;box-shadow:0 0 0 3px rgba(124,92,255,.12)!important}
+.card,.panel,.container,.box,.resultbox,.result,.script-card,.admin-card,.section,.hero-card,.feature,.stat,.table-wrap,.auth-card{background:linear-gradient(145deg,var(--dex-card),var(--dex-card2))!important;border:1px solid rgba(86,108,150,.24)!important;border-radius:20px!important;box-shadow:0 24px 80px rgba(0,0,0,.34),inset 0 1px 0 rgba(255,255,255,.025)!important;backdrop-filter:blur(14px)}
+.card:hover,.script-card:hover,.feature:hover{border-color:rgba(124,92,255,.38)!important}
+pre,.code-box,.code,.output,.out{background:#050a13!important;border:1px solid var(--dex-line)!important;border-radius:14px!important;color:#cfe0ff!important}
+table{border-collapse:separate!important;border-spacing:0!important;width:100%}th{background:#101a2d!important;color:#dce7ff!important}td{background:rgba(7,12,22,.65)!important;color:#b9c7df!important;border-color:#1d2a42!important}th:first-child{border-top-left-radius:10px}th:last-child{border-top-right-radius:10px}tr:last-child td:first-child{border-bottom-left-radius:10px}tr:last-child td:last-child{border-bottom-right-radius:10px}
+hr{border:0!important;border-top:1px solid rgba(75,94,130,.25)!important}
+.badge,.pill,.tag{border-radius:999px!important;background:rgba(124,92,255,.12)!important;border:1px solid rgba(124,92,255,.30)!important;color:#cfd5ff!important}
+.status.ok,.success{color:var(--dex-green)!important}.status.error,.error{color:var(--dex-red)!important}
+::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-track{background:#060a12}::-webkit-scrollbar-thumb{background:#243453;border-radius:999px;border:2px solid #060a12}::-webkit-scrollbar-thumb:hover{background:#354a73}
+@media(max-width:700px){body{font-size:14px}.wrap,.container{width:min(100% - 24px,1180px)!important;margin-left:auto!important;margin-right:auto!important}.card,.panel,.container,.box,.resultbox,.result,.script-card,.admin-card,.section,.hero-card,.feature,.stat,.table-wrap,.auth-card{border-radius:16px!important}.grid{grid-template-columns:1fr!important}.copyrow{flex-direction:column!important}.actions{flex-direction:column!important;align-items:stretch!important}button,.btn,input[type=submit],input[type=button]{min-height:46px}}
+</style>"""
+        body = response.body
+        if b"dex-global-skin" not in body:
+            body = body.replace(b"</head>", skin + b"</head>", 1)
+            response.body = body
+            response.headers["content-length"] = str(len(body))
     return response
 
 
@@ -4960,28 +4994,28 @@ OBF_PAGE = r'''<!doctype html>
 :root{color-scheme:dark;--bg:#070b14;--card:#0d1424;--line:#1d2940;--text:#edf3ff;--muted:#91a0bb;--accent:#7c5cff;--accent2:#22d3ee;--good:#35d07f}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 20% 0%,#18234a 0,#070b14 42%);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;color:var(--text);min-height:100vh}.wrap{width:min(980px,92%);margin:0 auto;padding:42px 0 70px}.hero{text-align:center;margin-bottom:28px}.badge{display:inline-flex;padding:7px 12px;border:1px solid #293654;border-radius:999px;color:#b8c6e2;background:#0c1323;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.hero h1{font-size:clamp(32px,7vw,56px);margin:14px 0 8px;letter-spacing:-.04em}.hero p{margin:0 auto;color:var(--muted);max-width:650px;line-height:1.6}.card{background:rgba(13,20,36,.9);border:1px solid var(--line);border-radius:22px;padding:22px;box-shadow:0 20px 70px rgba(0,0,0,.3);backdrop-filter:blur(12px)}label{display:block;font-weight:800;margin-bottom:10px}.editor{width:100%;min-height:330px;resize:vertical;border:1px solid #263552;border-radius:16px;background:#070c16;color:#dce7ff;padding:16px;font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;outline:none}.editor:focus{border-color:var(--accent)}.levels{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:16px 0}.level{position:relative}.level input{position:absolute;opacity:0}.level label{margin:0;padding:14px;border:1px solid #263552;border-radius:14px;cursor:pointer;background:#0a1120}.level input:checked+label{border-color:var(--accent);background:#17142d;box-shadow:0 0 0 1px var(--accent) inset}.level small{display:block;color:var(--muted);font-weight:500;margin-top:4px}.actions{display:flex;gap:10px;align-items:center}.btn{border:0;border-radius:14px;padding:14px 20px;font-weight:900;cursor:pointer;background:linear-gradient(135deg,var(--accent),#5c8dff);color:white;flex:1}.btn:disabled{opacity:.55;cursor:not-allowed}.status{color:var(--muted);font-size:13px}.results{display:none;margin-top:18px;gap:14px}.resultbox{border:1px solid var(--line);border-radius:16px;background:#080e1a;padding:14px}.resultbox h3{margin:0 0 9px;font-size:14px}.copyrow{display:flex;gap:8px}.out{flex:1;min-width:0;border:1px solid #263552;border-radius:10px;padding:11px;background:#050a12;color:#cfe0ff;font:13px/1.45 ui-monospace,monospace;word-break:break-all}.copy{border:1px solid #344563;background:#111a2d;color:#fff;border-radius:10px;padding:0 14px;font-weight:800;cursor:pointer}.hint{color:var(--muted);font-size:12px;margin-top:12px}.error{color:#ff8d9b}.ok{color:var(--good)}@media(max-width:640px){.wrap{padding-top:24px}.card{padding:15px;border-radius:18px}.editor{min-height:270px}.levels{grid-template-columns:1fr}.actions{flex-direction:column;align-items:stretch}.btn{width:100%}.copyrow{flex-direction:column}.copy{padding:12px}.hero h1{font-size:38px}}
 </style></head>
-<body><main class="wrap"><section class="hero"><span class="badge">Dex Obfuscator</span><h1>Protect your Lua</h1><p>Paste your raw Lua, choose a protection level, and get a ready-to-copy raw loadstring plus the protected payload.</p></section>
+<body><main class="wrap"><section class="hero"><span class="badge">DexNotifier <span>Obfustucate</span><h1>Protect your Lua</h1><p>Paste your raw Lua, choose a protection level, and get a ready-to-copy raw loadstring plus the protected payload.</p></section>
 <section class="card"><label for="source">Raw Lua source</label><textarea id="source" class="editor" spellcheck="false" placeholder="-- paste your Lua code here"></textarea>
 <div class="levels">
 <div class="level"><input id="light" name="level" type="radio" value="light"><label for="light">Lightly<small>Fastest • smaller output</small></label></div>
 <div class="level"><input id="medium" name="level" type="radio" value="medium" checked><label for="medium">Medium<small>Balanced protection</small></label></div>
 <div class="level"><input id="hard" name="level" type="radio" value="hard"><label for="hard">Hard<small>Maximum built-in noise</small></label></div>
-</div><div class="actions"><button class="btn" id="go">Obfuscate Lua</button><span class="status" id="status">Ready</span></div>
+</div><div class="actions"><button class="btn" id="go">Obfustucate Lua</button><span class="status" id="status">Ready</span></div>
 <div class="results" id="results"><div class="resultbox"><h3>Raw loadstring</h3><div class="copyrow"><div class="out" id="loadstring"></div><button class="copy" data-copy="loadstring">Copy</button></div></div><div class="resultbox"><h3>Protected payload</h3><div class="copyrow"><div class="out" id="payload"></div><button class="copy" data-copy="payload">Copy</button></div><div class="hint">The downloadable payload contains the protected Lua itself. The loadstring only points at the raw endpoint.</div></div></div></section></main>
 <script>
 const $=id=>document.getElementById(id);const status=$('status');
-$('go').onclick=async()=>{const source=$('source').value;const level=document.querySelector('input[name=level]:checked').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return} $('go').disabled=true;status.textContent='Obfuscating…';status.className='status';try{const r=await fetch('/obfuscate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,level})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfuscation failed');$('loadstring').textContent=d.loadstring;$('payload').textContent=d.payload;$('results').style.display='grid';status.textContent='Done';status.className='status ok'}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
+$('go').onclick=async()=>{const source=$('source').value;const level=document.querySelector('input[name=level]:checked').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return} $('go').disabled=true;status.textContent='Obfustucating…';status.className='status';try{const r=await fetch('/obfustucate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,level})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfuscation failed');$('loadstring').textContent=d.loadstring;$('payload').textContent=d.payload;$('results').style.display='grid';status.textContent='Done';status.className='status ok'}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
 document.querySelectorAll('.copy').forEach(b=>b.onclick=async()=>{const text=$(b.dataset.copy).textContent;await navigator.clipboard.writeText(text);const old=b.textContent;b.textContent='Copied';setTimeout(()=>b.textContent=old,900)});
 </script></body></html>'''
 
-@app.get("/obfuscate")
+@app.get("/obfustucate")
 async def obfuscate_page():
     return HTMLResponse(OBF_PAGE)
 
-@app.post("/obfuscate")
+@app.post("/obfustucate")
 async def obfuscate_api(request: Request):
     ip = _client_ip(request)
-    if rate_limited(ip, "obfuscate", OBF_RATE_LIMIT, OBF_RATE_WINDOW):
+    if rate_limited(ip, "obfustucate", OBF_RATE_LIMIT, OBF_RATE_WINDOW):
         return JSONResponse({"error": "Too many obfuscation requests. Try again shortly."}, status_code=429)
     if reject_if_oversized(request, OBF_MAX_SOURCE + 32 * 1024):
         return JSONResponse({"error": "Source is too large."}, status_code=413)
@@ -5002,6 +5036,43 @@ async def obfuscate_api(request: Request):
     except Exception as exc:
         print(f"[OBF] failed: {exc}")
         return JSONResponse({"error": "Obfuscation failed. Check that the source is valid Lua."}, status_code=400)
+
+
+# -----------------------------
+# PRIVATE SERVICE ENDPOINTS
+# Not linked from public pages. Every route requires DEX_API_KEY.
+# -----------------------------
+
+PRIVATE_STATS_RATE_LIMIT = 20
+PRIVATE_STATS_RATE_WINDOW = 30.0
+
+def _private_key_ok(request: Request) -> bool:
+    return is_valid_key(request.headers.get("X-Api-Key", ""))
+
+@app.get("/info")
+async def private_info(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "private_info", PRIVATE_STATS_RATE_LIMIT, PRIVATE_STATS_RATE_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+    if not _private_key_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    async with scripts_lock:
+        script_count = len(scripts)
+    async with logs_lock:
+        log_count = len(stored_logs)
+    async with ws_count_lock:
+        ws_connections = sum(ws_ip_connection_counts.values())
+    return JSONResponse({"ok":True,"service":"DexNotifier","service_version":"4.0","timestamp":int(time.time()),"scripts":script_count,"stored_logs":log_count,"websocket_connections":ws_connections,"base_url":BASE_URL})
+
+@app.get("/metrics")
+async def private_metrics(request: Request):
+    if not _private_key_ok(request):
+        return PlainTextResponse("UNAUTHORIZED", status_code=401)
+    async with logs_lock:
+        log_count = len(stored_logs)
+    async with viewers_lock:
+        viewer_count = len(viewers)
+    return JSONResponse({"ok":True,"viewers":viewer_count,"stored_logs":log_count,"uptime_seconds":int(time.time()-START_TIME) if 'START_TIME' in globals() else None})
 
 
 # -----------------------------
