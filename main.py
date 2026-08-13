@@ -31,97 +31,179 @@ app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
 GLOBAL_UI_CSS = r"""
 :root{
-  --dn-bg:#050713;--dn-bg2:#080b18;--dn-panel:rgba(12,16,31,.78);--dn-panel2:rgba(16,21,41,.72);
-  --dn-line:rgba(148,163,184,.16);--dn-line2:rgba(129,140,248,.28);--dn-text:#f7f8ff;--dn-muted:#98a3bd;
+  --dn-bg:#050608;--dn-bg-soft:#090b10;--dn-surface:rgba(14,16,22,.86);--dn-surface-2:rgba(18,21,29,.78);
+  --dn-line:rgba(255,255,255,.075);--dn-line-strong:rgba(255,255,255,.13);
+  --dn-text:#f7f7fb;--dn-muted:#8f98a9;--dn-dim:#606a7c;
   --dn-purple:#8b5cf6;--dn-indigo:#6366f1;--dn-cyan:#22d3ee;--dn-green:#34d399;--dn-red:#fb7185;
-  --dn-shadow:0 30px 90px rgba(0,0,0,.42);--dn-radius:24px
+  --dn-shadow:0 28px 90px rgba(0,0,0,.52);--dn-radius:22px
 }
-html{scroll-behavior:smooth;background:var(--dn-bg)}
+*{box-sizing:border-box}
+html{background:#050608!important;scroll-behavior:smooth}
 body{position:relative;overflow-x:hidden!important;min-height:100vh!important;background:
- radial-gradient(900px 600px at 8% -5%,rgba(99,102,241,.22),transparent 62%),
- radial-gradient(700px 500px at 100% 8%,rgba(34,211,238,.12),transparent 58%),
- radial-gradient(800px 600px at 55% 115%,rgba(139,92,246,.11),transparent 62%),var(--dn-bg)!important;
+ radial-gradient(850px 520px at 8% -12%,rgba(99,102,241,.13),transparent 65%),
+ radial-gradient(700px 460px at 96% 0%,rgba(34,211,238,.055),transparent 62%),
+ linear-gradient(180deg,#050608 0%,#07090d 52%,#050608 100%)!important;
  color:var(--dn-text)!important;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important}
-body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:-1;opacity:.32;background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);background-size:56px 56px;mask-image:linear-gradient(to bottom,#000,transparent 92%)}
-body:after{content:"";position:fixed;width:420px;height:420px;left:var(--dn-mx,50%);top:var(--dn-my,30%);transform:translate(-50%,-50%);border-radius:50%;pointer-events:none;z-index:-1;background:radial-gradient(circle,rgba(139,92,246,.12),transparent 68%);filter:blur(20px);transition:left .18s ease,top .18s ease}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:-2;background-image:linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px);background-size:64px 64px;mask-image:linear-gradient(to bottom,#000 0%,rgba(0,0,0,.55) 55%,transparent 100%);opacity:.55}
+body:after{content:"";position:fixed;left:var(--dn-mx,50%);top:var(--dn-my,20%);width:520px;height:520px;transform:translate(-50%,-50%);border-radius:50%;pointer-events:none;z-index:-1;background:radial-gradient(circle,rgba(139,92,246,.09),transparent 67%);filter:blur(22px);transition:left .22s ease,top .22s ease}
+body.dn-base-home,html:has(body.dn-base-home){background:#000!important}
+body.dn-base-home:before,body.dn-base-home:after{display:none!important}
+/* Shared chrome */
+.dn-chrome{position:relative;z-index:50;width:min(1220px,calc(100% - 34px));margin:18px auto 28px;padding:10px 12px;border:1px solid rgba(255,255,255,.075);border-radius:18px;background:rgba(9,11,16,.72);box-shadow:0 18px 55px rgba(0,0,0,.34),inset 0 1px 0 rgba(255,255,255,.035);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);display:flex;align-items:center;justify-content:space-between;gap:16px;animation:dnSlide .55s cubic-bezier(.2,.8,.2,1) both}
+.dn-chrome-brand{display:flex;align-items:center;gap:10px;color:#fff!important;font-weight:950!important;letter-spacing:-.03em;font-size:14px}
+.dn-chrome-logo{width:34px;height:34px;border-radius:11px;display:grid;place-items:center;background:linear-gradient(135deg,#8b5cf6,#4f8cff);box-shadow:0 9px 28px rgba(99,102,241,.24);font-size:13px;font-weight:1000;color:#fff;position:relative;overflow:hidden}
+.dn-chrome-logo:after{content:"";position:absolute;inset:-80%;background:linear-gradient(120deg,transparent 35%,rgba(255,255,255,.35),transparent 65%);animation:dnShine 4s ease-in-out infinite}
+.dn-chrome-links{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.dn-chrome-links a{padding:8px 11px!important;border-radius:10px!important;color:#9da7b9!important;font-size:12px!important;font-weight:800!important;border:1px solid transparent!important;background:transparent!important}
+.dn-chrome-links a:hover{color:#fff!important;background:rgba(255,255,255,.055)!important;border-color:rgba(255,255,255,.07)!important}
+.dn-chrome-links a.active{color:#fff!important;background:rgba(139,92,246,.12)!important;border-color:rgba(139,92,246,.22)!important}
+.dn-chrome-status{display:inline-flex;align-items:center;gap:7px;color:#9ee8c7;font-size:11px;font-weight:850;padding:7px 10px;border-radius:999px;border:1px solid rgba(52,211,153,.15);background:rgba(52,211,153,.055)}
+.dn-chrome-status i{width:6px;height:6px;border-radius:50%;background:#34d399;box-shadow:0 0 14px rgba(52,211,153,.9);animation:dnPulse 1.8s ease-in-out infinite}
+/* Universal surfaces */
 .wrap,.container,.page,.shell{position:relative;z-index:1}
-.wrap{animation:dnPageIn .65s cubic-bezier(.2,.8,.2,1) both}
-.card,.panel,.stat-box,.script-card,.resultbox,.logs-box,.locked-note,.code-box{background:linear-gradient(145deg,rgba(17,23,43,.86),rgba(7,11,23,.84))!important;border:1px solid var(--dn-line)!important;box-shadow:0 18px 55px rgba(0,0,0,.25),inset 0 1px 0 rgba(255,255,255,.035)!important;backdrop-filter:blur(18px)!important;-webkit-backdrop-filter:blur(18px)!important}
+.wrap{animation:dnPageIn .62s cubic-bezier(.2,.8,.2,1) both}
+.card,.panel,.stat-box,.script-card,.resultbox,.logs-box,.locked-note,.code-box{background:linear-gradient(145deg,rgba(17,20,27,.88),rgba(8,10,14,.9))!important;border:1px solid var(--dn-line)!important;box-shadow:0 20px 65px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.035)!important;backdrop-filter:blur(18px)!important;-webkit-backdrop-filter:blur(18px)!important}
 .card,.panel,.script-card{border-radius:var(--dn-radius)!important;transition:transform .28s ease,border-color .28s ease,box-shadow .28s ease}
-.card:hover,.panel:hover,.script-card:hover{transform:translateY(-3px);border-color:rgba(139,92,246,.32)!important;box-shadow:0 24px 70px rgba(0,0,0,.34),0 0 0 1px rgba(139,92,246,.05)!important}
-h1,h2,h3{color:#fff!important;letter-spacing:-.035em!important}
+.card:hover,.panel:hover,.script-card:hover{transform:translateY(-3px);border-color:rgba(139,92,246,.27)!important;box-shadow:0 28px 80px rgba(0,0,0,.38),0 0 0 1px rgba(139,92,246,.035)!important}
+h1,h2,h3,h4{color:#fff!important;letter-spacing:-.035em!important}
 p,.small-text,.tagline,.label,.hint{color:var(--dn-muted)!important}
-a{color:#a5b4fc!important;text-decoration:none!important;transition:color .2s ease}
+a{color:#a5b4fc!important;text-decoration:none!important;transition:color .2s ease,background .2s ease,border-color .2s ease,transform .2s ease}
 a:hover{color:#67e8f9!important}
-input,textarea,select,.editor,.out{background:rgba(4,7,16,.78)!important;color:#e9edff!important;border:1px solid rgba(148,163,184,.18)!important;border-radius:15px!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)!important;transition:border-color .2s ease,box-shadow .2s ease,transform .2s ease!important}
-input:focus,textarea:focus,select:focus,.editor:focus{border-color:rgba(139,92,246,.75)!important;box-shadow:0 0 0 4px rgba(139,92,246,.11),0 0 35px rgba(139,92,246,.08)!important;outline:none!important}
-button,.btn,.copy,.copy-btn{position:relative;overflow:hidden;border:1px solid rgba(255,255,255,.08)!important;border-radius:14px!important;background:linear-gradient(135deg,#8b5cf6,#6366f1 55%,#4f8cff)!important;color:#fff!important;box-shadow:0 12px 30px rgba(99,102,241,.2)!important;transition:transform .2s ease,box-shadow .2s ease,filter .2s ease!important}
-button:hover,.btn:hover,.copy:hover,.copy-btn:hover{transform:translateY(-2px);filter:brightness(1.08);box-shadow:0 16px 40px rgba(99,102,241,.3)!important}
-button:active,.btn:active,.copy:active,.copy-btn:active{transform:translateY(0) scale(.98)}
-button:before,.btn:before,.copy:before,.copy-btn:before{content:"";position:absolute;inset:0;transform:translateX(-110%);background:linear-gradient(105deg,transparent 25%,rgba(255,255,255,.22) 48%,transparent 70%);transition:transform .55s ease}
-button:hover:before,.btn:hover:before,.copy:hover:before,.copy-btn:hover:before{transform:translateX(110%)}
-.pill{border-radius:999px!important;background:rgba(99,102,241,.11)!important;border:1px solid rgba(129,140,248,.25)!important;color:#c7d2fe!important;padding:6px 10px!important}
-.pill.green{background:rgba(52,211,153,.09)!important;border-color:rgba(52,211,153,.25)!important;color:#a7f3d0!important}
-.pill.red{background:rgba(251,113,133,.09)!important;border-color:rgba(251,113,133,.25)!important;color:#fecdd3!important}
-.pill.purple{background:rgba(139,92,246,.11)!important;border-color:rgba(139,92,246,.28)!important;color:#ddd6fe!important}
-.stats-grid{gap:16px!important}.stat-box{border-radius:18px!important;padding:16px!important}.stat-value{font-size:25px!important;color:#fff!important}.stat-label{color:var(--dn-muted)!important}
-.logs-box{border-radius:16px!important;color:#cbd5e1!important}
-.banner{border-radius:18px!important;border:1px solid rgba(34,211,238,.18)!important;background:linear-gradient(90deg,rgba(34,211,238,.07),rgba(139,92,246,.09))!important;box-shadow:0 14px 45px rgba(0,0,0,.2)!important}
-footer{color:#647089!important}
-@keyframes dnPageIn{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
-@keyframes dnFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
-@keyframes dnPulse{0%,100%{opacity:.55}50%{opacity:1}}
-@media(max-width:700px){.wrap{width:min(94%,1100px)!important;padding-left:0!important;padding-right:0!important}.card,.panel,.script-card{border-radius:20px!important}.grid{grid-template-columns:1fr!important}.stats-grid{grid-template-columns:1fr 1fr!important}.card:hover,.panel:hover,.script-card:hover{transform:none}}
+input,textarea,select,.editor,.out{background:rgba(3,5,9,.84)!important;color:#eef2ff!important;border:1px solid rgba(255,255,255,.09)!important;border-radius:14px!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)!important;transition:border-color .2s ease,box-shadow .2s ease,transform .2s ease!important}
+input:hover,textarea:hover,select:hover{border-color:rgba(255,255,255,.15)!important}
+input:focus,textarea:focus,select:focus,.editor:focus{border-color:rgba(139,92,246,.68)!important;box-shadow:0 0 0 4px rgba(139,92,246,.09),0 0 35px rgba(139,92,246,.06)!important;outline:none!important}
+button,.btn,.copy,.copy-btn{position:relative;overflow:hidden;border:1px solid rgba(255,255,255,.08)!important;border-radius:13px!important;background:linear-gradient(135deg,#8b5cf6,#6366f1 55%,#4f8cff)!important;color:#fff!important;box-shadow:0 12px 30px rgba(99,102,241,.18)!important;transition:transform .2s ease,box-shadow .2s ease,filter .2s ease!important;font-weight:850!important}
+button:hover,.btn:hover,.copy:hover,.copy-btn:hover{transform:translateY(-2px);filter:brightness(1.07);box-shadow:0 17px 42px rgba(99,102,241,.28)!important}
+button:active,.btn:active,.copy:active,.copy-btn:active{transform:translateY(0) scale(.985)}
+button:before,.btn:before,.copy:before,.copy-btn:before{content:"";position:absolute;inset:0;transform:translateX(-115%);background:linear-gradient(105deg,transparent 25%,rgba(255,255,255,.2) 48%,transparent 70%);transition:transform .58s ease}
+button:hover:before,.btn:hover:before,.copy:hover:before,.copy-btn:hover:before{transform:translateX(115%)}
+.pill{border-radius:999px!important;background:rgba(99,102,241,.09)!important;border:1px solid rgba(129,140,248,.2)!important;color:#c7d2fe!important;padding:6px 10px!important}
+.pill.green{background:rgba(52,211,153,.07)!important;border-color:rgba(52,211,153,.2)!important;color:#a7f3d0!important}
+.pill.red{background:rgba(251,113,133,.07)!important;border-color:rgba(251,113,133,.2)!important;color:#fecdd3!important}
+.pill.purple{background:rgba(139,92,246,.08)!important;border-color:rgba(139,92,246,.22)!important;color:#ddd6fe!important}
+.stats-grid{gap:14px!important}.stat-box{border-radius:17px!important;padding:16px!important}.stat-value{font-size:25px!important;color:#fff!important}.stat-label{color:var(--dn-muted)!important}
+.logs-box{border-radius:15px!important;color:#cbd5e1!important}
+.banner{border-radius:17px!important;border:1px solid rgba(139,92,246,.18)!important;background:linear-gradient(90deg,rgba(139,92,246,.075),rgba(34,211,238,.045))!important;box-shadow:0 14px 45px rgba(0,0,0,.2)!important}
+footer{color:#586274!important}
+/* Legacy page cleanup */
+body:not(.dn-base-home) .hero h1{letter-spacing:-.055em!important}
+body:not(.dn-base-home) .wrap{padding-top:0}
+body:not(.dn-base-home) .grid{gap:16px!important}
+body:not(.dn-base-home) .script-card::before{opacity:.55}
+/* Root */
+.dn-home{min-height:100vh!important}
+.dn-home-inner{width:min(1180px,100%)!important}
+.dn-nav{margin-bottom:84px!important}
+.dn-logo{box-shadow:0 14px 44px rgba(99,102,241,.25)!important}
+.dn-side,.dn-mini{background:linear-gradient(145deg,rgba(17,19,24,.82),rgba(7,8,11,.92))!important;border-color:rgba(255,255,255,.08)!important}
+.dn-side{box-shadow:0 30px 90px rgba(0,0,0,.5)!important}
+.dn-mini{transition:transform .25s ease,border-color .25s ease,background .25s ease!important}
+.dn-mini:hover{transform:translateY(-4px);border-color:rgba(139,92,246,.22)!important;background:rgba(15,17,22,.92)!important}
+/* Obfustucate */
+body:has(.workspace){background:#050608!important}
+body:has(.workspace) .page{max-width:1180px!important}
+body:has(.workspace) .nav{border-bottom-color:rgba(255,255,255,.065)!important}
+body:has(.workspace) .workspace{box-shadow:0 35px 110px rgba(0,0,0,.45)!important;border-color:rgba(255,255,255,.09)!important}
+body:has(.workspace) .editor-card{box-shadow:inset 0 1px 0 rgba(255,255,255,.035)!important}
+body:has(.workspace) .go{background:linear-gradient(135deg,#8b5cf6,#6366f1 60%,#22d3ee)!important}
+/* Admin/home/scripts typography and layout */
+body:has(.stats-grid) .wrap,body:has(form[action="/home"]) .wrap{max-width:1220px!important}
+body:has(.stats-grid) h1{font-size:clamp(28px,4vw,42px)!important}
+/* Mobile */
+@media(max-width:760px){
+  .dn-chrome{width:calc(100% - 20px);margin:10px auto 18px;padding:9px;border-radius:15px}
+  .dn-chrome-links{display:none}.dn-chrome-status{margin-left:auto}
+  .wrap{width:min(94%,1100px)!important;padding-left:0!important;padding-right:0!important}
+  .card,.panel,.script-card{border-radius:19px!important}.grid{grid-template-columns:1fr!important}.stats-grid{grid-template-columns:1fr 1fr!important}
+  .card:hover,.panel:hover,.script-card:hover{transform:none}
+}
+@media(max-width:460px){.stats-grid{grid-template-columns:1fr!important}.dn-chrome-brand span{display:none}.dn-chrome-logo{width:32px;height:32px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition:none!important;scroll-behavior:auto!important}}
+@keyframes dnPageIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+@keyframes dnSlide{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+@keyframes dnShine{0%,55%{transform:translateX(-20%) rotate(20deg)}75%,100%{transform:translateX(120%) rotate(20deg)}}
+@keyframes dnPulse{0%,100%{opacity:.45;transform:scale(.9)}50%{opacity:1;transform:scale(1.08)}}
 """
+
+
+DEX_FAVICON_URL = "https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"
+DEX_FAVICON_HTML = (
+    f'<link rel="icon" type="image/webp" href="{DEX_FAVICON_URL}">'
+    f'<link rel="shortcut icon" href="{DEX_FAVICON_URL}">'
+    f'<link rel="apple-touch-icon" href="{DEX_FAVICON_URL}">'
+)
 
 GLOBAL_UI_JS = r"""
 <script>
 (() => {
   document.documentElement.classList.add('dn-ready');
-  const move=(e)=>{document.documentElement.style.setProperty('--dn-mx',e.clientX+'px');document.documentElement.style.setProperty('--dn-my',e.clientY+'px')};
-  if (window.matchMedia('(pointer:fine)').matches) window.addEventListener('pointermove',move,{passive:true});
-  document.querySelectorAll('button,a,.card,.panel,.script-card').forEach((el)=>{
-    el.addEventListener('pointerenter',()=>el.style.setProperty('will-change','transform'));
-    el.addEventListener('pointerleave',()=>el.style.removeProperty('will-change'));
+  const path = location.pathname;
+  const move = (e) => {
+    document.documentElement.style.setProperty('--dn-mx', e.clientX + 'px');
+    document.documentElement.style.setProperty('--dn-my', e.clientY + 'px');
+  };
+  if (window.matchMedia('(pointer:fine)').matches) window.addEventListener('pointermove', move, {passive:true});
+
+  const existingChrome = document.querySelector('.dn-chrome');
+  const shouldAddChrome = !existingChrome && path !== '/' && path !== '/obfustucate' && !document.querySelector('.dn-nav');
+  if (shouldAddChrome && document.body) {
+    const links = [
+      ['/obfustucate','Obfustucate'],
+      ['/scripts','Scripts'],
+      ['/home','Dashboard'],
+      ['/admin','Admin']
+    ];
+    const nav = document.createElement('header');
+    nav.className = 'dn-chrome';
+    const active = (href) => path === href || (href !== '/' && path.startsWith(href + '/'));
+    nav.innerHTML = `
+      <a class="dn-chrome-brand" href="/">
+        <span class="dn-chrome-logo">D</span><span>DexNotifier</span>
+      </a>
+      <nav class="dn-chrome-links">
+        ${links.map(([href,label]) => `<a href="${href}" class="${active(href)?'active':''}">${label}</a>`).join('')}
+      </nav>
+      <span class="dn-chrome-status"><i></i> Online</span>`;
+    document.body.prepend(nav);
+  }
+
+  document.querySelectorAll('button,a,.card,.panel,.script-card,.dn-mini').forEach((el) => {
+    el.addEventListener('pointerenter', () => el.style.setProperty('will-change','transform'));
+    el.addEventListener('pointerleave', () => el.style.removeProperty('will-change'));
   });
 })();
 </script>
 """
 
+
 @app.middleware("http")
 async def dexnotifier_ui_middleware(request: Request, call_next):
     response = await call_next(request)
     content_type = response.headers.get("content-type", "")
-    body = getattr(response, "body", None)
-    if body and "text/html" in content_type:
+    if "text/html" in content_type:
         try:
-            text = body.decode("utf-8")
-            if "</head>" in text and "GLOBAL_UI_CSS" not in text:
-                text = text.replace("</head>", "<style>" + GLOBAL_UI_CSS + "</style></head>", 1)
+            chunks = []
+            async for chunk in response.body_iterator:
+                chunks.append(chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8"))
+            body = b"".join(chunks)
+            text = body.decode("utf-8", errors="replace")
+
+            if "</head>" in text:
+                if DEX_FAVICON_URL not in text and "rel=\"icon\"" not in text.lower() and "rel='icon'" not in text.lower():
+                    text = text.replace("</head>", DEX_FAVICON_HTML + "</head>", 1)
+                if "--dn-bg:" not in text:
+                    text = text.replace("</head>", "<style>" + GLOBAL_UI_CSS + "</style></head>", 1)
+
             if "</body>" in text and "document.documentElement.classList.add('dn-ready')" not in text:
                 text = text.replace("</body>", GLOBAL_UI_JS + "</body>", 1)
-            response.body = text.encode("utf-8")
-            response.headers["content-length"] = str(len(response.body))
-        except Exception:
-            pass
-    return response
 
-_GLOBAL_UI_CSS = """<style id="dex-global-ui">
-:root{--dex-bg:#070a12;--dex-line:#202b42;--dex-text:#f2f5fb;--dex-muted:#8995ac;--dex-accent:#8b5cf6}
-html{background:var(--dex-bg)}body{background:radial-gradient(900px 500px at 15% -10%,rgba(139,92,246,.16),transparent 60%),radial-gradient(800px 500px at 100% 0,rgba(6,182,212,.09),transparent 60%),var(--dex-bg)!important;color:var(--dex-text)!important;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important}
-.card,.panel,.box,.stat,.admin-card,.script-card{border-color:var(--dex-line)!important;background:linear-gradient(145deg,rgba(16,23,38,.94),rgba(8,12,21,.94))!important;box-shadow:0 24px 70px rgba(0,0,0,.28)!important;border-radius:20px!important}
-input,textarea,select,.logs-box,.code,.output{background:#060a12!important;color:var(--dex-text)!important;border-color:#293750!important;border-radius:12px!important}input:focus,textarea:focus,select:focus{border-color:var(--dex-accent)!important;box-shadow:0 0 0 3px rgba(139,92,246,.12)!important;outline:none!important}
-button,.btn{border-radius:12px!important;background:linear-gradient(135deg,var(--dex-accent),#6578ff)!important;color:#fff!important;border:0!important;box-shadow:0 10px 28px rgba(124,92,255,.16)!important;transition:transform .15s,filter .15s!important}button:hover,.btn:hover{filter:brightness(1.07)!important;transform:translateY(-1px)}a{color:#9f8cff!important}.pill,.badge{border-radius:999px!important}nav,.nav,.navbar{background:rgba(7,10,18,.82)!important;border-color:var(--dex-line)!important;backdrop-filter:blur(18px)!important}h1,h2,h3{letter-spacing:-.025em}.small-text,.label,.muted{color:var(--dex-muted)!important}pre,.logs-box{border:1px solid var(--dex-line)!important}@media(max-width:700px){.wrap{width:min(94%,1240px)!important}.grid{grid-template-columns:1fr!important}.card{padding:16px!important}button,.btn{width:100%;min-height:44px}}
-</style>"""
-@app.middleware("http")
-async def dex_global_ui_middleware(request: Request, call_next):
-    response=await call_next(request)
-    if "text/html" in response.headers.get("content-type","") and hasattr(response,"body") and response.body:
-        marker=b"</head>"
-        if marker in response.body and b'id="dex-global-ui"' not in response.body:
-            response.body=response.body.replace(marker,_GLOBAL_UI_CSS.encode("utf-8")+marker,1)
-            response.headers["content-length"]=str(len(response.body))
+            body = text.encode("utf-8")
+            async def _single_body():
+                yield body
+            response.body_iterator = _single_body()
+            response.headers["content-length"] = str(len(body))
+        except Exception as exc:
+            print(f"[UI] middleware error: {exc}")
     return response
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2395,7 +2477,8 @@ async def index(request: Request):
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-      <meta name="theme-color" content="#050713">
+      <meta name="theme-color" content="#000000">
+      <meta name="color-scheme" content="dark">
       <title>DexNotifier — Lua Infrastructure</title>
       <style>
         .dn-home{{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:34px 18px}}
@@ -2430,7 +2513,7 @@ async def index(request: Request):
         @media(max-width:800px){{.dn-nav{{margin-bottom:45px;align-items:flex-start}}.dn-navlinks{{display:none}}.dn-hero{{grid-template-columns:1fr;gap:24px}}.dn-hero h1{{font-size:clamp(50px,15vw,76px)}}.dn-hero p{{font-size:16px}}.dn-bottom{{grid-template-columns:1fr}}.dn-side{{padding:19px}}}}
       </style>
     </head>
-    <body>
+    <body class="dn-base-home">
       <main class="dn-home"><div class="dn-home-inner">
         <nav class="dn-nav">
           <div class="dn-brand"><div class="dn-logo"><span>D</span></div><span>DexNotifier</span></div>
@@ -5098,7 +5181,7 @@ OBF_MAX_SOURCE = 2 * 1024 * 1024
 OBF_PAGE = r"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#050713"><title>Obfustucate — DexNotifier</title>
+<meta name="theme-color" content="#070a12"><title>Obfustucate — DexNotifier</title>
 <style>
 *{box-sizing:border-box}body{margin:0;color:#f8fafc;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#050713;overflow-x:hidden}
 .page{min-height:100vh;padding:24px 18px 70px;position:relative}.page:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circle at 20% 10%,rgba(124,92,246,.24),transparent 28%),radial-gradient(circle at 85% 20%,rgba(34,211,238,.14),transparent 24%);filter:blur(20px);animation:aurora 12s ease-in-out infinite alternate;pointer-events:none}
