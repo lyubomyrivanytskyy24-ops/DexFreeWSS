@@ -20,7 +20,109 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, JSONResponse
 import uvicorn
 
-app = FastAPI()
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# GLOBAL DEXNOTIFIER UI SYSTEM
+# Keeps all backend logic/routes intact while giving every HTML endpoint the
+# same modern responsive visual language.
+# ═════════════════════════════════════════════════════════════════════════════
+
+GLOBAL_UI_CSS = r"""
+:root{
+  --dn-bg:#050713;--dn-bg2:#080b18;--dn-panel:rgba(12,16,31,.78);--dn-panel2:rgba(16,21,41,.72);
+  --dn-line:rgba(148,163,184,.16);--dn-line2:rgba(129,140,248,.28);--dn-text:#f7f8ff;--dn-muted:#98a3bd;
+  --dn-purple:#8b5cf6;--dn-indigo:#6366f1;--dn-cyan:#22d3ee;--dn-green:#34d399;--dn-red:#fb7185;
+  --dn-shadow:0 30px 90px rgba(0,0,0,.42);--dn-radius:24px
+}
+html{scroll-behavior:smooth;background:var(--dn-bg)}
+body{position:relative;overflow-x:hidden!important;min-height:100vh!important;background:
+ radial-gradient(900px 600px at 8% -5%,rgba(99,102,241,.22),transparent 62%),
+ radial-gradient(700px 500px at 100% 8%,rgba(34,211,238,.12),transparent 58%),
+ radial-gradient(800px 600px at 55% 115%,rgba(139,92,246,.11),transparent 62%),var(--dn-bg)!important;
+ color:var(--dn-text)!important;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important}
+body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:-1;opacity:.32;background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);background-size:56px 56px;mask-image:linear-gradient(to bottom,#000,transparent 92%)}
+body:after{content:"";position:fixed;width:420px;height:420px;left:var(--dn-mx,50%);top:var(--dn-my,30%);transform:translate(-50%,-50%);border-radius:50%;pointer-events:none;z-index:-1;background:radial-gradient(circle,rgba(139,92,246,.12),transparent 68%);filter:blur(20px);transition:left .18s ease,top .18s ease}
+.wrap,.container,.page,.shell{position:relative;z-index:1}
+.wrap{animation:dnPageIn .65s cubic-bezier(.2,.8,.2,1) both}
+.card,.panel,.stat-box,.script-card,.resultbox,.logs-box,.locked-note,.code-box{background:linear-gradient(145deg,rgba(17,23,43,.86),rgba(7,11,23,.84))!important;border:1px solid var(--dn-line)!important;box-shadow:0 18px 55px rgba(0,0,0,.25),inset 0 1px 0 rgba(255,255,255,.035)!important;backdrop-filter:blur(18px)!important;-webkit-backdrop-filter:blur(18px)!important}
+.card,.panel,.script-card{border-radius:var(--dn-radius)!important;transition:transform .28s ease,border-color .28s ease,box-shadow .28s ease}
+.card:hover,.panel:hover,.script-card:hover{transform:translateY(-3px);border-color:rgba(139,92,246,.32)!important;box-shadow:0 24px 70px rgba(0,0,0,.34),0 0 0 1px rgba(139,92,246,.05)!important}
+h1,h2,h3{color:#fff!important;letter-spacing:-.035em!important}
+p,.small-text,.tagline,.label,.hint{color:var(--dn-muted)!important}
+a{color:#a5b4fc!important;text-decoration:none!important;transition:color .2s ease}
+a:hover{color:#67e8f9!important}
+input,textarea,select,.editor,.out{background:rgba(4,7,16,.78)!important;color:#e9edff!important;border:1px solid rgba(148,163,184,.18)!important;border-radius:15px!important;box-shadow:inset 0 1px 0 rgba(255,255,255,.025)!important;transition:border-color .2s ease,box-shadow .2s ease,transform .2s ease!important}
+input:focus,textarea:focus,select:focus,.editor:focus{border-color:rgba(139,92,246,.75)!important;box-shadow:0 0 0 4px rgba(139,92,246,.11),0 0 35px rgba(139,92,246,.08)!important;outline:none!important}
+button,.btn,.copy,.copy-btn{position:relative;overflow:hidden;border:1px solid rgba(255,255,255,.08)!important;border-radius:14px!important;background:linear-gradient(135deg,#8b5cf6,#6366f1 55%,#4f8cff)!important;color:#fff!important;box-shadow:0 12px 30px rgba(99,102,241,.2)!important;transition:transform .2s ease,box-shadow .2s ease,filter .2s ease!important}
+button:hover,.btn:hover,.copy:hover,.copy-btn:hover{transform:translateY(-2px);filter:brightness(1.08);box-shadow:0 16px 40px rgba(99,102,241,.3)!important}
+button:active,.btn:active,.copy:active,.copy-btn:active{transform:translateY(0) scale(.98)}
+button:before,.btn:before,.copy:before,.copy-btn:before{content:"";position:absolute;inset:0;transform:translateX(-110%);background:linear-gradient(105deg,transparent 25%,rgba(255,255,255,.22) 48%,transparent 70%);transition:transform .55s ease}
+button:hover:before,.btn:hover:before,.copy:hover:before,.copy-btn:hover:before{transform:translateX(110%)}
+.pill{border-radius:999px!important;background:rgba(99,102,241,.11)!important;border:1px solid rgba(129,140,248,.25)!important;color:#c7d2fe!important;padding:6px 10px!important}
+.pill.green{background:rgba(52,211,153,.09)!important;border-color:rgba(52,211,153,.25)!important;color:#a7f3d0!important}
+.pill.red{background:rgba(251,113,133,.09)!important;border-color:rgba(251,113,133,.25)!important;color:#fecdd3!important}
+.pill.purple{background:rgba(139,92,246,.11)!important;border-color:rgba(139,92,246,.28)!important;color:#ddd6fe!important}
+.stats-grid{gap:16px!important}.stat-box{border-radius:18px!important;padding:16px!important}.stat-value{font-size:25px!important;color:#fff!important}.stat-label{color:var(--dn-muted)!important}
+.logs-box{border-radius:16px!important;color:#cbd5e1!important}
+.banner{border-radius:18px!important;border:1px solid rgba(34,211,238,.18)!important;background:linear-gradient(90deg,rgba(34,211,238,.07),rgba(139,92,246,.09))!important;box-shadow:0 14px 45px rgba(0,0,0,.2)!important}
+footer{color:#647089!important}
+@keyframes dnPageIn{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@keyframes dnFloat{0%,100%{transform:translateY(0)}50%{transform:translateY(-7px)}}
+@keyframes dnPulse{0%,100%{opacity:.55}50%{opacity:1}}
+@media(max-width:700px){.wrap{width:min(94%,1100px)!important;padding-left:0!important;padding-right:0!important}.card,.panel,.script-card{border-radius:20px!important}.grid{grid-template-columns:1fr!important}.stats-grid{grid-template-columns:1fr 1fr!important}.card:hover,.panel:hover,.script-card:hover{transform:none}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition:none!important;scroll-behavior:auto!important}}
+"""
+
+GLOBAL_UI_JS = r"""
+<script>
+(() => {
+  document.documentElement.classList.add('dn-ready');
+  const move=(e)=>{document.documentElement.style.setProperty('--dn-mx',e.clientX+'px');document.documentElement.style.setProperty('--dn-my',e.clientY+'px')};
+  if (window.matchMedia('(pointer:fine)').matches) window.addEventListener('pointermove',move,{passive:true});
+  document.querySelectorAll('button,a,.card,.panel,.script-card').forEach((el)=>{
+    el.addEventListener('pointerenter',()=>el.style.setProperty('will-change','transform'));
+    el.addEventListener('pointerleave',()=>el.style.removeProperty('will-change'));
+  });
+})();
+</script>
+"""
+
+@app.middleware("http")
+async def dexnotifier_ui_middleware(request: Request, call_next):
+    response = await call_next(request)
+    content_type = response.headers.get("content-type", "")
+    body = getattr(response, "body", None)
+    if body and "text/html" in content_type:
+        try:
+            text = body.decode("utf-8")
+            if "</head>" in text and "GLOBAL_UI_CSS" not in text:
+                text = text.replace("</head>", "<style>" + GLOBAL_UI_CSS + "</style></head>", 1)
+            if "</body>" in text and "document.documentElement.classList.add('dn-ready')" not in text:
+                text = text.replace("</body>", GLOBAL_UI_JS + "</body>", 1)
+            response.body = text.encode("utf-8")
+            response.headers["content-length"] = str(len(response.body))
+        except Exception:
+            pass
+    return response
+
+_GLOBAL_UI_CSS = """<style id="dex-global-ui">
+:root{--dex-bg:#070a12;--dex-line:#202b42;--dex-text:#f2f5fb;--dex-muted:#8995ac;--dex-accent:#8b5cf6}
+html{background:var(--dex-bg)}body{background:radial-gradient(900px 500px at 15% -10%,rgba(139,92,246,.16),transparent 60%),radial-gradient(800px 500px at 100% 0,rgba(6,182,212,.09),transparent 60%),var(--dex-bg)!important;color:var(--dex-text)!important;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important}
+.card,.panel,.box,.stat,.admin-card,.script-card{border-color:var(--dex-line)!important;background:linear-gradient(145deg,rgba(16,23,38,.94),rgba(8,12,21,.94))!important;box-shadow:0 24px 70px rgba(0,0,0,.28)!important;border-radius:20px!important}
+input,textarea,select,.logs-box,.code,.output{background:#060a12!important;color:var(--dex-text)!important;border-color:#293750!important;border-radius:12px!important}input:focus,textarea:focus,select:focus{border-color:var(--dex-accent)!important;box-shadow:0 0 0 3px rgba(139,92,246,.12)!important;outline:none!important}
+button,.btn{border-radius:12px!important;background:linear-gradient(135deg,var(--dex-accent),#6578ff)!important;color:#fff!important;border:0!important;box-shadow:0 10px 28px rgba(124,92,255,.16)!important;transition:transform .15s,filter .15s!important}button:hover,.btn:hover{filter:brightness(1.07)!important;transform:translateY(-1px)}a{color:#9f8cff!important}.pill,.badge{border-radius:999px!important}nav,.nav,.navbar{background:rgba(7,10,18,.82)!important;border-color:var(--dex-line)!important;backdrop-filter:blur(18px)!important}h1,h2,h3{letter-spacing:-.025em}.small-text,.label,.muted{color:var(--dex-muted)!important}pre,.logs-box{border:1px solid var(--dex-line)!important}@media(max-width:700px){.wrap{width:min(94%,1240px)!important}.grid{grid-template-columns:1fr!important}.card{padding:16px!important}button,.btn{width:100%;min-height:44px}}
+</style>"""
+@app.middleware("http")
+async def dex_global_ui_middleware(request: Request, call_next):
+    response=await call_next(request)
+    if "text/html" in response.headers.get("content-type","") and hasattr(response,"body") and response.body:
+        marker=b"</head>"
+        if marker in response.body and b'id="dex-global-ui"' not in response.body:
+            response.body=response.body.replace(marker,_GLOBAL_UI_CSS.encode("utf-8")+marker,1)
+            response.headers["content-length"]=str(len(response.body))
+    return response
 
 # ═════════════════════════════════════════════════════════════════════════════
 # RANDOMNESS
@@ -2288,71 +2390,79 @@ async def index(request: Request):
         return PlainTextResponse("RATE_LIMITED", status_code=429)
 
     html_page = f"""
-    <!DOCTYPE html>
-    <html>
+    <!doctype html>
+    <html lang="en">
     <head>
-        <title>Dex API Backend</title>
-        <style>
-            :root {{ --bg: #050509; --accent1: #4fc3f7; --accent2: #7c4dff; --accent3: #ff5252; --accent4: #00e676; }}
-            * {{ box-sizing: border-box; }}
-            body {{
-                margin: 0;
-                font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-                background:
-                    radial-gradient(circle at top left, #202040 0, #050509 40%, #000000 100%),
-                    linear-gradient(135deg, rgba(79,195,247,0.08), rgba(255,82,82,0.08));
-                color: #e6e6e6;
-            }}
-            .wrap {{ max-width: 900px; margin: 60px auto; padding: 0 20px 40px; }}
-            .card {{
-                background: linear-gradient(135deg, rgba(15,15,22,0.95), rgba(10,10,18,0.95));
-                border-radius: 20px; padding: 22px; border: 1px solid rgba(79,195,247,0.18);
-                box-shadow: 0 24px 60px rgba(0,0,0,0.75); position: relative; overflow: hidden;
-            }}
-            h1 {{ margin: 0 0 10px 0; font-size: 26px; letter-spacing: 0.04em; }}
-            p {{ margin: 6px 0; font-size: 14px; color: #b0b0c0; }}
-            .pill {{
-                display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 11px;
-                background: rgba(79,195,247,0.18); border: 1px solid rgba(79,195,247,0.4);
-                color: #e6f7ff; margin-right: 6px;
-            }}
-            .code-box {{
-                margin-top: 14px; background: rgba(8,8,13,0.95); border-radius: 12px;
-                border: 1px solid #262636; padding: 12px; font-family: monospace;
-                font-size: 13px; color: #9eff9e; white-space: pre-wrap;
-            }}
-        </style>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+      <meta name="theme-color" content="#050713">
+      <title>DexNotifier — Lua Infrastructure</title>
+      <style>
+        .dn-home{{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:34px 18px}}
+        .dn-home-inner{{width:min(1120px,100%);position:relative}}
+        .dn-nav{{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:74px}}
+        .dn-brand{{display:flex;align-items:center;gap:12px;font-weight:950;letter-spacing:-.03em;font-size:18px}}
+        .dn-logo{{width:42px;height:42px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#8b5cf6,#22d3ee);box-shadow:0 12px 40px rgba(99,102,241,.35);animation:dnFloat 4s ease-in-out infinite}}
+        .dn-logo span{{font-weight:1000;color:white}}
+        .dn-navlinks{{display:flex;gap:9px;flex-wrap:wrap}}
+        .dn-navlinks a{{padding:10px 14px;border:1px solid rgba(148,163,184,.12)!important;background:rgba(15,20,38,.55);border-radius:12px;color:#cbd5e1!important;font-size:13px;font-weight:800}}
+        .dn-hero{{display:grid;grid-template-columns:1.18fr .82fr;gap:42px;align-items:center}}
+        .dn-eyebrow{{display:inline-flex;align-items:center;gap:8px;color:#c4b5fd;font-weight:900;font-size:12px;letter-spacing:.15em;text-transform:uppercase}}
+        .dn-dot{{width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 18px #34d399;animation:dnPulse 1.8s infinite}}
+        .dn-hero h1{{font-size:clamp(52px,8vw,94px);line-height:.92;letter-spacing:-.075em;margin:18px 0 22px;max-width:800px}}
+        .dn-hero h1 span{{background:linear-gradient(100deg,#fff 15%,#c4b5fd 48%,#67e8f9 92%);-webkit-background-clip:text;background-clip:text;color:transparent}}
+        .dn-hero p{{max-width:680px;font-size:18px;line-height:1.7;color:#9aa6c0!important}}
+        .dn-actions{{display:flex;gap:12px;margin-top:28px;flex-wrap:wrap}}
+        .dn-actions a{{display:inline-flex;align-items:center;justify-content:center;padding:14px 19px;border-radius:14px!important;font-weight:900}}
+        .dn-primary{{background:linear-gradient(135deg,#8b5cf6,#6366f1)!important;color:white!important;box-shadow:0 18px 45px rgba(99,102,241,.27)}}
+        .dn-secondary{{background:rgba(17,24,39,.65);border:1px solid rgba(148,163,184,.16)!important;color:#dbe4f5!important}}
+        .dn-side{{padding:24px;border-radius:28px;background:linear-gradient(145deg,rgba(18,25,48,.82),rgba(7,11,22,.82));border:1px solid rgba(148,163,184,.14);box-shadow:0 30px 90px rgba(0,0,0,.38);backdrop-filter:blur(20px)}}
+        .dn-side-head{{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}}
+        .dn-status{{display:flex;align-items:center;gap:7px;color:#a7f3d0;font-size:12px;font-weight:900}}
+        .dn-feature{{display:flex;gap:13px;padding:15px 0;border-top:1px solid rgba(148,163,184,.09)}}
+        .dn-feature:first-of-type{{border-top:0}}
+        .dn-icon{{width:38px;height:38px;flex:0 0 38px;border-radius:12px;display:grid;place-items:center;background:rgba(139,92,246,.12);border:1px solid rgba(139,92,246,.2);color:#c4b5fd;font-weight:950}}
+        .dn-feature b{{display:block;font-size:14px;margin-bottom:4px}}
+        .dn-feature span{{font-size:12px;color:#7f8ba5}}
+        .dn-bottom{{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:58px}}
+        .dn-mini{{padding:18px;border-radius:18px;background:rgba(12,17,32,.65);border:1px solid rgba(148,163,184,.1)}}
+        .dn-mini strong{{display:block;font-size:14px;margin-bottom:6px}}.dn-mini span{{color:#77839c;font-size:12px;line-height:1.5}}
+        @media(max-width:800px){{.dn-nav{{margin-bottom:45px;align-items:flex-start}}.dn-navlinks{{display:none}}.dn-hero{{grid-template-columns:1fr;gap:24px}}.dn-hero h1{{font-size:clamp(50px,15vw,76px)}}.dn-hero p{{font-size:16px}}.dn-bottom{{grid-template-columns:1fr}}.dn-side{{padding:19px}}}}
+      </style>
     </head>
     <body>
-        <div class="wrap">
-            <div class="card">
-                <h1>Dex API Backend Running</h1>
-                <p><span class="pill">Private Scripts</span></p>
-                <p>This backend powers dynamic loader endpoints.</p>
-                <div class="code-box">
-Public endpoints (browser view):<br>
-/dexfree, /dexchilli, /dexserverhop, /dexhub, /dexpaid, /dexautoroll, /&lt;your-endpoint&gt; -> "Private Script"<br><br>
-Executor usage:<br>
-loadstring(game:HttpGet("{BASE_URL}/dexfree"))()<br><br>
-Paid usage:<br>
-loadstring(game:HttpGet("{BASE_URL}/dexpaid?key=YOUR_KEY"))()<br><br>
-Browse all free scripts (nice UI):<br>
-{BASE_URL}/scripts
-                </div>
-            </div>
-        </div>
-    </body>
-    </html>
+      <main class="dn-home"><div class="dn-home-inner">
+        <nav class="dn-nav">
+          <div class="dn-brand"><div class="dn-logo"><span>D</span></div><span>DexNotifier</span></div>
+          <div class="dn-navlinks"><a href="/obfustucate">Obfustucate</a><a href="/scripts">Scripts</a><a href="/home">Home</a><a href="/admin">Admin</a></div>
+        </nav>
+        <section class="dn-hero">
+          <div>
+            <div class="dn-eyebrow"><i class="dn-dot"></i> DexNotifier infrastructure</div>
+            <h1>Build. Protect.<br><span>Ship Lua.</span></h1>
+            <p>A modern control layer for your Lua loaders, protected payloads, script endpoints and private administration tools — all from one fast backend.</p>
+            <div class="dn-actions"><a class="dn-primary" href="/obfustucate">Open Obfustucate →</a><a class="dn-secondary" href="/scripts">Browse scripts</a></div>
+          </div>
+          <aside class="dn-side">
+            <div class="dn-side-head"><strong>System overview</strong><span class="dn-status"><i class="dn-dot"></i> Online</span></div>
+            <div class="dn-feature"><div class="dn-icon">01</div><div><b>Lua protection</b><span>Turn source into a protected, ready-to-load payload.</span></div></div>
+            <div class="dn-feature"><div class="dn-icon">02</div><div><b>Script delivery</b><span>Centralized loader endpoints with copy-ready loadstrings.</span></div></div>
+            <div class="dn-feature"><div class="dn-icon">03</div><div><b>Private control</b><span>Administration and diagnostics stay behind authentication.</span></div></div>
+          </aside>
+        </section>
+        <section class="dn-bottom">
+          <div class="dn-mini"><strong>Obfustucate</strong><span>Clean browser UI for protected Lua payload generation.</span></div>
+          <div class="dn-mini"><strong>Scripts</strong><span>Browse the public loader catalog without exposing internal routes.</span></div>
+          <div class="dn-mini"><strong>Admin</strong><span>Private control center for your existing backend state.</span></div>
+        </section>
+      </div></main>
+    </body></html>
     """
     return HTMLResponse(html_page)
 
 # -----------------------------
 # /scripts PAGE - public, read-only showcase of every free/public loader
-# script (everything except /dexpaid, which needs a key and lives on its
-# own endpoint). Shows the admin-settable banner (see POST /banner above)
-# plus a loadstring + copy button per script.
 # -----------------------------
-
 SCRIPTS_GET_RATE_LIMIT = 30
 SCRIPTS_GET_RATE_WINDOW = 10.0
 
@@ -4985,28 +5095,31 @@ OBF_RATE_LIMIT = 8
 OBF_RATE_WINDOW = 60.0
 OBF_MAX_SOURCE = 2 * 1024 * 1024
 
-OBF_PAGE = r'''<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Dex Obfuscator</title>
+OBF_PAGE = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#050713"><title>Obfustucate — DexNotifier</title>
 <style>
-:root{color-scheme:dark;--bg:#070b14;--card:#0d1424;--line:#1d2940;--text:#edf3ff;--muted:#91a0bb;--accent:#7c5cff;--accent2:#22d3ee;--good:#35d07f}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 20% 0%,#18234a 0,#070b14 42%);font-family:Inter,system-ui,-apple-system,Segoe UI,sans-serif;color:var(--text);min-height:100vh}.wrap{width:min(980px,92%);margin:0 auto;padding:42px 0 70px}.hero{text-align:center;margin-bottom:28px}.badge{display:inline-flex;padding:7px 12px;border:1px solid #293654;border-radius:999px;color:#b8c6e2;background:#0c1323;font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}.hero h1{font-size:clamp(32px,7vw,56px);margin:14px 0 8px;letter-spacing:-.04em}.hero p{margin:0 auto;color:var(--muted);max-width:650px;line-height:1.6}.card{background:rgba(13,20,36,.9);border:1px solid var(--line);border-radius:22px;padding:22px;box-shadow:0 20px 70px rgba(0,0,0,.3);backdrop-filter:blur(12px)}label{display:block;font-weight:800;margin-bottom:10px}.editor{width:100%;min-height:330px;resize:vertical;border:1px solid #263552;border-radius:16px;background:#070c16;color:#dce7ff;padding:16px;font:14px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;outline:none}.editor:focus{border-color:var(--accent)}.levels{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:16px 0}.level{position:relative}.level input{position:absolute;opacity:0}.level label{margin:0;padding:14px;border:1px solid #263552;border-radius:14px;cursor:pointer;background:#0a1120}.level input:checked+label{border-color:var(--accent);background:#17142d;box-shadow:0 0 0 1px var(--accent) inset}.level small{display:block;color:var(--muted);font-weight:500;margin-top:4px}.actions{display:flex;gap:10px;align-items:center}.btn{border:0;border-radius:14px;padding:14px 20px;font-weight:900;cursor:pointer;background:linear-gradient(135deg,var(--accent),#5c8dff);color:white;flex:1}.btn:disabled{opacity:.55;cursor:not-allowed}.status{color:var(--muted);font-size:13px}.results{display:none;margin-top:18px;gap:14px}.resultbox{border:1px solid var(--line);border-radius:16px;background:#080e1a;padding:14px}.resultbox h3{margin:0 0 9px;font-size:14px}.copyrow{display:flex;gap:8px}.out{flex:1;min-width:0;border:1px solid #263552;border-radius:10px;padding:11px;background:#050a12;color:#cfe0ff;font:13px/1.45 ui-monospace,monospace;word-break:break-all}.copy{border:1px solid #344563;background:#111a2d;color:#fff;border-radius:10px;padding:0 14px;font-weight:800;cursor:pointer}.hint{color:var(--muted);font-size:12px;margin-top:12px}.error{color:#ff8d9b}.ok{color:var(--good)}@media(max-width:640px){.wrap{padding-top:24px}.card{padding:15px;border-radius:18px}.editor{min-height:270px}.levels{grid-template-columns:1fr}.actions{flex-direction:column;align-items:stretch}.btn{width:100%}.copyrow{flex-direction:column}.copy{padding:12px}.hero h1{font-size:38px}}
+*{box-sizing:border-box}body{margin:0;color:#f8fafc;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#050713;overflow-x:hidden}
+.page{min-height:100vh;padding:24px 18px 70px;position:relative}.page:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circle at 20% 10%,rgba(124,92,246,.24),transparent 28%),radial-gradient(circle at 85% 20%,rgba(34,211,238,.14),transparent 24%);filter:blur(20px);animation:aurora 12s ease-in-out infinite alternate;pointer-events:none}
+.shell{width:min(1100px,100%);margin:auto;position:relative}.nav{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:62px}.brand{display:flex;align-items:center;gap:11px;font-weight:950}.logo{width:42px;height:42px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#8b5cf6,#22d3ee);box-shadow:0 15px 45px rgba(99,102,241,.35);animation:float 4s ease-in-out infinite}.navlinks{display:flex;gap:8px}.navlinks a{padding:10px 13px;border-radius:12px;border:1px solid rgba(148,163,184,.12);background:rgba(12,17,33,.65);color:#cbd5e1;text-decoration:none;font-size:13px;font-weight:800}.hero{text-align:center;max-width:850px;margin:0 auto 34px}.eyebrow{display:inline-flex;align-items:center;gap:8px;color:#c4b5fd;text-transform:uppercase;letter-spacing:.16em;font-size:11px;font-weight:950}.live{width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 16px #34d399}.hero h1{font-size:clamp(54px,9vw,92px);line-height:.92;letter-spacing:-.075em;margin:17px 0 18px}.hero h1 span{background:linear-gradient(100deg,#fff,#c4b5fd 48%,#67e8f9);-webkit-background-clip:text;background-clip:text;color:transparent}.hero p{margin:auto;max-width:670px;color:#96a2bb;font-size:16px;line-height:1.7}.workspace{margin-top:32px;padding:18px;border:1px solid rgba(148,163,184,.14);border-radius:28px;background:linear-gradient(145deg,rgba(15,21,40,.86),rgba(7,11,22,.86));box-shadow:0 35px 100px rgba(0,0,0,.45);backdrop-filter:blur(22px)}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:3px 4px 15px}.traffic{display:flex;gap:7px}.traffic i{width:9px;height:9px;border-radius:50%;background:#334155}.traffic i:nth-child(1){background:#fb7185}.traffic i:nth-child(2){background:#fbbf24}.traffic i:nth-child(3){background:#34d399}.toolbar-title{font-size:12px;color:#8793ac;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.editor-card{padding:18px;border-radius:20px;background:rgba(3,7,16,.72);border:1px solid rgba(148,163,184,.12)}.label{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px;font-weight:900}.hint{color:#69758d;font-weight:700}.editor{display:block;width:100%;min-height:420px;resize:vertical;border:1px solid #24314a;border-radius:16px;background:#040811;color:#dbeafe;padding:18px;font:14px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;outline:none;transition:.25s}.editor:focus{border-color:#8b5cf6;box-shadow:0 0 0 4px rgba(139,92,246,.11),0 0 45px rgba(139,92,246,.08)}.actionbar{display:flex;align-items:center;gap:12px;margin-top:14px}.go{flex:1;min-height:54px;border:0;border-radius:15px;color:white;font-weight:950;font-size:14px;cursor:pointer;background:linear-gradient(110deg,#8b5cf6,#6366f1,#22d3ee);background-size:200% 100%;box-shadow:0 16px 45px rgba(99,102,241,.25);transition:.25s}.go:hover{transform:translateY(-2px);background-position:100% 0}.go:disabled{opacity:.65;cursor:wait;transform:none}.status{min-width:120px;text-align:right;color:#77839b;font-size:12px;font-weight:800}.status.ok{color:#6ee7b7}.status.error{color:#fb7185}.results{display:grid;gap:14px;margin-top:14px}.result{padding:17px;border-radius:19px;background:rgba(4,8,17,.78);border:1px solid rgba(148,163,184,.12)}.result-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.result-head strong{font-size:13px}.result-head span{font-size:11px;color:#64748b}.copyrow{display:flex;gap:9px}.out{flex:1;min-width:0;min-height:74px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:13px;border:1px solid #1f2b41;border-radius:13px;background:#03070f;color:#cfe0ff;font:12px/1.55 ui-monospace,monospace}.copy{min-width:86px;border:1px solid rgba(148,163,184,.14);border-radius:13px;background:#11192b;color:white;font-weight:900;cursor:pointer}.footer{text-align:center;color:#536078;font-size:11px;margin-top:20px}
+@keyframes aurora{from{transform:translate3d(-2%,0,0) scale(1)}to{transform:translate3d(2%,2%,0) scale(1.06)}}@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
+@media(max-width:700px){.page{padding:18px 12px 45px}.nav{margin-bottom:45px}.navlinks{display:none}.hero h1{font-size:clamp(50px,17vw,72px)}.hero p{font-size:14px}.workspace{padding:11px;border-radius:22px}.editor-card{padding:12px}.editor{min-height:300px;font-size:12px}.actionbar{flex-direction:column;align-items:stretch}.go{width:100%}.status{text-align:center;min-width:0}.copyrow{flex-direction:column}.copy{width:100%;min-height:44px}.toolbar{padding-bottom:11px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head>
-<body><main class="wrap"><section class="hero"><span class="badge">DexNotifier <span>Obfustucate</span><h1>Protect your Lua</h1><p>Paste your raw Lua, choose a protection level, and get a ready-to-copy raw loadstring plus the protected payload.</p></section>
-<section class="card"><label for="source">Raw Lua source</label><textarea id="source" class="editor" spellcheck="false" placeholder="-- paste your Lua code here"></textarea>
-<div class="levels">
-<div class="level"><input id="light" name="level" type="radio" value="light"><label for="light">Lightly<small>Fastest • smaller output</small></label></div>
-<div class="level"><input id="medium" name="level" type="radio" value="medium" checked><label for="medium">Medium<small>Balanced protection</small></label></div>
-<div class="level"><input id="hard" name="level" type="radio" value="hard"><label for="hard">Hard<small>Maximum built-in noise</small></label></div>
-</div><div class="actions"><button class="btn" id="go">Obfustucate Lua</button><span class="status" id="status">Ready</span></div>
-<div class="results" id="results"><div class="resultbox"><h3>Raw loadstring</h3><div class="copyrow"><div class="out" id="loadstring"></div><button class="copy" data-copy="loadstring">Copy</button></div></div><div class="resultbox"><h3>Protected payload</h3><div class="copyrow"><div class="out" id="payload"></div><button class="copy" data-copy="payload">Copy</button></div><div class="hint">The downloadable payload contains the protected Lua itself. The loadstring only points at the raw endpoint.</div></div></div></section></main>
+<body><main class="page"><div class="shell">
+<nav class="nav"><div class="brand"><div class="logo">D</div><span>DexNotifier</span></div><div class="navlinks"><a href="/">Home</a><a href="/scripts">Scripts</a><a href="/home">Dashboard</a></div></nav>
+<section class="hero"><div class="eyebrow"><i class="live"></i> Lua protection tool</div><h1><span>Obfustucate</span></h1><p>Paste your raw Lua source below. DexNotifier generates the protected payload and the exact raw loadstring you can copy.</p></section>
+<section class="workspace"><div class="toolbar"><div class="traffic"><i></i><i></i><i></i></div><div class="toolbar-title">Protected Lua workspace</div><div style="width:39px"></div></div>
+<div class="editor-card"><div class="label"><span>Source</span><span class="hint">Lua · UTF-8</span></div><textarea id="source" class="editor" spellcheck="false" placeholder="-- paste your Lua source here"></textarea><div class="actionbar"><button id="go" class="go">Obfustucate Lua</button><span id="status" class="status">Ready</span></div></div>
+<div id="results" class="results" style="display:none"><div class="result"><div class="result-head"><strong>Raw loadstring</strong><span>copy-ready</span></div><div class="copyrow"><div id="loadstring" class="out"></div><button class="copy" data-copy="loadstring">Copy</button></div></div><div class="result"><div class="result-head"><strong>Protected payload</strong><span>complete Lua file</span></div><div class="copyrow"><div id="payload" class="out"></div><button class="copy" data-copy="payload">Copy</button></div></div></div>
+</section><div class="footer">DexNotifier · Obfustucate · Protected workspace</div></div></main>
 <script>
-const $=id=>document.getElementById(id);const status=$('status');
-$('go').onclick=async()=>{const source=$('source').value;const level=document.querySelector('input[name=level]:checked').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return} $('go').disabled=true;status.textContent='Obfustucating…';status.className='status';try{const r=await fetch('/obfustucate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,level})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfuscation failed');$('loadstring').textContent=d.loadstring;$('payload').textContent=d.payload;$('results').style.display='grid';status.textContent='Done';status.className='status ok'}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
-document.querySelectorAll('.copy').forEach(b=>b.onclick=async()=>{const text=$(b.dataset.copy).textContent;await navigator.clipboard.writeText(text);const old=b.textContent;b.textContent='Copied';setTimeout(()=>b.textContent=old,900)});
-</script></body></html>'''
+const $=id=>document.getElementById(id),status=$('status');
+async function copyText(text,button){try{if(navigator.clipboard)await navigator.clipboard.writeText(text);else{const t=document.createElement('textarea');t.value=text;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove()}const old=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=old,1000)}catch(e){button.textContent='Copy failed';setTimeout(()=>button.textContent='Copy',1000)}}
+$('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return}$('go').disabled=true;status.textContent='Protecting…';status.className='status';try{const r=await fetch('/obfustucate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfustucation failed');$('loadstring').textContent=d.loadstring;$('payload').textContent=d.payload;$('results').style.display='grid';status.textContent='Complete';status.className='status ok';$('results').scrollIntoView({behavior:'smooth',block:'nearest'})}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
+document.querySelectorAll('.copy').forEach(b=>b.addEventListener('click',()=>copyText($(b.dataset.copy).textContent,b)));
+</script></body></html>"""
 
 @app.get("/obfustucate")
 async def obfuscate_page():
@@ -5022,17 +5135,16 @@ async def obfuscate_api(request: Request):
     try:
         body = await request.json()
     except Exception:
-        return JSONResponse({"error": "Expected JSON with source and level."}, status_code=400)
+        return JSONResponse({"error": "Expected JSON with source."}, status_code=400)
     source = body.get("source", "") if isinstance(body, dict) else ""
-    level = body.get("level", "medium") if isinstance(body, dict) else "medium"
     if not isinstance(source, str) or not source.strip():
         return JSONResponse({"error": "Lua source is empty."}, status_code=400)
     if len(source.encode("utf-8")) > OBF_MAX_SOURCE:
         return JSONResponse({"error": "Source is too large (2 MB maximum)."}, status_code=413)
     try:
-        level = normalize_obf_level(level)
-        bundle = obfuscate_lua_bundle(source, publish=True, level=level)
-        return JSONResponse({"ok": True, "level": level, "loadstring": bundle["loadstring"], "payload": bundle["lua_file"]})
+        # One public protection profile. The old client-selectable level is gone.
+        bundle = obfuscate_lua_bundle(source, publish=True, level="medium")
+        return JSONResponse({"ok": True, "loadstring": bundle["loadstring"], "payload": bundle["lua_file"]})
     except Exception as exc:
         print(f"[OBF] failed: {exc}")
         return JSONResponse({"error": "Obfuscation failed. Check that the source is valid Lua."}, status_code=400)
@@ -5040,6 +5152,7 @@ async def obfuscate_api(request: Request):
 
 # -----------------------------
 # PRIVATE SERVICE ENDPOINTS
+# -----------------------------
 # Not linked from public pages. Every route requires DEX_API_KEY.
 # -----------------------------
 
@@ -5074,6 +5187,27 @@ async def private_metrics(request: Request):
         viewer_count = len(viewers)
     return JSONResponse({"ok":True,"viewers":viewer_count,"stored_logs":log_count,"uptime_seconds":int(time.time()-START_TIME) if 'START_TIME' in globals() else None})
 
+
+# -----------------------------
+# PRIVATE INTERNAL ENDPOINTS - intentionally unlinked and API-key protected.
+# -----------------------------
+@app.get("/internal/status")
+async def internal_status(request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    async with scripts_lock: sc=len(scripts)
+    async with logs_lock: lc=len(stored_logs)
+    async with viewers_lock: vc=len(viewers)
+    return JSONResponse({"ok":True,"service":"DexNotifier","status":"online","uptime_seconds":int(time.time()-START_TIME) if "START_TIME" in globals() else None,"scripts":sc,"logs":lc,"viewers":vc})
+
+@app.get("/internal/routes")
+async def internal_routes(request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    return JSONResponse({"ok":True,"routes":[{"path":getattr(r,"path",None),"methods":sorted(getattr(r,"methods",set()))} for r in app.routes if getattr(r,"path",None) and getattr(r,"methods",None)]})
+
+@app.get("/internal/config")
+async def internal_config(request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    return JSONResponse({"ok":True,"base_url":BASE_URL,"github_configured":github_configured(),"github_branch":GITHUB_BRANCH,"obfuscation_max_source_bytes":OBF_MAX_SOURCE,"public_obfuscator":"/obfustucate"})
 
 # -----------------------------
 # DYNAMIC LOADER ENDPOINTS - rate-limited, with a separate failed-attempt
