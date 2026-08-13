@@ -2979,7 +2979,7 @@ async def create_raw_loader(request: Request):
 
     await clear_attempts("raw_loader_auth", ip)
 
-    raw_url = f"{BASE_URL}/raw/{loader_id}"
+    raw_url = f"https://dexnotifier.xyz/raw/{loader_id}"
     return JSONResponse(
         {
             "ok": True,
