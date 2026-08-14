@@ -37,10 +37,6 @@ class AnnouncementHTMLMiddleware(BaseHTTPMiddleware):
             text = body.decode("utf-8")
         except UnicodeDecodeError:
             return response
-
-        # Global site icon: every HTML endpoint gets the same browser favicon.
-        if "<head" in text.lower() and ICON_HTML not in text:
-            text = re.sub(r"(<head[^>]*>)", r"\1" + ICON_HTML, text, count=1, flags=re.I)
         async with announcement_lock:
             msg = announcement_text
         if msg and "</body>" in text:
@@ -168,11 +164,6 @@ body:has(.stats-grid) h1{font-size:clamp(28px,4vw,42px)!important}
 
 
 DEX_FAVICON_URL = "https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"
-DEX_FAVICON_HTML = (
-    f''
-    f''
-    f''
-)
 
 GLOBAL_UI_JS = r"""
 <script>
@@ -914,6 +905,40 @@ def _make_noise_expression():
 
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# PERSISTENT DATA DIRECTORY
+# On Railway the container filesystem is wiped on every redeploy UNLESS a
+# Volume is attached and mounted at this path. Set DEX_DATA_DIR to the mount
+# path of your Railway Volume (Railway's own default mount path is /data) and
+# every file this app writes - users, scripts, chat history/media, the admin
+# secret key, blacklist, banner/announcement text, etc - will survive
+# redeploys. If the directory can't be created/written (e.g. running locally
+# with no volume), this falls back to a "./data" folder next to the script so
+# local development still works without crashing.
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _resolve_data_dir() -> str:
+    candidate = (os.environ.get("DEX_DATA_DIR", "/data").strip() or "/data")
+    try:
+        os.makedirs(candidate, exist_ok=True)
+        probe = os.path.join(candidate, ".dn_write_test")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        return candidate
+    except Exception as e:
+        fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+        os.makedirs(fallback, exist_ok=True)
+        print(f"[DATA_DIR] Could not use '{candidate}' ({e}). Falling back to '{fallback}'. "
+              f"On Railway, attach a Volume and set DEX_DATA_DIR (or mount it at /data) "
+              f"so this data survives redeploys.")
+        return fallback
+
+
+DATA_DIR = _resolve_data_dir()
+print(f"[DATA_DIR] Persistent data directory in use: {DATA_DIR}")
+
+
 def _get_or_create_secret(env_name: str, file_name: str) -> str:
     """Load a secret from env, else from a local file, else generate+persist one."""
     val = os.environ.get(env_name)
@@ -944,7 +969,7 @@ API_KEY = (os.environ.get("DEX_API_KEY", "").strip() or "")
 # Admin access is controlled ONLY by the Railway environment variable DEX_ADMIN_KEY.
 # No fallback to DEX_API_KEY is used, so /admin cannot be opened accidentally.
 ADMIN_PASSWORD = os.environ.get("DEX_ADMIN_KEY", "").strip()
-SECRET_KEY = _get_or_create_secret("DEX_SECRET_KEY", ".dex_secret_key")
+SECRET_KEY = _get_or_create_secret("DEX_SECRET_KEY", os.path.join(DATA_DIR, ".dex_secret_key"))
 BASE_URL = os.environ.get("DEX_BASE_URL", "https://dexapi1.up.railway.app").rstrip("/")
 
 
@@ -1411,16 +1436,16 @@ def verify_password(password: str, stored: str) -> bool:
 # CORE CONFIG / FILES
 # -----------------------------
 
-USERNAME_FILE = "usernames.txt"
-BLACKLIST_FILE = "blacklisted.txt"
-LOGS_FILE = "logs.txt"
-DEXPAID_KEYS_FILE = "dexpaid_keys.json"
-BANNER_FILE = "banner.txt"
-ANNOUNCEMENT_FILE = "announcement.txt"
+USERNAME_FILE = os.path.join(DATA_DIR, "usernames.txt")
+BLACKLIST_FILE = os.path.join(DATA_DIR, "blacklisted.txt")
+LOGS_FILE = os.path.join(DATA_DIR, "logs.txt")
+DEXPAID_KEYS_FILE = os.path.join(DATA_DIR, "dexpaid_keys.json")
+BANNER_FILE = os.path.join(DATA_DIR, "banner.txt")
+ANNOUNCEMENT_FILE = os.path.join(DATA_DIR, "announcement.txt")
 
-USERS_FILE = "users.json"
-SCRIPTS_FILE = "scripts.json"
-CHAT_DATA_DIR = os.environ.get("DEX_CHAT_DATA_DIR", "chat_data").strip() or "chat_data"
+USERS_FILE = os.path.join(DATA_DIR, "users.json")
+SCRIPTS_FILE = os.path.join(DATA_DIR, "scripts.json")
+CHAT_DATA_DIR = os.environ.get("DEX_CHAT_DATA_DIR", "").strip() or os.path.join(DATA_DIR, "chat_data")
 CHAT_MEDIA_DIR = os.path.join(CHAT_DATA_DIR, "media")
 CHAT_HISTORY_FILE = os.path.join(CHAT_DATA_DIR, "chat_messages.json")
 ME_CHAT_HISTORY_FILE = os.path.join(CHAT_DATA_DIR, "me_chat_messages.json")
@@ -2575,6 +2600,17 @@ INDEX_RATE_LIMIT = 30
 INDEX_RATE_WINDOW = 10.0
 
 
+@app.get("/favicon.ico")
+async def favicon_ico():
+    # Browsers/tabs request /favicon.ico directly (ignoring the <link> tags in
+    # <head>) whenever they can't resolve the icon another way. Without this
+    # explicit route, that request fell through to the catch-all dynamic
+    # loader below, which returned a "Private Script" text response instead
+    # of an image - that's why the tab showed a default grey globe instead
+    # of the DexNotifier icon. Redirecting here fixes it everywhere at once.
+    return RedirectResponse(url=DEX_FAVICON_URL, status_code=307)
+
+
 @app.get("/")
 async def index(request: Request):
     ip = _client_ip(request)
@@ -3680,7 +3716,7 @@ async def build_admin_dashboard_body() -> str:
             <span class="pill purple">/scripts</span>
         </p>
         <p class="label">Authenticated control center. Your Railway admin password is required to open this page, and every dashboard change is protected by the admin session.</p>
-        <div class="logs-box">Admin session: ACTIVE · Changes made below are saved immediately.</div>
+        <div class="logs-box">Admin session: ACTIVE · Changes made below are saved immediately. <a href="/admin/logout">Log out</a></div>
         <p class="small-text" style="margin-top:10px;">GitHub source: {github_status}</p>
         <div class="stats-grid">
             <div class="stat-box"><div class="stat-label">Registered Usernames</div><div class="stat-value" id="stat-usernames">0</div></div>
@@ -3767,18 +3803,9 @@ async def admin_post(request: Request):
     data = parse_qs(raw.decode(errors="ignore"))
     key = data.get("key", [""])[0]
 
-    # DEX_ADMIN_KEY is mandatory. An unset/empty variable can never log in.
-    if not ADMIN_PASSWORD or not key or not constant_time_eq(key, ADMIN_PASSWORD):
+    if not key or not constant_time_eq(key, ADMIN_PASSWORD):
         await record_failed_attempt("admin_login", ip)
-        return HTMLResponse(
-            ADMIN_BASE_HTML.format(
-                body=admin_login_form(
-                    "Admin password is not configured." if not ADMIN_PASSWORD
-                    else "Invalid admin password."
-                )
-            ),
-            status_code=503 if not ADMIN_PASSWORD else 200,
-        )
+        return HTMLResponse(ADMIN_BASE_HTML.format(body=admin_login_form("Invalid admin password.")))
 
     await clear_attempts("admin_login", ip)
     resp = HTMLResponse(ADMIN_BASE_HTML.format(body=await build_admin_dashboard_body()))
@@ -3794,6 +3821,20 @@ async def admin_post(request: Request):
 def require_admin_session(request: Request) -> bool:
     token = request.cookies.get("dex_admin_session")
     return verify_session_token(token, ADMIN_SESSION_MAX_AGE) == "admin"
+
+
+@app.get("/admin/logout")
+@app.post("/admin/logout")
+async def admin_logout():
+    # Clears the admin session cookie so /admin asks for the Railway
+    # DEX_ADMIN_KEY password again. Useful for testing that the password
+    # gate is actually working - an existing valid session cookie (good for
+    # ADMIN_SESSION_MAX_AGE, 2 hours) is what lets /admin skip straight to
+    # the dashboard, which is expected behavior, not a missing password gate.
+    resp = RedirectResponse(url="/admin", status_code=303)
+    resp.delete_cookie("dex_admin_session")
+    return resp
+
 
 @app.post("/admin/me-group")
 async def admin_me_group(request: Request):
@@ -4065,14 +4106,14 @@ async def dexpaid(request: Request):
 # Set DEX_API_KEY on this service. The obfuscator sends the same value in
 # X-Api-Key (or its own DEX_RAW_BACKEND_API_KEY if you want a separate key).
 
-RAW_LOADER_DIR = os.environ.get("DEX_RAW_LOADER_DIR", "raw_loaders").strip() or "raw_loaders"
+RAW_LOADER_DIR = os.environ.get("DEX_RAW_LOADER_DIR", "").strip() or os.path.join(DATA_DIR, "raw_loaders")
 RAW_LOADER_POST_RATE_LIMIT = 30
 RAW_LOADER_POST_RATE_WINDOW = 60.0
 RAW_LOADER_GET_RATE_LIMIT = 120
 RAW_LOADER_GET_RATE_WINDOW = 10.0
 RAW_LOADER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
-OBF_HISTORY_DIR = os.environ.get("DEX_OBF_HISTORY_DIR", "obf_history").strip() or "obf_history"
+OBF_HISTORY_DIR = os.environ.get("DEX_OBF_HISTORY_DIR", "").strip() or os.path.join(DATA_DIR, "obf_history")
 OBF_HISTORY_FILE = os.path.join(OBF_HISTORY_DIR, "index.json")
 OBF_HISTORY_MAX = 5000
 OBF_HISTORY_META_PREVIEW = 100
