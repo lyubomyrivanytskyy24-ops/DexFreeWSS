@@ -1051,26 +1051,66 @@ def _make_noise_expression():
 # local development still works without crashing.
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _write_test(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+    probe = os.path.join(path, ".dn_write_test")
+    with open(probe, "w") as f:
+        f.write("ok")
+    os.remove(probe)
+
+
 def _resolve_data_dir() -> str:
     candidate = (os.environ.get("DEX_DATA_DIR", "/data").strip() or "/data")
+    fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
     try:
-        os.makedirs(candidate, exist_ok=True)
-        probe = os.path.join(candidate, ".dn_write_test")
-        with open(probe, "w") as f:
-            f.write("ok")
-        os.remove(probe)
+        _write_test(candidate)
         return candidate
+    except PermissionError as e:
+        # By far the most common cause of "the volume is attached but data
+        # still disappears on redeploy": the container process does not own
+        # (or can't write to) the mounted directory - e.g. the Dockerfile
+        # runs as a non-root USER, or the volume was previously initialized
+        # by root and the app now runs as someone else. Try once to fix the
+        # permissions ourselves (works if we're root or already own it),
+        # then retest before giving up.
+        try:
+            os.chmod(candidate, 0o777)
+            _write_test(candidate)
+            return candidate
+        except Exception:
+            os.makedirs(fallback, exist_ok=True)
+            print(f"[DATA_DIR] PERMISSION DENIED writing to '{candidate}' ({e}). The Volume "
+                  f"is attached and mounted, but this process can't write to it - almost "
+                  f"always a Dockerfile USER/UID mismatch. Falling back to '{fallback}', "
+                  f"which is WIPED on every redeploy. Fix: run the container as root, or "
+                  f"add 'RUN chown -R <app-user> /data' (or chmod 777) in the Dockerfile "
+                  f"AFTER the volume mount path exists, then redeploy.")
+            return fallback
     except Exception as e:
-        fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
         os.makedirs(fallback, exist_ok=True)
-        print(f"[DATA_DIR] Could not use '{candidate}' ({e}). Falling back to '{fallback}'. "
-              f"On Railway, attach a Volume and set DEX_DATA_DIR (or mount it at /data) "
-              f"so this data survives redeploys.")
+        print(f"[DATA_DIR] Could not use '{candidate}' ({e}). Falling back to '{fallback}', "
+              f"which is WIPED on every redeploy. On Railway: make sure a Volume is "
+              f"attached to THIS service (not a different one) and its Mount Path is "
+              f"exactly '{candidate}', then redeploy.")
         return fallback
 
 
 DATA_DIR = _resolve_data_dir()
-print(f"[DATA_DIR] Persistent data directory in use: {DATA_DIR}")
+_USING_FALLBACK_DATA_DIR = DATA_DIR != (os.environ.get("DEX_DATA_DIR", "/data").strip() or "/data")
+if _USING_FALLBACK_DATA_DIR:
+    print(f"[DATA_DIR] *** WARNING: running WITHOUT persistent storage. Using ephemeral "
+          f"'{DATA_DIR}' - everything written here is lost on the next redeploy/restart. "
+          f"Check the Volume's Mount Path on this service and container write "
+          f"permissions, then redeploy. ***")
+else:
+    try:
+        import shutil as _shutil
+        _total, _used, _free = _shutil.disk_usage(DATA_DIR)
+        print(f"[DATA_DIR] Persistent data directory in use: {DATA_DIR} "
+              f"({_free // (1024**2)} MB free of {_total // (1024**2)} MB)")
+    except Exception:
+        print(f"[DATA_DIR] Persistent data directory in use: {DATA_DIR}")
 
 
 def _get_or_create_secret(env_name: str, file_name: str) -> str:
@@ -4338,6 +4378,38 @@ async def admin_me_group_get(request: Request):
     if not require_admin_session(request): return JSONResponse({"error":"unauthorized"},status_code=401)
     async with me_group_lock: members=sorted(me_group_users,key=str.lower)
     return JSONResponse({"ok":True,"members":members})
+
+
+@app.get("/admin/datadir")
+async def admin_datadir_status(request: Request):
+    # Quick way to check - without digging through deploy logs - whether this
+    # process is actually writing to the mounted Volume right now, or has
+    # silently fallen back to ephemeral local storage.
+    if not require_admin_session(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    configured = (os.environ.get("DEX_DATA_DIR", "/data").strip() or "/data")
+    live_write_ok = True
+    live_error = None
+    try:
+        _write_test(DATA_DIR)
+    except Exception as e:
+        live_write_ok = False
+        live_error = str(e)
+    disk = {}
+    try:
+        import shutil as _shutil
+        t, u, f = _shutil.disk_usage(DATA_DIR)
+        disk = {"total_mb": t // (1024**2), "used_mb": u // (1024**2), "free_mb": f // (1024**2)}
+    except Exception:
+        pass
+    return JSONResponse({
+        "configured_data_dir": configured,
+        "active_data_dir": DATA_DIR,
+        "using_persistent_volume": not _USING_FALLBACK_DATA_DIR,
+        "live_write_check_ok": live_write_ok,
+        "live_write_error": live_error,
+        "disk": disk,
+        "files_present": sorted(os.listdir(DATA_DIR)) if os.path.isdir(DATA_DIR) else [],
+    })
 
 @app.post("/admin/update")
 async def admin_update(request: Request):
