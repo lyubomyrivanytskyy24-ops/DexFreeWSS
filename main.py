@@ -165,9 +165,9 @@ body:has(.stats-grid) h1{font-size:clamp(28px,4vw,42px)!important}
 
 DEX_FAVICON_URL = "https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"
 DEX_FAVICON_HTML = (
-    f'<link rel="icon" type="image/webp" href="{DEX_FAVICON_URL}">'
-    f'<link rel="shortcut icon" href="{DEX_FAVICON_URL}">'
-    f'<link rel="apple-touch-icon" href="{DEX_FAVICON_URL}">'
+    f''
+    f''
+    f''
 )
 
 GLOBAL_UI_JS = r"""
@@ -182,7 +182,7 @@ GLOBAL_UI_JS = r"""
   if (window.matchMedia('(pointer:fine)').matches) window.addEventListener('pointermove', move, {passive:true});
 
   const existingChrome = document.querySelector('.dn-chrome');
-  const shouldAddChrome = !existingChrome && path !== '/' && path !== '/obfustucate' && path !== '/admin' && !path.startsWith('/admin/') && !document.querySelector('.dn-nav');
+  const shouldAddChrome = !existingChrome && path !== '/' && path !== '/obfustucate' && !document.querySelector('.dn-nav');
   if (shouldAddChrome && document.body) {
     const links = [
       ['/obfustucate','Obfustucate'],
@@ -196,11 +196,11 @@ GLOBAL_UI_JS = r"""
     nav.className = 'dn-chrome';
     const active = (href) => path === href || (href !== '/' && path.startsWith(href + '/'));
     nav.innerHTML = `
-      <a class="dn-chrome-brand" href="/">
+      <a class="dn-chrome-brand" href="/" target="_blank">
         <span class="dn-chrome-logo">D</span><span>DexNotifier</span>
       </a>
       <nav class="dn-chrome-links">
-        ${links.map(([href,label]) => `<a href="${href}" class="${active(href)?'active':''}">${label}</a>`).join('')}
+        ${links.map(([href,label]) => `<a href="${href}" class="${active(href)?'active':''}" target="_blank">${label}</a>`).join('')}
       </nav>
       <span class="dn-chrome-status"><i></i> Online</span>`;
     document.body.prepend(nav);
@@ -935,16 +935,13 @@ def _get_or_create_secret(env_name: str, file_name: str) -> str:
     return generated
 
 
-# Single shared key for the whole API. Defaults to the literal "DEXONTOP" so
-# the app works out of the box - override with DEX_API_KEY in any deployment
-# you want to actually secure (this default is visible to anyone who can
-# read this source file).
+# API key for the public/private API endpoints.
 API_KEY = (os.environ.get("DEX_API_KEY", "").strip() or "")
+# Admin access is controlled ONLY by the Railway environment variable DEX_ADMIN_KEY.
+# No fallback to DEX_API_KEY is used, so /admin cannot be opened accidentally.
 ADMIN_PASSWORD = os.environ.get("DEX_ADMIN_KEY", "").strip()
 SECRET_KEY = _get_or_create_secret("DEX_SECRET_KEY", ".dex_secret_key")
 BASE_URL = os.environ.get("DEX_BASE_URL", "https://dexapi1.up.railway.app").rstrip("/")
-if not ADMIN_PASSWORD:
-    print("[SECURITY] DEX_ADMIN_KEY is not configured; /admin will reject all login attempts until it is set in Railway.")
 
 
 def constant_time_eq(a: str, b: str) -> bool:
@@ -1428,8 +1425,8 @@ CHAT_HISTORY_MAX = 3000
 CHAT_MAX_MESSAGE = 4000
 CHAT_MAX_JSON = 12 * 1024 * 1024
 CHAT_MAX_MEDIA_BYTES = 8 * 1024 * 1024
-CHAT_RATE_LIMIT = 25
-CHAT_RATE_WINDOW = 10.0
+CHAT_RATE_LIMIT = 1
+CHAT_RATE_WINDOW = 2.0
 CHAT_ALLOWED_MEDIA = {"image/jpeg":".jpg","image/png":".png","image/gif":".gif","image/webp":".webp","video/mp4":".mp4","video/webm":".webm","video/quicktime":".mov"}
 chat_lock=asyncio.Lock(); me_chat_lock=asyncio.Lock(); me_group_lock=asyncio.Lock()
 chat_connections:Set[WebSocket]=set(); me_chat_connections:Set[WebSocket]=set()
@@ -1906,7 +1903,7 @@ hr{border:0!important;border-top:1px solid rgba(75,94,130,.25)!important}
 .badge,.pill,.tag{border-radius:999px!important;background:rgba(124,92,255,.12)!important;border:1px solid rgba(124,92,255,.30)!important;color:#cfd5ff!important}
 .status.ok,.success{color:var(--dex-green)!important}.status.error,.error{color:var(--dex-red)!important}
 ::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-track{background:#060a12}::-webkit-scrollbar-thumb{background:#243453;border-radius:999px;border:2px solid #060a12}::-webkit-scrollbar-thumb:hover{background:#354a73}
-@media(max-width:700px){body{font-size:14px}.wrap,.container{width:min(100% - 24px,1180px)!important;margin-left:auto!important;margin-right:auto!important}.card,.panel,.container,.box,.resultbox,.result,.script-card,.admin-card,.section,.hero-card,.feature,.stat,.table-wrap,.auth-card{border-radius:16px!important}.grid{grid-template-columns:1fr!important}.copyrow{flex-direction:column!important}.actions{flex-direction:column!important;align-items:stretch!important}button,.btn,input[type=submit],input[type=button]{min-height:46px}}
+@media(max-width:1100px){.wrap,.container{width:min(100% - 32px,1180px)!important;margin-left:auto!important;margin-right:auto!important}.grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}.table-wrap{overflow-x:auto!important}.dn-home-inner{width:100%!important}.dn-hero{grid-template-columns:1fr!important}.dn-bottom{grid-template-columns:repeat(2,minmax(0,1fr))!important}}@media(max-width:700px){body{font-size:14px}.wrap,.container{width:min(100% - 24px,1180px)!important;margin-left:auto!important;margin-right:auto!important}.card,.panel,.container,.box,.resultbox,.result,.script-card,.admin-card,.section,.hero-card,.feature,.stat,.table-wrap,.auth-card{border-radius:16px!important}.grid{grid-template-columns:1fr!important}.copyrow{flex-direction:column!important}.actions{flex-direction:column!important;align-items:stretch!important}.dn-bottom{grid-template-columns:1fr!important}.dn-nav{flex-wrap:wrap}.dn-actions{flex-direction:column}.dn-actions a{width:100%}button,.btn,input[type=submit],input[type=button]{min-height:46px}}
 </style>"""
         body = response.body
         if b"dex-global-skin" not in body:
@@ -1920,7 +1917,7 @@ hr{border:0!important;border-top:1px solid rgba(75,94,130,.25)!important}
 async def generic_exception_handler(request: Request, exc: Exception):
     # Never leak stack traces / internals to the client.
     print(f"❌ Unhandled exception on {request.url.path}: {exc}")
-    return PlainTextResponse("INTERNAL_ERROR", status_code=500)
+    return PlainTextResponse("Something went wrong. Please try again.", status_code=500)
 
 
 @app.on_event("startup")
@@ -2583,7 +2580,7 @@ async def index(request: Request):
     html_page = f"""
     <!doctype html>
     <html lang="en">
-    <head>
+    <head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536">
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
       <meta name="theme-color" content="#000000">
@@ -2626,14 +2623,14 @@ async def index(request: Request):
       <main class="dn-home"><div class="dn-home-inner">
         <nav class="dn-nav">
           <div class="dn-brand"><div class="dn-logo"><span>D</span></div><span>DexNotifier</span></div>
-          <div class="dn-navlinks"><a href="/obfustucate">Obfustucate</a><a href="/chat">Chat</a><a href="/scripts">Scripts</a><a href="/home">Home</a><a href="/admin">Admin</a></div>
+          <div class="dn-navlinks"><a href="/obfustucate" target="_blank">Obfustucate</a><a href="/chat" target="_blank">Chat</a><a href="/scripts" target="_blank">Scripts</a><a href="/home" target="_blank">Home</a><a href="/admin" target="_blank">Admin</a></div>
         </nav>
         <section class="dn-hero">
           <div>
             <div class="dn-eyebrow"><i class="dn-dot"></i> DexNotifier infrastructure</div>
             <h1>Build. Protect.<br><span>Ship Lua.</span></h1>
             <p>A modern control layer for your Lua loaders, protected payloads, script endpoints and private administration tools — all from one fast backend.</p>
-            <div class="dn-actions"><a class="dn-primary" href="/obfustucate">Open Obfustucate →</a><a class="dn-secondary" href="/chat">Open Chat</a><a class="dn-secondary" href="/scripts">Browse scripts</a></div>
+            <div class="dn-actions"><a class="dn-primary" href="/obfustucate" target="_blank">Open Obfustucate →</a><a class="dn-secondary" href="/chat" target="_blank">Open Chat</a><a class="dn-secondary" href="/scripts" target="_blank">Browse scripts</a></div>
           </div>
           <aside class="dn-side">
             <div class="dn-side-head"><strong>System overview</strong><span class="dn-status"><i class="dn-dot"></i> Online</span></div>
@@ -2662,7 +2659,7 @@ SCRIPTS_GET_RATE_WINDOW = 10.0
 SCRIPTS_PAGE_HTML = """
 <!DOCTYPE html>
 <html lang="en">
-<head>
+<head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536">
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>DEX SCRIPTS</title>
@@ -2772,7 +2769,7 @@ SCRIPTS_PAGE_HTML = """
         <div class="grid">
             {cards}
         </div>
-        <p class="paid-note">Looking for the paid script? Head to <a href="/dexpaid?key=YOUR_KEY">/dexpaid</a> with your key instead.</p>
+        <p class="paid-note">Looking for the paid script? Head to <a href="/dexpaid?key=YOUR_KEY" target="_blank">/dexpaid</a> with your key instead.</p>
         <footer>Dex API</footer>
     </div>
     <script>
@@ -2859,14 +2856,14 @@ async def scripts_page(request: Request):
 HOME_BASE_HTML = """
 <!DOCTYPE html>
 <html>
-<head>
+<head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536">
     <title>Dex Home</title>
     <style>
         :root {{ --bg: #050509; --card-bg: #0f0f16; --accent1: #4fc3f7; --accent2: #7c4dff; --accent3: #ff5252; --accent4: #00e676; --border: #1c1c24; }}
         * {{ box-sizing: border-box; }}
         body {{
-            background:#000;
-            background-image:radial-gradient(circle at 50% -20%, rgba(99,102,241,.10), transparent 38%), linear-gradient(180deg,#030305 0%,#000 100%);
+            background: radial-gradient(circle at top left, #202040 0, #050509 40%, #000000 100%),
+                linear-gradient(135deg, rgba(79,195,247,0.08), rgba(255,82,82,0.08));
             color:#e6e6e6; font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif; margin:0;
         }}
         .wrap {{ max-width:1200px; margin:40px auto; padding:0 20px 40px; }}
@@ -2923,7 +2920,7 @@ HOME_BASE_HTML = """
         .success {{ margin-top:10px; color:#00e676; font-size:13px; }}
     </style>
 </head>
-<body class="admin-page">
+<body>
     <div class="wrap">
         {body}
     </div>
@@ -2949,7 +2946,7 @@ def build_home_logged_out_body(message: str = "") -> str:
         <div class="grid">
             <div>
                 <h2>Login</h2>
-                <form method="post" action="/home">
+                <form method="post" action="/home" target="_blank">
                     <input type="hidden" name="action" value="login">
                     <label class="label">Username</label>
                     <input type="text" name="username" placeholder="Your username" maxlength="32">
@@ -2960,7 +2957,7 @@ def build_home_logged_out_body(message: str = "") -> str:
             </div>
             <div>
                 <h2>Register</h2>
-                <form method="post" action="/home">
+                <form method="post" action="/home" target="_blank">
                     <input type="hidden" name="action" value="register">
                     <label class="label">Username (3-32 chars: letters, numbers, _ -)</label>
                     <input type="text" name="username" placeholder="Choose a username" maxlength="32">
@@ -3012,7 +3009,7 @@ loadstring(game:HttpGet("{html.escape(endpoint)}"))()
             <p class="small-text" style="margin-top:10px;">Last generated loadstring (paid):</p>
             <div class="logs-box">{html.escape(last_loadstring or 'No paid loadstring yet.')}</div>
             <p class="small-text" style="margin-top:10px;">Edit script:</p>
-            <form method="post" action="/home">
+            <form method="post" action="/home" target="_blank">
                 <input type="hidden" name="action" value="update_script">
                 <input type="hidden" name="slug" value="{html.escape(slug)}">
                 <label class="label">Script Name</label>
@@ -3026,7 +3023,7 @@ loadstring(game:HttpGet("{html.escape(endpoint)}"))()
                 <button type="submit">Save Changes</button>
             </form>
             <p class="small-text" style="margin-top:10px;">Generate paid key for this script:</p>
-            <form method="post" action="/home">
+            <form method="post" action="/home" target="_blank">
                 <input type="hidden" name="action" value="generate_key">
                 <input type="hidden" name="slug" value="{html.escape(slug)}">
                 <label class="label">Duration (hours, max {MAX_KEY_DURATION_HOURS})</label>
@@ -3034,7 +3031,7 @@ loadstring(game:HttpGet("{html.escape(endpoint)}"))()
                 <button type="submit">Generate Key</button>
             </form>
             <p class="small-text" style="margin-top:10px;">Delete this script:</p>
-            <form method="post" action="/home">
+            <form method="post" action="/home" target="_blank">
                 <input type="hidden" name="action" value="delete_script">
                 <input type="hidden" name="slug" value="{html.escape(slug)}">
                 <button type="submit" style="background:linear-gradient(135deg,#ff5252,#ff1744);">Delete Script</button>
@@ -3058,7 +3055,7 @@ loadstring(game:HttpGet("{html.escape(endpoint)}"))()
             <span class="pill green">Create / Edit Scripts</span>
             <span class="pill purple">Paid / Free & HWID Lock</span>
         </p>
-        <form method="post" action="/home" style="margin-top:10px;">
+        <form method="post" action="/home" style="margin-top:10px;" target="_blank">
             <input type="hidden" name="action" value="logout">
             <button type="submit" style="background:linear-gradient(135deg,#ff5252,#ff1744);">Logout</button>
         </form>
@@ -3068,7 +3065,7 @@ loadstring(game:HttpGet("{html.escape(endpoint)}"))()
     <div class="card">
         <h2>Create New Script</h2>
         <p class="label">Name determines endpoint. Spaces become dashes. Example: "Dex 2" -> /Dex-2</p>
-        <form method="post" action="/home">
+        <form method="post" action="/home" target="_blank">
             <input type="hidden" name="action" value="create_script">
             <label class="label">Script Name</label>
             <input type="text" name="name" placeholder="e.g. Dexnew, Dex 2" maxlength="48">
@@ -3332,14 +3329,14 @@ async def home_post(request: Request):
 ADMIN_BASE_HTML = """
 <!DOCTYPE html>
 <html>
-<head>
+<head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536">
     <title>Dex Admin</title>
     <style>
         :root {{ --bg: #050509; --card-bg: #0f0f16; --accent1: #4fc3f7; --accent2: #7c4dff; --accent3: #ff5252; --accent4: #00e676; --border: #1c1c24; }}
         * {{ box-sizing: border-box; }}
         body {{
-            background:#000;
-            background-image:radial-gradient(circle at 50% -20%, rgba(99,102,241,.10), transparent 38%), linear-gradient(180deg,#030305 0%,#000 100%);
+            background: radial-gradient(circle at top left, #202040 0, #050509 40%, #000000 100%),
+                linear-gradient(135deg, rgba(79,195,247,0.08), rgba(255,82,82,0.08));
             color:#e6e6e6; font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif; margin:0;
         }}
         .wrap {{ max-width:1200px; margin:40px auto; padding:0 20px 40px; }}
@@ -3391,26 +3388,6 @@ ADMIN_BASE_HTML = """
             font-family:monospace; font-size:12px; max-height:240px; overflow:auto; white-space:pre-wrap;
         }}
         a.repo-link {{ color:#4fc3f7; }}
-        /* Admin layout hardening: scoped so the global UI skin cannot overlap dashboard cards. */
-        .admin-shell{{width:100%;max-width:1180px;margin:0 auto;padding:clamp(18px,3vw,34px);overflow:visible}}
-        .admin-shell *{{min-width:0}}
-        .admin-topbar{{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;margin-bottom:20px}}
-        .admin-topbar>div{{min-width:0}}
-        .admin-grid-2{{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;align-items:start}}
-        .admin-grid-3{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:stretch}}
-        .admin-card-inner{{width:100%;min-width:0}}
-        .admin-control-row{{align-items:flex-start!important}}
-        .admin-control-row>div{{flex-wrap:wrap;min-width:0}}
-        .admin-control-row button{{margin-top:0!important}}
-        .admin-table-wrap{{width:100%;overflow-x:auto;border-radius:14px;-webkit-overflow-scrolling:touch}}
-        .admin-table-wrap table{{width:100%;min-width:620px;border-collapse:collapse}}
-        .admin-table-wrap td,.admin-table-wrap th{{padding:10px;text-align:left;vertical-align:top}}
-        .admin-stat-grid{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}}
-        .admin-stat-grid .stat-box{{min-width:0;overflow:hidden}}
-        .admin-stat-grid .stat-value{{overflow-wrap:anywhere}}
-        .admin-control-form input,.admin-control-form textarea,.admin-control-form select{{max-width:100%;min-width:0}}
-        @media(max-width:900px){{.admin-grid-2,.admin-grid-3{{grid-template-columns:1fr}}.admin-stat-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}}}
-        @media(max-width:600px){{.wrap{{margin:18px auto!important;padding:0 12px 28px!important}}.card{{padding:16px!important;border-radius:17px!important;margin-bottom:14px!important}}.admin-shell{{padding:0!important}}.admin-topbar{{align-items:flex-start;gap:12px}}.admin-topbar h1{{font-size:23px}}.admin-stat-grid{{grid-template-columns:1fr 1fr;gap:9px}}.admin-control-row{{flex-direction:column}}.admin-control-row>div{{width:100%}}.admin-control-row button{{width:100%;min-width:0}}.admin-control-form textarea{{min-height:130px}}}
     .admin-announcement-card{{position:relative;overflow:hidden}}.admin-control-form{{margin-top:16px}}.admin-control-form textarea{{width:100%;min-height:105px;resize:vertical;padding:14px 15px;border-radius:15px;border:1px solid rgba(148,163,184,.16);background:rgba(4,7,12,.72);color:#f8fafc;outline:none;font:inherit;transition:.2s ease}}.admin-control-form textarea:focus{{border-color:rgba(129,140,248,.65);box-shadow:0 0 0 4px rgba(99,102,241,.10)}}.admin-control-row{{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:11px;flex-wrap:wrap}}.admin-control-row>div{{display:flex;gap:8px}}.admin-control-row button{{min-width:145px}}.admin-control-row .ghost-btn{{background:rgba(255,255,255,.045)!important;border-color:rgba(255,255,255,.10)!important;box-shadow:none!important}}
 </style>
     <script>
@@ -3499,7 +3476,6 @@ ADMIN_BASE_HTML = """
 def admin_login_form(error: str = "") -> str:
     err_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
     return f"""
-    <div class="admin-shell">
     <div class="card">
         <h1>Dex Admin Login</h1>
         <p class="label">
@@ -3515,7 +3491,6 @@ def admin_login_form(error: str = "") -> str:
             <button type="submit">Open Control Center</button>
         </form>
         {err_html}
-    </div>
     </div>
     """
 
@@ -3688,7 +3663,6 @@ async def build_admin_dashboard_body() -> str:
     )
 
     body = f"""
-    <div class="admin-shell">
     <div class="card">
         <h1>Dex Control Center</h1>
         <p class="label">
@@ -3770,7 +3744,6 @@ async def build_admin_dashboard_body() -> str:
     </div>
     """
     body += await build_me_group_admin_panel()
-    body += "</div>"
     return body
 
 
@@ -4237,7 +4210,7 @@ async def get_raw_loader(loader_id: str, request: Request):
         return PlainTextResponse("NOT_FOUND", status_code=404)
     except Exception as exc:
         print(f"[RAW_LOADER] Failed to read {loader_id}: {exc}")
-        return PlainTextResponse("INTERNAL_ERROR", status_code=500)
+        return PlainTextResponse("Something went wrong. Please try again.", status_code=500)
 
     return PlainTextResponse(
         payload,
@@ -5500,19 +5473,18 @@ OBF_RATE_WINDOW = 60.0
 OBF_MAX_SOURCE = 2 * 1024 * 1024
 
 OBF_PAGE = r"""<!doctype html>
-<html lang="en"><head>
+<html lang="en"><head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536">
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#070a12"><title>Obfustucate — DexNotifier</title>
 <style>
-*{box-sizing:border-box}body{margin:0!important;color:#f8fafc;display:block!important;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#050713;overflow-x:hidden}
-.page{display:block!important;width:100%!important;max-width:none!important;min-height:100vh;padding:28px 28px 70px;position:relative;margin:0!important;text-align:initial!important}.page:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circle at 20% 10%,rgba(124,92,246,.24),transparent 28%),radial-gradient(circle at 85% 20%,rgba(34,211,238,.14),transparent 24%);filter:blur(20px);animation:aurora 12s ease-in-out infinite alternate;pointer-events:none}
-.shell{display:block!important;width:min(1320px,calc(100% - 40px))!important;max-width:1320px!important;margin:0 auto!important;position:relative!important}.nav{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:62px}.brand{display:flex;align-items:center;gap:11px;font-weight:950}.logo{width:42px;height:42px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#8b5cf6,#22d3ee);box-shadow:0 15px 45px rgba(99,102,241,.35);animation:float 4s ease-in-out infinite}.navlinks{display:flex;gap:8px}.navlinks a{padding:10px 13px;border-radius:12px;border:1px solid rgba(148,163,184,.12);background:rgba(12,17,33,.65);color:#cbd5e1;text-decoration:none;font-size:13px;font-weight:800}.hero{text-align:center;max-width:850px;margin:0 auto 34px}.eyebrow{display:inline-flex;align-items:center;gap:8px;color:#c4b5fd;text-transform:uppercase;letter-spacing:.16em;font-size:11px;font-weight:950}.live{width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 16px #34d399}.hero h1{font-size:clamp(54px,9vw,92px);line-height:.92;letter-spacing:-.075em;margin:17px 0 18px}.hero h1 span{background:linear-gradient(100deg,#fff,#c4b5fd 48%,#67e8f9);-webkit-background-clip:text;background-clip:text;color:transparent}.hero p{margin:auto;max-width:670px;color:#96a2bb;font-size:16px;line-height:1.7}.workspace{display:block;width:100%!important;max-width:1320px!important;margin:36px auto 0!important;padding:18px;border:1px solid rgba(148,163,184,.14);border-radius:28px;background:linear-gradient(145deg,rgba(15,21,40,.86),rgba(7,11,22,.86));box-shadow:0 35px 100px rgba(0,0,0,.45);backdrop-filter:blur(22px)}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:3px 4px 15px}.traffic{display:flex;gap:7px}.traffic i{width:9px;height:9px;border-radius:50%;background:#334155}.traffic i:nth-child(1){background:#fb7185}.traffic i:nth-child(2){background:#fbbf24}.traffic i:nth-child(3){background:#34d399}.toolbar-title{font-size:12px;color:#8793ac;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.editor-card{padding:18px;border-radius:20px;background:rgba(3,7,16,.72);border:1px solid rgba(148,163,184,.12)}.label{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px;font-weight:900}.hint{color:#69758d;font-weight:700}.editor{display:block;width:100%!important;min-height:460px;resize:vertical;border:1px solid #24314a;border-radius:16px;background:#040811;color:#dbeafe;padding:18px;font:14px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;outline:none;transition:.25s}.editor:focus{border-color:#8b5cf6;box-shadow:0 0 0 4px rgba(139,92,246,.11),0 0 45px rgba(139,92,246,.08)}.actionbar{display:flex;align-items:center;gap:12px;margin-top:14px}.go{flex:1;min-height:54px;border:0;border-radius:15px;color:white;font-weight:950;font-size:14px;cursor:pointer;background:linear-gradient(110deg,#8b5cf6,#6366f1,#22d3ee);background-size:200% 100%;box-shadow:0 16px 45px rgba(99,102,241,.25);transition:.25s}.go:hover{transform:translateY(-2px);background-position:100% 0}.go:disabled{opacity:.65;cursor:wait;transform:none}.status{min-width:120px;text-align:right;color:#77839b;font-size:12px;font-weight:800}.status.ok{color:#6ee7b7}.status.error{color:#fb7185}.results{display:grid;gap:14px;margin-top:14px}.result{padding:17px;border-radius:19px;background:rgba(4,8,17,.78);border:1px solid rgba(148,163,184,.12)}.result-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.result-head strong{font-size:13px}.result-head span{font-size:11px;color:#64748b}.copyrow{display:flex;gap:9px}.out{flex:1;min-width:0;min-height:74px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:13px;border:1px solid #1f2b41;border-radius:13px;background:#03070f;color:#cfe0ff;font:12px/1.55 ui-monospace,monospace}.copy{min-width:86px;border:1px solid rgba(148,163,184,.14);border-radius:13px;background:#11192b;color:white;font-weight:900;cursor:pointer}.footer{text-align:center;color:#536078;font-size:11px;margin-top:20px}
+*{box-sizing:border-box}html,body{width:100%;min-width:0}body{margin:0!important;color:#f8fafc;display:block!important;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#050713;overflow-x:hidden}
+.page{display:flex!important;flex-direction:column!important;align-items:center!important;width:100%!important;max-width:none!important;min-height:100vh;padding:28px clamp(14px,3vw,42px) 70px;position:relative;margin:0 auto!important;text-align:initial!important}.page:before{content:"";position:fixed;inset:-20%;background:radial-gradient(circle at 20% 10%,rgba(124,92,246,.24),transparent 28%),radial-gradient(circle at 85% 20%,rgba(34,211,238,.14),transparent 24%);filter:blur(20px);animation:aurora 12s ease-in-out infinite alternate;pointer-events:none}.shell{display:block!important;width:100%!important;max-width:1320px!important;margin:0 auto!important;position:relative!important}.nav{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:62px}.brand{display:flex;align-items:center;gap:11px;font-weight:950}.logo{width:42px;height:42px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#8b5cf6,#22d3ee);box-shadow:0 15px 45px rgba(99,102,241,.35);animation:float 4s ease-in-out infinite}.navlinks{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}.navlinks a{padding:10px 13px;border-radius:12px;border:1px solid rgba(148,163,184,.12);background:rgba(12,17,33,.65);color:#cbd5e1;text-decoration:none;font-size:13px;font-weight:800}.hero{text-align:center;max-width:850px;margin:0 auto 34px;width:100%}.eyebrow{display:inline-flex;align-items:center;gap:8px;color:#c4b5fd;text-transform:uppercase;letter-spacing:.16em;font-size:11px;font-weight:950}.live{width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 16px #34d399}.hero h1{font-size:clamp(54px,9vw,92px);line-height:.92;letter-spacing:-.075em;margin:17px 0 18px}.hero h1 span{background:linear-gradient(100deg,#fff,#c4b5fd 48%,#67e8f9);-webkit-background-clip:text;background-clip:text;color:transparent}.hero p{margin:auto;max-width:670px;color:#96a2bb;font-size:16px;line-height:1.7}.workspace{display:block;width:100%!important;max-width:1320px!important;margin:36px auto 0!important;padding:18px;border:1px solid rgba(148,163,184,.14);border-radius:28px;background:linear-gradient(145deg,rgba(15,21,40,.86),rgba(7,11,22,.86));box-shadow:0 35px 100px rgba(0,0,0,.45);backdrop-filter:blur(22px);align-self:center}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:3px 4px 15px}.traffic{display:flex;gap:7px}.traffic i{width:9px;height:9px;border-radius:50%;background:#334155}.traffic i:nth-child(1){background:#fb7185}.traffic i:nth-child(2){background:#fbbf24}.traffic i:nth-child(3){background:#34d399}.toolbar-title{font-size:12px;color:#8793ac;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.editor-card{padding:18px;border-radius:20px;background:rgba(3,7,16,.72);border:1px solid rgba(148,163,184,.12)}.label{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;font-size:13px;font-weight:900}.hint{color:#69758d;font-weight:700}.editor{display:block;width:100%!important;min-height:460px;resize:vertical;border:1px solid #24314a;border-radius:16px;background:#040811;color:#dbeafe;padding:18px;font:14px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;outline:none;transition:.25s}.editor:focus{border-color:#8b5cf6;box-shadow:0 0 0 4px rgba(139,92,246,.11),0 0 45px rgba(139,92,246,.08)}.actionbar{display:flex;align-items:center;gap:12px;margin-top:14px}.go{flex:1;min-height:54px;border:0;border-radius:15px;color:white;font-weight:950;font-size:14px;cursor:pointer;background:linear-gradient(110deg,#8b5cf6,#6366f1,#22d3ee);background-size:200% 100%;box-shadow:0 16px 45px rgba(99,102,241,.25);transition:.25s}.go:hover{transform:translateY(-2px);background-position:100% 0}.go:disabled{opacity:.65;cursor:wait;transform:none}.status{min-width:120px;text-align:right;color:#77839b;font-size:12px;font-weight:800}.status.ok{color:#6ee7b7}.status.error{color:#fb7185}.results{display:grid;gap:14px;margin-top:14px}.result{padding:17px;border-radius:19px;background:rgba(4,8,17,.78);border:1px solid rgba(148,163,184,.12)}.result-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.result-head strong{font-size:13px}.result-head span{font-size:11px;color:#64748b}.copyrow{display:flex;gap:9px}.out{flex:1;min-width:0;min-height:74px;max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:13px;border:1px solid #1f2b41;border-radius:13px;background:#03070f;color:#cfe0ff;font:12px/1.55 ui-monospace,monospace}.copy{min-width:86px;border:1px solid rgba(148,163,184,.14);border-radius:13px;background:#11192b;color:white;font-weight:900;cursor:pointer}.footer{text-align:center;color:#536078;font-size:11px;margin-top:20px}
 @keyframes aurora{from{transform:translate3d(-2%,0,0) scale(1)}to{transform:translate3d(2%,2%,0) scale(1.06)}}@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-6px)}}
-@media(max-width:900px){.page{width:100%!important;max-width:none!important;padding:18px 12px 45px}.shell{width:100%!important;max-width:none!important}.nav{margin-bottom:45px}.navlinks{display:none}.hero h1{font-size:clamp(50px,17vw,72px)}.hero p{font-size:14px}.workspace{padding:11px;border-radius:22px}.editor-card{padding:12px}.editor{min-height:300px;font-size:12px}.actionbar{flex-direction:column;align-items:stretch}.go{width:100%}.status{text-align:center;min-width:0}.copyrow{flex-direction:column}.copy{width:100%;min-height:44px}.toolbar{padding-bottom:11px}}
+@media(max-width:1100px){.page{padding-left:20px;padding-right:20px}.shell{max-width:100%!important}.workspace{width:100%!important}.hero{max-width:780px}.nav{margin-bottom:48px}}@media(max-width:900px){.page{width:100%!important;max-width:none!important;padding:18px 14px 45px}.shell{width:100%!important;max-width:none!important}.nav{margin-bottom:38px}.navlinks{display:none}.hero{width:100%;padding:0 4px}.hero h1{font-size:clamp(48px,15vw,72px)}.hero p{font-size:14px;max-width:620px}.workspace{width:100%!important;max-width:100%!important;margin:26px auto 0!important;padding:11px;border-radius:22px}.editor-card{padding:12px}.editor{min-height:300px;font-size:12px}.actionbar{flex-direction:column;align-items:stretch}.go{width:100%}.status{text-align:center;min-width:0}.copyrow{flex-direction:column}.copy{width:100%;min-height:44px}.toolbar{padding-bottom:11px}}@media(max-width:520px){.page{padding:14px 10px 34px}.brand{font-size:14px}.logo{width:38px;height:38px;border-radius:12px}.hero h1{font-size:clamp(42px,16vw,60px)}.hero p{font-size:13px}.workspace{padding:9px;border-radius:19px}.editor{min-height:260px;padding:14px}.result{padding:13px}.result-head{align-items:flex-start;flex-direction:column;gap:4px}.footer{font-size:10px}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head>
 <body><main class="page"><div class="shell">
-<nav class="nav"><div class="brand"><div class="logo">D</div><span>DexNotifier</span></div><div class="navlinks"><a href="/">Home</a><a href="/scripts">Scripts</a><a href="/home">Dashboard</a></div></nav>
+<nav class="nav"><div class="brand"><div class="logo">D</div><span>DexNotifier</span></div><div class="navlinks"><a href="/" target="_blank">Home</a><a href="/scripts" target="_blank">Scripts</a><a href="/home" target="_blank">Dashboard</a></div></nav>
 <section class="hero"><div class="eyebrow"><i class="live"></i> Lua protection tool</div><h1><span>Obfustucate</span></h1><p>Paste your raw Lua source below. DexNotifier generates the protected payload and the exact raw loadstring you can copy.</p></section>
 <section class="workspace"><div class="toolbar"><div class="traffic"><i></i><i></i><i></i></div><div class="toolbar-title">Protected Lua workspace</div><div style="width:39px"></div></div>
 <div class="editor-card"><div class="label"><span>Source</span><span class="hint">Lua · UTF-8</span></div><textarea id="source" class="editor" spellcheck="false" placeholder="-- paste your Lua source here"></textarea><div class="actionbar"><button id="go" class="go">Obfustucate Lua</button><span id="status" class="status">Ready</span></div></div>
@@ -5730,7 +5702,7 @@ def _chat_page_html(username: str, me: bool = False) -> str:
     title = "ME-Chat" if me else "Chat"
     subtitle = "Your private ME-Group conversation" if me else "A fast, live place to talk and share media"
     badge = "ME-GROUP • PRIVATE" if me else "LIVE COMMUNITY"
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#050608"><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><title>{title} — DexNotifier</title><style>{CHAT_PAGE_CSS}</style></head><body><main class="chat-page"><section class="chat-hero"><div><span class="chat-badge"><i style="width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 14px #34d399"></i>{badge}</span><h1>{title}</h1><p>{subtitle}. You're signed in as <strong>{html.escape(username)}</strong>.</p></div><nav class="dn-chrome-links"><a href="/">Home</a><a href="/obfustucate">Obfustucate</a><a href="/chat">Chat</a><a href="/ME-chat">ME-Chat</a><a href="/home">Dashboard</a></nav></section><section class="chat-shell"><aside class="chat-side"><div class="chat-side-card"><strong>{html.escape(username)}</strong><span>Your account</span><span class="chat-online" style="margin-top:10px"><i></i> Online</span></div><div class="chat-side-card"><strong>{'ME-Group' if me else 'Community'}</strong><span>{'Private conversation for approved accounts.' if me else 'Everyone who is signed in can join.'}</span></div><div class="chat-side-card"><strong>Share media</strong><span>Send photos and videos directly in the conversation.</span></div></aside><section class="chat-main"><header class="chat-top"><div><strong>{title}</strong><small id="chat-status">Connecting…</small></div><span id="chat-count" class="chat-count">0 online</span></header><div id="chat-messages" class="chat-messages"><div class="chat-empty"><b>Welcome to {title}</b><span>Your conversation is saved automatically and stays available when you come back.</span></div></div><footer class="chat-compose"><div id="chat-preview" class="chat-preview"><div id="chat-preview-media"></div><div class="chat-preview-info"><strong id="chat-preview-title"></strong><span id="chat-preview-meta"></span></div><button type="button" id="chat-preview-clear" class="chat-preview-clear">×</button></div><div class="chat-input-row"><input id="chat-file" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime" hidden><button type="button" class="chat-icon-btn" onclick="document.getElementById('chat-file').click()" title="Add photo or video">＋</button><textarea id="chat-input" class="chat-input" placeholder="Write a message…" maxlength="{CHAT_MAX_MESSAGE}"></textarea><button id="chat-send" class="chat-send" disabled>Send</button></div><div id="chat-file-name" class="chat-file-name"></div></footer></section></section></main><script>window.__DN_CHAT_CONFIG__={{me:{str(me).lower()},username:{json.dumps(username)},maxMedia:{CHAT_MAX_MEDIA_BYTES}}};</script>{CHAT_PAGE_JS}</body></html>'''
+    return f'''<!doctype html><html lang="en"><head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#050608"><title>{title} — DexNotifier</title><style>{CHAT_PAGE_CSS}</style></head><body><main class="chat-page"><section class="chat-hero"><div><span class="chat-badge"><i style="width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 14px #34d399"></i>{badge}</span><h1>{title}</h1><p>{subtitle}. You're signed in as <strong>{html.escape(username)}</strong>.</p></div><nav class="dn-chrome-links"><a href="/" target="_blank">Home</a><a href="/obfustucate" target="_blank">Obfustucate</a><a href="/chat" target="_blank">Chat</a><a href="/ME-chat" target="_blank">ME-Chat</a><a href="/home" target="_blank">Dashboard</a></nav></section><section class="chat-shell"><aside class="chat-side"><div class="chat-side-card"><strong>{html.escape(username)}</strong><span>Your account</span><span class="chat-online" style="margin-top:10px"><i></i> Online</span></div><div class="chat-side-card"><strong>{'ME-Group' if me else 'Community'}</strong><span>{'Private conversation for approved accounts.' if me else 'Everyone who is signed in can join.'}</span></div><div class="chat-side-card"><strong>Share media</strong><span>Send photos and videos directly in the conversation.</span></div></aside><section class="chat-main"><header class="chat-top"><div><strong>{title}</strong><small id="chat-status">Connecting…</small></div><span id="chat-count" class="chat-count">0 online</span></header><div id="chat-messages" class="chat-messages"><div class="chat-empty"><b>Welcome to {title}</b><span>Your conversation is saved automatically and stays available when you come back.</span></div></div><footer class="chat-compose"><div id="chat-preview" class="chat-preview"><div id="chat-preview-media"></div><div class="chat-preview-info"><strong id="chat-preview-title"></strong><span id="chat-preview-meta"></span></div><button type="button" id="chat-preview-clear" class="chat-preview-clear">×</button></div><div class="chat-input-row"><input id="chat-file" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime" hidden><button type="button" class="chat-icon-btn" onclick="document.getElementById('chat-file').click()" title="Add photo or video">＋</button><textarea id="chat-input" class="chat-input" placeholder="Write a message…" maxlength="{CHAT_MAX_MESSAGE}"></textarea><button id="chat-send" class="chat-send" disabled>Send</button></div><div id="chat-file-name" class="chat-file-name"></div></footer></section></section></main><script>window.__DN_CHAT_CONFIG__={{me:{str(me).lower()},username:{json.dumps(username)},maxMedia:{CHAT_MAX_MEDIA_BYTES}}};</script>{CHAT_PAGE_JS}</body></html>'''
 
 @app.get("/chat")
 async def chat_page(request: Request):
