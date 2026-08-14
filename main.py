@@ -12,7 +12,6 @@ import secrets
 import re
 import unicodedata
 import urllib.request
-import urllib.error
 from collections import defaultdict, deque
 from typing import Set, Dict, Any, Optional
 from urllib.parse import parse_qs, urlencode
@@ -3236,38 +3235,46 @@ DISCORD_LOGIN_RATE_LIMIT = 20
 DISCORD_LOGIN_RATE_WINDOW = 60.0
 DISCORD_STATE_MAX_AGE = 600  # 10 minutes to complete the Discord round-trip
 
-# The dex_discord_state cookie set below is defense-in-depth, but it is no
-# longer the source of truth for the state check - some browsers/in-app
-# webviews (Discord's own mobile in-app browser included) don't reliably
-# round-trip a cookie set on /login back to /auth/discord/callback, which
-# is what caused spurious discord_error=invalid_state redirects. Instead,
-# every state token we hand out is tracked here, server-side, so the
-# callback can validate + single-use-consume it even when the cookie never
-# makes it back.
-DISCORD_PENDING_STATES: Dict[str, float] = {}
-discord_state_lock = asyncio.Lock()
+# The dex_discord_state cookie set below is defense-in-depth, but it is not
+# the source of truth for the state check - some browsers/in-app webviews
+# (Discord's own mobile in-app browser included) don't reliably round-trip
+# a cookie set on /login back to /auth/discord/callback.
+#
+# An in-memory "pending states" dict is NOT reliable either: if Railway ever
+# runs more than one replica/worker (or restarts the process between the two
+# requests), /login and /auth/discord/callback can be handled by different
+# processes that don't share memory, and the callback would reject a
+# perfectly valid state - this is what caused the discord_error=invalid_state
+# redirects. Instead, the state we hand out IS the proof: a signed,
+# timestamped token (HMAC'd with SECRET_KEY), so ANY process can verify it
+# on its own, with zero shared state, regardless of replica count or
+# restarts.
+DISCORD_STATE_SEP = "."
 
 
-def _purge_expired_discord_states(now: float) -> None:
-    for s in [s for s, exp in DISCORD_PENDING_STATES.items() if exp <= now]:
-        DISCORD_PENDING_STATES.pop(s, None)
+def _make_discord_state() -> str:
+    nonce = secrets.token_urlsafe(16)
+    expires = str(int(time.time()) + DISCORD_STATE_MAX_AGE)
+    payload = f"{nonce}{DISCORD_STATE_SEP}{expires}"
+    sig = hmac.new(SECRET_KEY.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}{DISCORD_STATE_SEP}{sig}"
 
 
-async def _register_discord_state(state: str) -> None:
-    now = time.time()
-    async with discord_state_lock:
-        _purge_expired_discord_states(now)
-        DISCORD_PENDING_STATES[state] = now + DISCORD_STATE_MAX_AGE
-
-
-async def _consume_discord_state(state: str) -> bool:
-    """One-time check: True iff `state` was handed out recently and hasn't
-    already been used. Always removes it, win or lose, so a state can never
-    be replayed."""
-    now = time.time()
-    async with discord_state_lock:
-        _purge_expired_discord_states(now)
-        return DISCORD_PENDING_STATES.pop(state, None) is not None
+def _verify_discord_state(state: str) -> bool:
+    """Stateless check: the token is well-formed, its signature matches
+    (proving we issued it), and it hasn't expired."""
+    parts = state.split(DISCORD_STATE_SEP)
+    if len(parts) != 3:
+        return False
+    nonce, expires, sig = parts
+    payload = f"{nonce}{DISCORD_STATE_SEP}{expires}"
+    expected_sig = hmac.new(SECRET_KEY.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not constant_time_eq(sig, expected_sig):
+        return False
+    try:
+        return int(expires) >= int(time.time())
+    except ValueError:
+        return False
 
 
 def _discord_avatar_url(discord_id: str, avatar_hash: Optional[str], discriminator: str) -> str:
@@ -3295,18 +3302,8 @@ def _discord_exchange_code_sync(code: str) -> Optional[dict]:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        # Discord's 4xx body says exactly what's wrong (bad client secret,
-        # reused/expired code, redirect_uri mismatch, ...) - read it instead
-        # of discarding it, or this is undebuggable from the logs alone.
-        try:
-            body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            body = "<no body>"
-        print(f"[DISCORD OAUTH] token exchange HTTP {e.code}: {body}")
-        return None
     except Exception as e:
-        print(f"[DISCORD OAUTH] token exchange failed: {type(e).__name__}: {e}")
+        print(f"[DISCORD OAUTH] token exchange failed: {e}")
         return None
 
 
@@ -3390,8 +3387,7 @@ async def discord_login(request: Request):
     if get_logged_in_user(request):
         return RedirectResponse(url="/", status_code=303)
 
-    state = secrets.token_urlsafe(24)
-    await _register_discord_state(state)
+    state = _make_discord_state()
     params = {
         "client_id": DISCORD_CLIENT_ID,
         "redirect_uri": DISCORD_REDIRECT_URI,
@@ -3404,10 +3400,11 @@ async def discord_login(request: Request):
     # samesite="lax" (not "strict") is required here: Discord sends the
     # person back with a top-level cross-site GET redirect, and a "strict"
     # cookie would not be attached to that request, breaking the state check.
-    # This cookie is now just an extra check on top of
-    # _register_discord_state() above, which is the real source of truth -
-    # so login still works even when a browser/webview doesn't send the
-    # cookie back at all (see /auth/discord/callback).
+    # This cookie is now just an extra check on top of the signed state
+    # token above, which is the real source of truth - so login still works
+    # even when a browser/webview doesn't send the cookie back at all, and
+    # regardless of how many server processes are handling requests
+    # (see /auth/discord/callback).
     resp.set_cookie(
         "dex_discord_state", state,
         httponly=True, secure=True, samesite="lax",
@@ -3434,12 +3431,13 @@ async def discord_callback(request: Request):
     state = request.query_params.get("state", "")
     cookie_state = request.cookies.get("dex_discord_state", "")
 
-    # The server-side table (populated in /login) is the real check, and it
-    # is what makes this work even when a browser/webview never sends
-    # dex_discord_state back. If a cookie *was* sent, it still has to match
-    # the state Discord returned, so a swapped-out state is still caught
-    # for the common case where the cookie does round-trip correctly.
-    state_recognized = bool(state) and await _consume_discord_state(state)
+    # The signature check is the real check, and it is what makes this work
+    # even when a browser/webview never sends dex_discord_state back, and
+    # regardless of how many Railway replicas/workers are running. If a
+    # cookie *was* sent, it still has to match the state Discord returned,
+    # so a swapped-out state is still caught for the common case where the
+    # cookie does round-trip correctly.
+    state_recognized = bool(state) and _verify_discord_state(state)
     cookie_matches = (not cookie_state) or constant_time_eq(state, cookie_state)
 
     if not code or not state or not state_recognized or not cookie_matches:
