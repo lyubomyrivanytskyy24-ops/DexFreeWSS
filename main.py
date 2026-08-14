@@ -12,6 +12,7 @@ import secrets
 import re
 import unicodedata
 import urllib.request
+import urllib.error
 from collections import defaultdict, deque
 from typing import Set, Dict, Any, Optional
 from urllib.parse import parse_qs, urlencode
@@ -3299,9 +3300,22 @@ def _discord_exchange_code_sync(code: str) -> Optional[dict]:
     }).encode("utf-8")
     req = urllib.request.Request("https://discord.com/api/oauth2/token", data=payload, method="POST")
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    req.add_header("User-Agent", "DexNotifier (https://dexapi1.up.railway.app, 1.0)")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Discord's actual reason (invalid_client, invalid_grant, redirect_uri
+        # mismatch, etc.) is in the response body - the old code discarded
+        # this, which is why token_exchange_failed gave no clue why. Now it's
+        # printed to the Railway logs so the real cause is visible there.
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        print(f"[DISCORD OAUTH] token exchange failed: HTTP {e.code} - {body}")
+        return None
     except Exception as e:
         print(f"[DISCORD OAUTH] token exchange failed: {e}")
         return None
@@ -3311,9 +3325,18 @@ def _discord_fetch_profile_sync(access_token: str) -> Optional[dict]:
     """Blocking profile fetch, run via asyncio.to_thread."""
     req = urllib.request.Request("https://discord.com/api/users/@me")
     req.add_header("Authorization", f"Bearer {access_token}")
+    req.add_header("User-Agent", "DexNotifier (https://dexapi1.up.railway.app, 1.0)")
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        print(f"[DISCORD OAUTH] profile fetch failed: HTTP {e.code} - {body}")
+        return None
     except Exception as e:
         print(f"[DISCORD OAUTH] profile fetch failed: {e}")
         return None
