@@ -12,6 +12,7 @@ import secrets
 import re
 import unicodedata
 import urllib.request
+import urllib.error
 from collections import defaultdict, deque
 from typing import Set, Dict, Any, Optional
 from urllib.parse import parse_qs, urlencode
@@ -3294,8 +3295,18 @@ def _discord_exchange_code_sync(code: str) -> Optional[dict]:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Discord's 4xx body says exactly what's wrong (bad client secret,
+        # reused/expired code, redirect_uri mismatch, ...) - read it instead
+        # of discarding it, or this is undebuggable from the logs alone.
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = "<no body>"
+        print(f"[DISCORD OAUTH] token exchange HTTP {e.code}: {body}")
+        return None
     except Exception as e:
-        print(f"[DISCORD OAUTH] token exchange failed: {e}")
+        print(f"[DISCORD OAUTH] token exchange failed: {type(e).__name__}: {e}")
         return None
 
 
