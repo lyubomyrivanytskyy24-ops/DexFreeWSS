@@ -156,6 +156,73 @@ body:has(.stats-grid) h1{font-size:clamp(28px,4vw,42px)!important}
   .card:hover,.panel:hover,.script-card:hover{transform:none}
 }
 @media(max-width:460px){.stats-grid{grid-template-columns:1fr!important}.dn-chrome-brand span{display:none}.dn-chrome-logo{width:32px;height:32px}}
+
+/* ---------------------------------------------------------------------
+   GLOBAL NAV: bottom tab bar (phones + tablets) / icon rail (desktop)
+   --------------------------------------------------------------------- */
+.dn-tabbar,.dn-sidebar{display:none}
+
+@media(max-width:1024px){
+  .dn-tabbar{
+    display:flex;position:fixed;left:0;right:0;bottom:0;z-index:2000;
+    justify-content:space-around;align-items:stretch;gap:2px;
+    padding:6px 6px calc(6px + env(safe-area-inset-bottom,0px));
+    background:rgba(8,10,16,.92);border-top:1px solid rgba(255,255,255,.08);
+    backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);
+    box-shadow:0 -14px 46px rgba(0,0,0,.42)
+  }
+  .dn-tabbar a,.dn-tabbar button{
+    flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+    padding:8px 2px 7px;border-radius:13px;color:#7d8699!important;font-size:10.5px!important;
+    font-weight:800!important;text-decoration:none!important;border:none!important;
+    background:transparent!important;box-shadow:none!important;font-family:inherit
+  }
+  .dn-tabbar a svg,.dn-tabbar button svg{width:21px;height:21px;stroke:currentColor;fill:none;stroke-width:2}
+  .dn-tabbar a.active,.dn-tabbar button.active{color:#fff!important;background:rgba(139,92,246,.16)!important}
+  .dn-tabbar a.active svg,.dn-tabbar button.active svg{stroke:#c4b5fd}
+  .dn-tabbar a:active,.dn-tabbar button:active{transform:scale(.94)}
+  body.dn-has-tabbar{padding-bottom:calc(70px + env(safe-area-inset-bottom,0px))!important}
+  .dn-more-sheet{position:fixed;inset:0;z-index:2100;display:none}
+  .dn-more-sheet.open{display:block}
+  .dn-more-backdrop{position:absolute;inset:0;background:rgba(3,4,7,.6);backdrop-filter:blur(3px);animation:dnFade .18s ease both}
+  .dn-more-panel{position:absolute;left:0;right:0;bottom:0;padding:10px 10px calc(14px + env(safe-area-inset-bottom,0px));
+    background:rgba(11,13,19,.97);border-top:1px solid rgba(255,255,255,.09);border-radius:22px 22px 0 0;
+    box-shadow:0 -20px 60px rgba(0,0,0,.55);animation:dnSheetUp .22s cubic-bezier(.2,.8,.2,1) both}
+  .dn-more-grab{width:36px;height:4px;border-radius:99px;background:rgba(255,255,255,.18);margin:6px auto 12px}
+  .dn-more-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .dn-more-grid a{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;
+    padding:16px 6px;border-radius:16px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);
+    color:#cbd5e1!important;font-size:11.5px!important;font-weight:800!important;text-decoration:none!important}
+  .dn-more-grid a svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:2}
+  .dn-more-grid a.active{color:#fff!important;background:rgba(139,92,246,.14)!important;border-color:rgba(139,92,246,.25)!important}
+}
+
+@media(min-width:1025px){
+  .dn-sidebar{
+    display:flex;flex-direction:column;gap:5px;position:fixed;left:18px;top:50%;
+    transform:translateY(-50%);z-index:1500;padding:10px;border-radius:20px;
+    background:rgba(9,11,16,.78);border:1px solid rgba(255,255,255,.08);
+    box-shadow:0 24px 70px rgba(0,0,0,.45);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);
+    animation:dnSlide .55s cubic-bezier(.2,.8,.2,1) both
+  }
+  .dn-sidebar a{
+    position:relative;display:flex;align-items:center;justify-content:center;width:46px;height:46px;
+    border-radius:14px;color:#8a93a6!important;text-decoration:none!important;transition:.2s ease
+  }
+  .dn-sidebar a svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:2}
+  .dn-sidebar a:hover{color:#fff!important;background:rgba(255,255,255,.06)!important}
+  .dn-sidebar a.active{color:#fff!important;background:rgba(139,92,246,.18)!important}
+  .dn-sidebar a .dn-tip{
+    position:absolute;left:58px;top:50%;transform:translate(-6px,-50%);white-space:nowrap;
+    background:#0c0e14;border:1px solid rgba(255,255,255,.1);padding:6px 11px;border-radius:9px;
+    font-size:11.5px;font-weight:800;color:#fff!important;opacity:0;pointer-events:none;
+    transition:.16s ease;box-shadow:0 10px 30px rgba(0,0,0,.4)
+  }
+  .dn-sidebar a:hover .dn-tip{opacity:1;transform:translate(0,-50%)}
+  .dn-sidebar-divider{height:1px;margin:4px 6px;background:rgba(255,255,255,.08)}
+}
+@keyframes dnFade{from{opacity:0}to{opacity:1}}
+@keyframes dnSheetUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition:none!important;scroll-behavior:auto!important}}
 @keyframes dnPageIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
 @keyframes dnSlide{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
@@ -206,6 +273,72 @@ GLOBAL_UI_JS = r"""
     el.addEventListener('pointerenter', () => el.style.setProperty('will-change','transform'));
     el.addEventListener('pointerleave', () => el.style.removeProperty('will-change'));
   });
+
+  // -----------------------------------------------------------------
+  // Global nav: bottom tab bar (phone/tablet) + icon rail (desktop).
+  // Same link set everywhere so the site feels identical on every size.
+  // -----------------------------------------------------------------
+  const ICONS = {
+    home: '<path d="M3 11l9-8 9 8"/><path d="M5 10v11h14V10"/><path d="M9 21v-6h6v6"/>',
+    scripts: '<path d="M8 6 3 12l5 6"/><path d="M16 6l5 6-5 6"/>',
+    obf: '<rect x="4" y="4" width="16" height="16" rx="4"/><path d="M8 12h8M12 8v8"/>',
+    chat: '<path d="M4 5h16v11H9l-4 4V5z"/>',
+    panel: '<rect x="3" y="4" width="7" height="7" rx="1.5"/><rect x="14" y="4" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+    mechat: '<path d="M4 5h16v11H9l-4 4V5z"/><circle cx="9" cy="10" r="1.1" fill="currentColor" stroke="none"/><circle cx="12.5" cy="10" r="1.1" fill="currentColor" stroke="none"/><circle cx="16" cy="10" r="1.1" fill="currentColor" stroke="none"/>',
+    admin: '<path d="M12 3l7 3.5v5.2c0 5-3 8-7 9.3-4-1.3-7-4.3-7-9.3V6.5L12 3z"/>',
+    more: '<circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/>'
+  };
+  const svgIcon = (paths) => `<svg viewBox="0 0 24 24">${paths}</svg>`;
+  const isActive = (href) => href === '/' ? path === '/' : (path === href || path.startsWith(href + '/'));
+
+  const ALL_LINKS = [
+    ['/', 'Home', 'home'],
+    ['/scripts', 'Scripts', 'scripts'],
+    ['/obfustucate', 'Obf.', 'obf'],
+    ['/chat', 'Chat', 'chat'],
+    ['/home', 'Panel', 'panel'],
+    ['/ME-chat', 'ME-Chat', 'mechat'],
+    ['/admin', 'Admin', 'admin'],
+  ];
+  const TAB_PRIMARY = ['/', '/scripts', '/chat'];
+  const skipNav = path === '/login' || path.startsWith('/auth/discord');
+
+  if (!skipNav && document.body && !document.querySelector('.dn-sidebar')) {
+    // Desktop icon rail - every link, always visible, no overflow needed.
+    const rail = document.createElement('nav');
+    rail.className = 'dn-sidebar';
+    rail.innerHTML = ALL_LINKS.map(([href, label, icon]) =>
+      `<a href="${href}" class="${isActive(href) ? 'active' : ''}">${svgIcon(ICONS[icon])}<span class="dn-tip">${label}</span></a>`
+    ).join('');
+    document.body.appendChild(rail);
+
+    // Mobile/tablet bottom tab bar - a few primary tabs plus a More sheet
+    // for the rest, so it never gets cramped on a narrow screen.
+    const moreLinks = ALL_LINKS.filter(([href]) => !TAB_PRIMARY.includes(href));
+    const tabbar = document.createElement('nav');
+    tabbar.className = 'dn-tabbar';
+    tabbar.innerHTML =
+      ALL_LINKS.filter(([href]) => TAB_PRIMARY.includes(href)).map(([href, label, icon]) =>
+        `<a href="${href}" class="${isActive(href) ? 'active' : ''}">${svgIcon(ICONS[icon])}<span>${label}</span></a>`
+      ).join('') +
+      `<button type="button" id="dn-more-btn" class="${moreLinks.some(([h]) => isActive(h)) ? 'active' : ''}">${svgIcon(ICONS.more)}<span>More</span></button>`;
+    document.body.appendChild(tabbar);
+    document.body.classList.add('dn-has-tabbar');
+
+    const sheet = document.createElement('div');
+    sheet.className = 'dn-more-sheet';
+    sheet.innerHTML =
+      '<div class="dn-more-backdrop"></div>' +
+      '<div class="dn-more-panel"><div class="dn-more-grab"></div><div class="dn-more-grid">' +
+      moreLinks.map(([href, label, icon]) =>
+        `<a href="${href}" class="${isActive(href) ? 'active' : ''}">${svgIcon(ICONS[icon])}<span>${label}</span></a>`
+      ).join('') +
+      '</div></div>';
+    document.body.appendChild(sheet);
+    const closeSheet = () => sheet.classList.remove('open');
+    document.getElementById('dn-more-btn').addEventListener('click', () => sheet.classList.add('open'));
+    sheet.querySelector('.dn-more-backdrop').addEventListener('click', closeSheet);
+  }
 })();
 </script>
 """
