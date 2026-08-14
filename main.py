@@ -37,6 +37,10 @@ class AnnouncementHTMLMiddleware(BaseHTTPMiddleware):
             text = body.decode("utf-8")
         except UnicodeDecodeError:
             return response
+
+        # Global site icon: every HTML endpoint gets the same browser favicon.
+        if "<head" in text.lower() and ICON_HTML not in text:
+            text = re.sub(r"(<head[^>]*>)", r"\1" + ICON_HTML, text, count=1, flags=re.I)
         async with announcement_lock:
             msg = announcement_text
         if msg and "</body>" in text:
@@ -3763,9 +3767,18 @@ async def admin_post(request: Request):
     data = parse_qs(raw.decode(errors="ignore"))
     key = data.get("key", [""])[0]
 
-    if not key or not constant_time_eq(key, ADMIN_PASSWORD):
+    # DEX_ADMIN_KEY is mandatory. An unset/empty variable can never log in.
+    if not ADMIN_PASSWORD or not key or not constant_time_eq(key, ADMIN_PASSWORD):
         await record_failed_attempt("admin_login", ip)
-        return HTMLResponse(ADMIN_BASE_HTML.format(body=admin_login_form("Invalid admin password.")))
+        return HTMLResponse(
+            ADMIN_BASE_HTML.format(
+                body=admin_login_form(
+                    "Admin password is not configured." if not ADMIN_PASSWORD
+                    else "Invalid admin password."
+                )
+            ),
+            status_code=503 if not ADMIN_PASSWORD else 200,
+        )
 
     await clear_attempts("admin_login", ip)
     resp = HTMLResponse(ADMIN_BASE_HTML.format(body=await build_admin_dashboard_body()))
