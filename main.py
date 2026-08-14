@@ -991,6 +991,22 @@ def discord_oauth_configured() -> bool:
     return bool(DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and DISCORD_REDIRECT_URI)
 
 
+DISCORD_ERROR_MESSAGES = {
+    "access_denied": "Discord sign-in was cancelled.",
+    "invalid_state": "Your sign-in attempt expired or couldn't be verified - click Continue with Discord to try again.",
+    "token_exchange_failed": "Discord sign-in failed while contacting Discord - please try again.",
+    "profile_fetch_failed": "Signed in with Discord but couldn't load your profile - please try again.",
+}
+
+
+def discord_error_message(code: str) -> str:
+    """Map a discord_error=<code> query param to a message a person can
+    actually read. Returns "" for no code / unknown code left unmapped."""
+    if not code:
+        return ""
+    return DISCORD_ERROR_MESSAGES.get(code, "Discord sign-in failed - please try again.")
+
+
 def constant_time_eq(a: str, b: str) -> bool:
     return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
@@ -2636,6 +2652,21 @@ async def index(request: Request):
     if rate_limited(ip, "index_get", max_requests=INDEX_RATE_LIMIT, window_seconds=INDEX_RATE_WINDOW):
         return PlainTextResponse("RATE_LIMITED", status_code=429)
 
+    username = get_logged_in_user(request)
+    error_message = discord_error_message(request.query_params.get("discord_error", ""))
+
+    if username:
+        auth_nav_html = (
+            '<span class="dn-chrome-status" style="margin-left:2px;">'
+            f'<i></i> Signed in as {html.escape(username)}</span>'
+        )
+    elif discord_oauth_configured():
+        auth_nav_html = '<a href="/login">Sign in</a>'
+    else:
+        auth_nav_html = '<a href="/home">Sign in</a>'
+
+    notice_html = f'<div class="dn-notice">{html.escape(error_message)}</div>' if error_message else ""
+
     html_page = f"""
     <!doctype html>
     <html lang="en">
@@ -2675,6 +2706,7 @@ async def index(request: Request):
         .dn-bottom{{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:58px}}
         .dn-mini{{padding:18px;border-radius:18px;background:rgba(12,17,32,.65);border:1px solid rgba(148,163,184,.1)}}
         .dn-mini strong{{display:block;font-size:14px;margin-bottom:6px}}.dn-mini span{{color:#77839c;font-size:12px;line-height:1.5}}
+        .dn-notice{{margin:0 0 26px;padding:13px 16px;border-radius:14px;background:rgba(251,113,133,.08);border:1px solid rgba(251,113,133,.25);color:#fecdd3;font-size:13px;font-weight:700;text-align:center}}
         @media(max-width:800px){{.dn-nav{{margin-bottom:45px;align-items:flex-start}}.dn-navlinks{{display:none}}.dn-hero{{grid-template-columns:1fr;gap:24px}}.dn-hero h1{{font-size:clamp(50px,15vw,76px)}}.dn-hero p{{font-size:16px}}.dn-bottom{{grid-template-columns:1fr}}.dn-side{{padding:19px}}}}
       </style>
     </head>
@@ -2682,8 +2714,9 @@ async def index(request: Request):
       <main class="dn-home"><div class="dn-home-inner">
         <nav class="dn-nav">
           <div class="dn-brand"><div class="dn-logo"><span>D</span></div><span>DexNotifier</span></div>
-          <div class="dn-navlinks"><a href="/obfustucate">Obfustucate</a><a href="/chat">Chat</a><a href="/scripts">Scripts</a><a href="/home">Home</a><a href="/admin">Admin</a></div>
+          <div class="dn-navlinks"><a href="/obfustucate">Obfustucate</a><a href="/chat">Chat</a><a href="/scripts">Scripts</a><a href="/home">Home</a><a href="/admin">Admin</a>{auth_nav_html}</div>
         </nav>
+        {notice_html}
         <section class="dn-hero">
           <div>
             <div class="dn-eyebrow"><i class="dn-dot"></i> DexNotifier infrastructure</div>
@@ -3194,13 +3227,46 @@ def set_session_cookie(resp, username: str):
 # -----------------------------
 # DISCORD OAUTH LOGIN (Dex Bot)
 # /login kicks off the OAuth round-trip, Discord sends the person back to
-# /auth/discord/callback, and a successful login redirects to /home already
+# /auth/discord/callback, and a successful login redirects to / already
 # signed in - no username/password needed for accounts created this way.
 # -----------------------------
 
 DISCORD_LOGIN_RATE_LIMIT = 20
 DISCORD_LOGIN_RATE_WINDOW = 60.0
 DISCORD_STATE_MAX_AGE = 600  # 10 minutes to complete the Discord round-trip
+
+# The dex_discord_state cookie set below is defense-in-depth, but it is no
+# longer the source of truth for the state check - some browsers/in-app
+# webviews (Discord's own mobile in-app browser included) don't reliably
+# round-trip a cookie set on /login back to /auth/discord/callback, which
+# is what caused spurious discord_error=invalid_state redirects. Instead,
+# every state token we hand out is tracked here, server-side, so the
+# callback can validate + single-use-consume it even when the cookie never
+# makes it back.
+DISCORD_PENDING_STATES: Dict[str, float] = {}
+discord_state_lock = asyncio.Lock()
+
+
+def _purge_expired_discord_states(now: float) -> None:
+    for s in [s for s, exp in DISCORD_PENDING_STATES.items() if exp <= now]:
+        DISCORD_PENDING_STATES.pop(s, None)
+
+
+async def _register_discord_state(state: str) -> None:
+    now = time.time()
+    async with discord_state_lock:
+        _purge_expired_discord_states(now)
+        DISCORD_PENDING_STATES[state] = now + DISCORD_STATE_MAX_AGE
+
+
+async def _consume_discord_state(state: str) -> bool:
+    """One-time check: True iff `state` was handed out recently and hasn't
+    already been used. Always removes it, win or lose, so a state can never
+    be replayed."""
+    now = time.time()
+    async with discord_state_lock:
+        _purge_expired_discord_states(now)
+        return DISCORD_PENDING_STATES.pop(state, None) is not None
 
 
 def _discord_avatar_url(discord_id: str, avatar_hash: Optional[str], discriminator: str) -> str:
@@ -3311,9 +3377,10 @@ async def discord_login(request: Request):
         )
 
     if get_logged_in_user(request):
-        return RedirectResponse(url="/home", status_code=303)
+        return RedirectResponse(url="/", status_code=303)
 
     state = secrets.token_urlsafe(24)
+    await _register_discord_state(state)
     params = {
         "client_id": DISCORD_CLIENT_ID,
         "redirect_uri": DISCORD_REDIRECT_URI,
@@ -3326,10 +3393,14 @@ async def discord_login(request: Request):
     # samesite="lax" (not "strict") is required here: Discord sends the
     # person back with a top-level cross-site GET redirect, and a "strict"
     # cookie would not be attached to that request, breaking the state check.
+    # This cookie is now just an extra check on top of
+    # _register_discord_state() above, which is the real source of truth -
+    # so login still works even when a browser/webview doesn't send the
+    # cookie back at all (see /auth/discord/callback).
     resp.set_cookie(
         "dex_discord_state", state,
         httponly=True, secure=True, samesite="lax",
-        max_age=DISCORD_STATE_MAX_AGE,
+        max_age=DISCORD_STATE_MAX_AGE, path="/",
     )
     return resp
 
@@ -3344,36 +3415,49 @@ async def discord_callback(request: Request):
         return PlainTextResponse("Discord login is not configured on this deployment.", status_code=503)
 
     if request.query_params.get("error"):
-        resp = RedirectResponse(url="/home?discord_error=access_denied", status_code=303)
-        resp.delete_cookie("dex_discord_state")
+        resp = RedirectResponse(url="/?discord_error=access_denied", status_code=303)
+        resp.delete_cookie("dex_discord_state", path="/")
         return resp
 
     code = request.query_params.get("code", "")
     state = request.query_params.get("state", "")
-    expected_state = request.cookies.get("dex_discord_state", "")
+    cookie_state = request.cookies.get("dex_discord_state", "")
 
-    if not code or not state or not expected_state or not constant_time_eq(state, expected_state):
-        resp = RedirectResponse(url="/home?discord_error=invalid_state", status_code=303)
-        resp.delete_cookie("dex_discord_state")
+    # The server-side table (populated in /login) is the real check, and it
+    # is what makes this work even when a browser/webview never sends
+    # dex_discord_state back. If a cookie *was* sent, it still has to match
+    # the state Discord returned, so a swapped-out state is still caught
+    # for the common case where the cookie does round-trip correctly.
+    state_recognized = bool(state) and await _consume_discord_state(state)
+    cookie_matches = (not cookie_state) or constant_time_eq(state, cookie_state)
+
+    if not code or not state or not state_recognized or not cookie_matches:
+        print(
+            f"[DISCORD OAUTH] invalid_state ip={ip} has_code={bool(code)} "
+            f"has_state={bool(state)} server_recognized={state_recognized} "
+            f"had_cookie={bool(cookie_state)} cookie_matched={cookie_matches}"
+        )
+        resp = RedirectResponse(url="/?discord_error=invalid_state", status_code=303)
+        resp.delete_cookie("dex_discord_state", path="/")
         return resp
 
     token_data = await asyncio.to_thread(_discord_exchange_code_sync, code)
     access_token = (token_data or {}).get("access_token")
     if not access_token:
-        resp = RedirectResponse(url="/home?discord_error=token_exchange_failed", status_code=303)
-        resp.delete_cookie("dex_discord_state")
+        resp = RedirectResponse(url="/?discord_error=token_exchange_failed", status_code=303)
+        resp.delete_cookie("dex_discord_state", path="/")
         return resp
 
     profile = await asyncio.to_thread(_discord_fetch_profile_sync, access_token)
     if not profile or not profile.get("id"):
-        resp = RedirectResponse(url="/home?discord_error=profile_fetch_failed", status_code=303)
-        resp.delete_cookie("dex_discord_state")
+        resp = RedirectResponse(url="/?discord_error=profile_fetch_failed", status_code=303)
+        resp.delete_cookie("dex_discord_state", path="/")
         return resp
 
     username = await _upsert_discord_user(profile)
 
-    resp = RedirectResponse(url="/home", status_code=303)
-    resp.delete_cookie("dex_discord_state")
+    resp = RedirectResponse(url="/", status_code=303)
+    resp.delete_cookie("dex_discord_state", path="/")
     set_session_cookie(resp, username)
     return resp
 
@@ -3392,7 +3476,7 @@ async def home_get(request: Request):
 
     username = get_logged_in_user(request)
     if not username:
-        body = build_home_logged_out_body()
+        body = build_home_logged_out_body(discord_error_message(request.query_params.get("discord_error", "")))
         return HTMLResponse(HOME_BASE_HTML.format(body=body))
     body = build_home_logged_in_body(username)
     return HTMLResponse(HOME_BASE_HTML.format(body=body))
