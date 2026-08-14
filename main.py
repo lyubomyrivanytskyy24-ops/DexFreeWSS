@@ -14,7 +14,7 @@ import unicodedata
 import urllib.request
 from collections import defaultdict, deque
 from typing import Set, Dict, Any, Optional
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -191,11 +191,11 @@ GLOBAL_UI_JS = r"""
     nav.className = 'dn-chrome';
     const active = (href) => path === href || (href !== '/' && path.startsWith(href + '/'));
     nav.innerHTML = `
-      <a class="dn-chrome-brand" href="/" target="_blank">
+      <a class="dn-chrome-brand" href="/">
         <span class="dn-chrome-logo">D</span><span>DexNotifier</span>
       </a>
       <nav class="dn-chrome-links">
-        ${links.map(([href,label]) => `<a href="${href}" class="${active(href)?'active':''}" target="_blank">${label}</a>`).join('')}
+        ${links.map(([href,label]) => `<a href="${href}" class="${active(href)?'active':''}">${label}</a>`).join('')}
       </nav>
       <span class="dn-chrome-status"><i></i> Online</span>`;
     document.body.prepend(nav);
@@ -971,6 +971,24 @@ API_KEY = (os.environ.get("DEX_API_KEY", "").strip() or "")
 ADMIN_PASSWORD = os.environ.get("DEX_ADMIN_KEY", "").strip()
 SECRET_KEY = _get_or_create_secret("DEX_SECRET_KEY", os.path.join(DATA_DIR, ".dex_secret_key"))
 BASE_URL = os.environ.get("DEX_BASE_URL", "https://dexapi1.up.railway.app").rstrip("/")
+
+# -----------------------------
+# DISCORD OAUTH LOGIN (Dex Bot)
+# Set these three as Railway variables. DISCORD_REDIRECT_URI must exactly
+# match a redirect configured on the Discord application (OAuth2 tab),
+# e.g. https://<your-app>.up.railway.app/auth/discord/callback
+# -----------------------------
+DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "").strip()
+DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "").strip()
+DISCORD_REDIRECT_URI = os.environ.get("DISCORD_REDIRECT_URI", "").strip()
+DISCORD_OAUTH_SCOPE = "identify"
+# The account that gets the yellow (OWNER) tag in chat - matched against the
+# person's Discord username (case-insensitive).
+DISCORD_OWNER_USERNAME = os.environ.get("DEX_OWNER_DISCORD_USERNAME", "lyubomyr2012_official").strip().lower()
+
+
+def discord_oauth_configured() -> bool:
+    return bool(DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET and DISCORD_REDIRECT_URI)
 
 
 def constant_time_eq(a: str, b: str) -> bool:
@@ -1836,6 +1854,7 @@ RESERVED_PATHS = {
     "ws", "secure", "dexfree", "dexchilli", "dexserverhop", "dexhub", "dexpaid",
     "dexautoroll", "admin/stats", "admin/update", "favicon.ico", "robots.txt",
     "scripts", "banner", "github/refresh", "dexpaid/keys", "chat", "me-chat", "ws/chat", "ws/me-chat", "chat/media", "admin/me-group",
+    "login", "logout", "auth", "auth/discord/callback", "admin/logout",
 }
 RESERVED_PATHS_LOWER = {p.lower() for p in RESERVED_PATHS}
 
@@ -2663,14 +2682,14 @@ async def index(request: Request):
       <main class="dn-home"><div class="dn-home-inner">
         <nav class="dn-nav">
           <div class="dn-brand"><div class="dn-logo"><span>D</span></div><span>DexNotifier</span></div>
-          <div class="dn-navlinks"><a href="/obfustucate" target="_blank">Obfustucate</a><a href="/chat" target="_blank">Chat</a><a href="/scripts" target="_blank">Scripts</a><a href="/home" target="_blank">Home</a><a href="/admin" target="_blank">Admin</a></div>
+          <div class="dn-navlinks"><a href="/obfustucate">Obfustucate</a><a href="/chat">Chat</a><a href="/scripts">Scripts</a><a href="/home">Home</a><a href="/admin">Admin</a></div>
         </nav>
         <section class="dn-hero">
           <div>
             <div class="dn-eyebrow"><i class="dn-dot"></i> DexNotifier infrastructure</div>
             <h1>Build. Protect.<br><span>Ship Lua.</span></h1>
             <p>A modern control layer for your Lua loaders, protected payloads, script endpoints and private administration tools — all from one fast backend.</p>
-            <div class="dn-actions"><a class="dn-primary" href="/obfustucate" target="_blank">Open Obfustucate →</a><a class="dn-secondary" href="/chat" target="_blank">Open Chat</a><a class="dn-secondary" href="/scripts" target="_blank">Browse scripts</a></div>
+            <div class="dn-actions"><a class="dn-primary" href="/obfustucate">Open Obfustucate →</a><a class="dn-secondary" href="/chat">Open Chat</a><a class="dn-secondary" href="/scripts">Browse scripts</a></div>
           </div>
           <aside class="dn-side">
             <div class="dn-side-head"><strong>System overview</strong><span class="dn-status"><i class="dn-dot"></i> Online</span></div>
@@ -2809,7 +2828,7 @@ SCRIPTS_PAGE_HTML = """
         <div class="grid">
             {cards}
         </div>
-        <p class="paid-note">Looking for the paid script? Head to <a href="/dexpaid?key=YOUR_KEY" target="_blank">/dexpaid</a> with your key instead.</p>
+        <p class="paid-note">Looking for the paid script? Head to <a href="/dexpaid?key=YOUR_KEY">/dexpaid</a> with your key instead.</p>
         <footer>Dex API</footer>
     </div>
     <script>
@@ -2973,6 +2992,30 @@ def build_home_logged_out_body(message: str = "") -> str:
     msg_html = ""
     if message:
         msg_html = f'<div class="error">{html.escape(message)}</div>'
+    discord_html = ""
+    if discord_oauth_configured():
+        discord_html = """
+        <div class="card" style="margin-bottom:16px;text-align:center;">
+            <h2 style="margin-top:0;">Continue with Discord</h2>
+            <p class="small-text">Sign in with your Discord account (Dex Bot) - one click, no password needed.</p>
+            <a href="/login" style="display:inline-flex;align-items:center;justify-content:center;gap:10px;margin-top:10px;padding:13px 22px;border-radius:13px;background:#5865F2;color:#fff!important;font-weight:900;text-decoration:none;">
+                <svg width="20" height="20" viewBox="0 0 127.14 96.36" fill="currentColor" aria-hidden="true"><path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.25,60,73.25,53s5-12.74,11.44-12.74S96.23,46,96.12,53,91.08,65.69,84.69,65.69Z"/></svg>
+                Continue with Discord
+            </a>
+        </div>""" if False else f"""
+        <div class="card" style="margin-bottom:16px;">
+            <h2 style="margin-top:0;">Continue with Discord</h2>
+            <p class="small-text">Sign in with your Discord account (Dex Bot) - one click, no password needed.</p>
+            <a href="/login" style="display:inline-flex;align-items:center;justify-content:center;gap:10px;margin-top:10px;padding:13px 22px;border-radius:13px;background:#5865F2;color:#fff!important;font-weight:900;text-decoration:none;">
+                Continue with Discord
+            </a>
+        </div>"""
+    else:
+        discord_html = """
+        <div class="card" style="margin-bottom:16px;">
+            <h2 style="margin-top:0;">Continue with Discord</h2>
+            <p class="small-text">Discord login isn't configured on this deployment yet. Set DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, and DISCORD_REDIRECT_URI in Railway to enable it.</p>
+        </div>"""
     body = f"""
     <div class="card">
         <h1>Dex Home - Login / Register</h1>
@@ -2983,10 +3026,14 @@ def build_home_logged_out_body(message: str = "") -> str:
         </p>
         <p class="label">Login or create an account to manage your scripts and get loadstrings.</p>
         {msg_html}
+    </div>
+    {discord_html}
+    <div class="card">
+        <p class="small-text" style="margin:0 0 14px;">Or use a username and password instead:</p>
         <div class="grid">
             <div>
                 <h2>Login</h2>
-                <form method="post" action="/home" target="_blank">
+                <form method="post" action="/home">
                     <input type="hidden" name="action" value="login">
                     <label class="label">Username</label>
                     <input type="text" name="username" placeholder="Your username" maxlength="32">
@@ -2997,7 +3044,7 @@ def build_home_logged_out_body(message: str = "") -> str:
             </div>
             <div>
                 <h2>Register</h2>
-                <form method="post" action="/home" target="_blank">
+                <form method="post" action="/home">
                     <input type="hidden" name="action" value="register">
                     <label class="label">Username (3-32 chars: letters, numbers, _ -)</label>
                     <input type="text" name="username" placeholder="Choose a username" maxlength="32">
@@ -3049,7 +3096,7 @@ loadstring(game:HttpGet("{html.escape(endpoint)}"))()
             <p class="small-text" style="margin-top:10px;">Last generated loadstring (paid):</p>
             <div class="logs-box">{html.escape(last_loadstring or 'No paid loadstring yet.')}</div>
             <p class="small-text" style="margin-top:10px;">Edit script:</p>
-            <form method="post" action="/home" target="_blank">
+            <form method="post" action="/home">
                 <input type="hidden" name="action" value="update_script">
                 <input type="hidden" name="slug" value="{html.escape(slug)}">
                 <label class="label">Script Name</label>
@@ -3063,7 +3110,7 @@ loadstring(game:HttpGet("{html.escape(endpoint)}"))()
                 <button type="submit">Save Changes</button>
             </form>
             <p class="small-text" style="margin-top:10px;">Generate paid key for this script:</p>
-            <form method="post" action="/home" target="_blank">
+            <form method="post" action="/home">
                 <input type="hidden" name="action" value="generate_key">
                 <input type="hidden" name="slug" value="{html.escape(slug)}">
                 <label class="label">Duration (hours, max {MAX_KEY_DURATION_HOURS})</label>
@@ -3071,7 +3118,7 @@ loadstring(game:HttpGet("{html.escape(endpoint)}"))()
                 <button type="submit">Generate Key</button>
             </form>
             <p class="small-text" style="margin-top:10px;">Delete this script:</p>
-            <form method="post" action="/home" target="_blank">
+            <form method="post" action="/home">
                 <input type="hidden" name="action" value="delete_script">
                 <input type="hidden" name="slug" value="{html.escape(slug)}">
                 <button type="submit" style="background:linear-gradient(135deg,#ff5252,#ff1744);">Delete Script</button>
@@ -3095,7 +3142,7 @@ loadstring(game:HttpGet("{html.escape(endpoint)}"))()
             <span class="pill green">Create / Edit Scripts</span>
             <span class="pill purple">Paid / Free & HWID Lock</span>
         </p>
-        <form method="post" action="/home" style="margin-top:10px;" target="_blank">
+        <form method="post" action="/home" style="margin-top:10px;">
             <input type="hidden" name="action" value="logout">
             <button type="submit" style="background:linear-gradient(135deg,#ff5252,#ff1744);">Logout</button>
         </form>
@@ -3105,7 +3152,7 @@ loadstring(game:HttpGet("{html.escape(endpoint)}"))()
     <div class="card">
         <h2>Create New Script</h2>
         <p class="label">Name determines endpoint. Spaces become dashes. Example: "Dex 2" -> /Dex-2</p>
-        <form method="post" action="/home" target="_blank">
+        <form method="post" action="/home">
             <input type="hidden" name="action" value="create_script">
             <label class="label">Script Name</label>
             <input type="text" name="name" placeholder="e.g. Dexnew, Dex 2" maxlength="48">
@@ -3142,6 +3189,193 @@ def set_session_cookie(resp, username: str):
         httponly=True, secure=True, samesite="strict",
         max_age=SESSION_MAX_AGE,
     )
+
+
+# -----------------------------
+# DISCORD OAUTH LOGIN (Dex Bot)
+# /login kicks off the OAuth round-trip, Discord sends the person back to
+# /auth/discord/callback, and a successful login redirects to /home already
+# signed in - no username/password needed for accounts created this way.
+# -----------------------------
+
+DISCORD_LOGIN_RATE_LIMIT = 20
+DISCORD_LOGIN_RATE_WINDOW = 60.0
+DISCORD_STATE_MAX_AGE = 600  # 10 minutes to complete the Discord round-trip
+
+
+def _discord_avatar_url(discord_id: str, avatar_hash: Optional[str], discriminator: str) -> str:
+    if avatar_hash:
+        ext = "gif" if avatar_hash.startswith("a_") else "png"
+        return f"https://cdn.discordapp.com/avatars/{discord_id}/{avatar_hash}.{ext}?size=128"
+    try:
+        index = (int(discriminator) % 5) if discriminator and discriminator != "0" else (int(discord_id) >> 22) % 6
+    except Exception:
+        index = 0
+    return f"https://cdn.discordapp.com/embed/avatars/{index}.png"
+
+
+def _discord_exchange_code_sync(code: str) -> Optional[dict]:
+    """Blocking token exchange, run via asyncio.to_thread."""
+    payload = urlencode({
+        "client_id": DISCORD_CLIENT_ID,
+        "client_secret": DISCORD_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": DISCORD_REDIRECT_URI,
+    }).encode("utf-8")
+    req = urllib.request.Request("https://discord.com/api/oauth2/token", data=payload, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"[DISCORD OAUTH] token exchange failed: {e}")
+        return None
+
+
+def _discord_fetch_profile_sync(access_token: str) -> Optional[dict]:
+    """Blocking profile fetch, run via asyncio.to_thread."""
+    req = urllib.request.Request("https://discord.com/api/users/@me")
+    req.add_header("Authorization", f"Bearer {access_token}")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"[DISCORD OAUTH] profile fetch failed: {e}")
+        return None
+
+
+def _sanitize_discord_username(raw: str, discord_id: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_.\-]", "", raw or "").strip(".")[:MAX_USERNAME_LEN]
+    if len(cleaned) < 2:
+        cleaned = f"user_{discord_id[-8:]}"
+    if cleaned.lower() in RESERVED_USERNAMES or cleaned.lower() in RESERVED_PATHS_LOWER:
+        cleaned = f"{cleaned}_{discord_id[-4:]}"[:MAX_USERNAME_LEN]
+    return cleaned
+
+
+async def _find_username_by_discord_id(discord_id: str) -> Optional[str]:
+    async with users_lock:
+        for uname, rec in users.items():
+            if rec.get("discord_id") == discord_id:
+                return uname
+    return None
+
+
+async def _upsert_discord_user(profile: dict) -> str:
+    """Create or update the local account tied to this Discord id, and
+    return the (local) username to log in as. Matching is by discord_id so
+    a Discord username change later doesn't create a duplicate account."""
+    discord_id = str(profile.get("id", ""))
+    discord_username = str(profile.get("username", "") or "")
+    global_name = str(profile.get("global_name") or "") or discord_username
+    discriminator = str(profile.get("discriminator", "0"))
+    avatar_url = _discord_avatar_url(discord_id, profile.get("avatar"), discriminator)
+
+    existing_username = await _find_username_by_discord_id(discord_id)
+
+    async with users_lock:
+        if existing_username:
+            username = existing_username
+        else:
+            candidate = _sanitize_discord_username(discord_username, discord_id)
+            username = candidate
+            suffix = 1
+            while username in users:
+                suffix += 1
+                username = f"{candidate}_{suffix}"[:MAX_USERNAME_LEN]
+            users[username] = {"username": username, "created_at": time.time()}
+
+        users[username].update({
+            "discord_id": discord_id,
+            "discord_username": discord_username,
+            "discord_global_name": global_name,
+            "discord_avatar_url": avatar_url,
+            "discord_last_login": time.time(),
+        })
+        save_users_to_file()
+    return username
+
+
+@app.get("/login")
+async def discord_login(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "discord_login", max_requests=DISCORD_LOGIN_RATE_LIMIT, window_seconds=DISCORD_LOGIN_RATE_WINDOW):
+        return PlainTextResponse("Rate limited, try again shortly.", status_code=429)
+
+    if not discord_oauth_configured():
+        return PlainTextResponse(
+            "Discord login is not configured on this deployment yet. "
+            "Set DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, and DISCORD_REDIRECT_URI in Railway.",
+            status_code=503,
+        )
+
+    if get_logged_in_user(request):
+        return RedirectResponse(url="/home", status_code=303)
+
+    state = secrets.token_urlsafe(24)
+    params = {
+        "client_id": DISCORD_CLIENT_ID,
+        "redirect_uri": DISCORD_REDIRECT_URI,
+        "response_type": "code",
+        "scope": DISCORD_OAUTH_SCOPE,
+        "state": state,
+        "prompt": "consent",
+    }
+    resp = RedirectResponse(url="https://discord.com/api/oauth2/authorize?" + urlencode(params))
+    # samesite="lax" (not "strict") is required here: Discord sends the
+    # person back with a top-level cross-site GET redirect, and a "strict"
+    # cookie would not be attached to that request, breaking the state check.
+    resp.set_cookie(
+        "dex_discord_state", state,
+        httponly=True, secure=True, samesite="lax",
+        max_age=DISCORD_STATE_MAX_AGE,
+    )
+    return resp
+
+
+@app.get("/auth/discord/callback")
+async def discord_callback(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "discord_callback", max_requests=DISCORD_LOGIN_RATE_LIMIT, window_seconds=DISCORD_LOGIN_RATE_WINDOW):
+        return PlainTextResponse("Rate limited, try again shortly.", status_code=429)
+
+    if not discord_oauth_configured():
+        return PlainTextResponse("Discord login is not configured on this deployment.", status_code=503)
+
+    if request.query_params.get("error"):
+        resp = RedirectResponse(url="/home?discord_error=access_denied", status_code=303)
+        resp.delete_cookie("dex_discord_state")
+        return resp
+
+    code = request.query_params.get("code", "")
+    state = request.query_params.get("state", "")
+    expected_state = request.cookies.get("dex_discord_state", "")
+
+    if not code or not state or not expected_state or not constant_time_eq(state, expected_state):
+        resp = RedirectResponse(url="/home?discord_error=invalid_state", status_code=303)
+        resp.delete_cookie("dex_discord_state")
+        return resp
+
+    token_data = await asyncio.to_thread(_discord_exchange_code_sync, code)
+    access_token = (token_data or {}).get("access_token")
+    if not access_token:
+        resp = RedirectResponse(url="/home?discord_error=token_exchange_failed", status_code=303)
+        resp.delete_cookie("dex_discord_state")
+        return resp
+
+    profile = await asyncio.to_thread(_discord_fetch_profile_sync, access_token)
+    if not profile or not profile.get("id"):
+        resp = RedirectResponse(url="/home?discord_error=profile_fetch_failed", status_code=303)
+        resp.delete_cookie("dex_discord_state")
+        return resp
+
+    username = await _upsert_discord_user(profile)
+
+    resp = RedirectResponse(url="/home", status_code=303)
+    resp.delete_cookie("dex_discord_state")
+    set_session_cookie(resp, username)
+    return resp
 
 
 HOME_GET_RATE_LIMIT = 30
@@ -5538,7 +5772,7 @@ OBF_PAGE = r"""<!doctype html>
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head>
 <body><main class="page"><div class="shell">
-<nav class="nav"><div class="brand"><div class="logo">D</div><span>DexNotifier</span></div><div class="navlinks"><a href="/" target="_blank">Home</a><a href="/scripts" target="_blank">Scripts</a><a href="/home" target="_blank">Dashboard</a></div></nav>
+<nav class="nav"><div class="brand"><div class="logo">D</div><span>DexNotifier</span></div><div class="navlinks"><a href="/">Home</a><a href="/scripts">Scripts</a><a href="/home">Dashboard</a></div></nav>
 <section class="hero"><div class="eyebrow"><i class="live"></i> Lua protection tool</div><h1><span>Obfustucate</span></h1><p>Paste your raw Lua source below. DexNotifier generates the protected payload and the exact raw loadstring you can copy.</p></section>
 <section class="workspace"><div class="toolbar"><div class="traffic"><i></i><i></i><i></i></div><div class="toolbar-title">Protected Lua workspace</div><div style="width:39px"></div></div>
 <div class="editor-card"><div class="label"><span>Source</span><span class="hint">Lua · UTF-8</span></div><textarea id="source" class="editor" spellcheck="false" placeholder="-- paste your Lua source here"></textarea><div class="actionbar"><button id="go" class="go">Obfustucate Lua</button><span id="status" class="status">Ready</span></div></div>
@@ -5757,7 +5991,7 @@ def _chat_page_html(username: str, me: bool = False) -> str:
     title = "ME-Chat" if me else "Chat"
     subtitle = "Your private ME-Group conversation" if me else "A fast, live place to talk and share media"
     badge = "ME-GROUP • PRIVATE" if me else "LIVE COMMUNITY"
-    return f'''<!doctype html><html lang="en"><head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#050608"><title>{title} — DexNotifier</title><style>{CHAT_PAGE_CSS}</style></head><body><main class="chat-page"><section class="chat-hero"><div><span class="chat-badge"><i style="width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 14px #34d399"></i>{badge}</span><h1>{title}</h1><p>{subtitle}. You're signed in as <strong>{html.escape(username)}</strong>.</p></div><nav class="dn-chrome-links"><a href="/" target="_blank">Home</a><a href="/obfustucate" target="_blank">Obfustucate</a><a href="/chat" target="_blank">Chat</a><a href="/ME-chat" target="_blank">ME-Chat</a><a href="/home" target="_blank">Dashboard</a></nav></section><section class="chat-shell"><aside class="chat-side"><div class="chat-side-card"><strong>{html.escape(username)}</strong><span>Your account</span><span class="chat-online" style="margin-top:10px"><i></i> Online</span></div><div class="chat-side-card"><strong>{'ME-Group' if me else 'Community'}</strong><span>{'Private conversation for approved accounts.' if me else 'Everyone who is signed in can join.'}</span></div><div class="chat-side-card"><strong>Share media</strong><span>Send photos and videos directly in the conversation.</span></div></aside><section class="chat-main"><header class="chat-top"><div><strong>{title}</strong><small id="chat-status">Connecting…</small></div><span id="chat-count" class="chat-count">0 online</span></header><div id="chat-messages" class="chat-messages"><div class="chat-empty"><b>Welcome to {title}</b><span>Your conversation is saved automatically and stays available when you come back.</span></div></div><footer class="chat-compose"><div id="chat-preview" class="chat-preview"><div id="chat-preview-media"></div><div class="chat-preview-info"><strong id="chat-preview-title"></strong><span id="chat-preview-meta"></span></div><button type="button" id="chat-preview-clear" class="chat-preview-clear">×</button></div><div class="chat-input-row"><input id="chat-file" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime" hidden><button type="button" class="chat-icon-btn" onclick="document.getElementById('chat-file').click()" title="Add photo or video">＋</button><textarea id="chat-input" class="chat-input" placeholder="Write a message…" maxlength="{CHAT_MAX_MESSAGE}"></textarea><button id="chat-send" class="chat-send" disabled>Send</button></div><div id="chat-file-name" class="chat-file-name"></div></footer></section></section></main><script>window.__DN_CHAT_CONFIG__={{me:{str(me).lower()},username:{json.dumps(username)},maxMedia:{CHAT_MAX_MEDIA_BYTES}}};</script>{CHAT_PAGE_JS}</body></html>'''
+    return f'''<!doctype html><html lang="en"><head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#050608"><title>{title} — DexNotifier</title><style>{CHAT_PAGE_CSS}</style></head><body><main class="chat-page"><section class="chat-hero"><div><span class="chat-badge"><i style="width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 14px #34d399"></i>{badge}</span><h1>{title}</h1><p>{subtitle}. You're signed in as <strong>{html.escape(username)}</strong>.</p></div><nav class="dn-chrome-links"><a href="/">Home</a><a href="/obfustucate">Obfustucate</a><a href="/chat">Chat</a><a href="/ME-chat">ME-Chat</a><a href="/home">Dashboard</a></nav></section><section class="chat-shell"><aside class="chat-side"><div class="chat-side-card"><strong>{html.escape(username)}</strong><span>Your account</span><span class="chat-online" style="margin-top:10px"><i></i> Online</span></div><div class="chat-side-card"><strong>{'ME-Group' if me else 'Community'}</strong><span>{'Private conversation for approved accounts.' if me else 'Everyone who is signed in can join.'}</span></div><div class="chat-side-card"><strong>Share media</strong><span>Send photos and videos directly in the conversation.</span></div></aside><section class="chat-main"><header class="chat-top"><div><strong>{title}</strong><small id="chat-status">Connecting…</small></div><span id="chat-count" class="chat-count">0 online</span></header><div id="chat-messages" class="chat-messages"><div class="chat-empty"><b>Welcome to {title}</b><span>Your conversation is saved automatically and stays available when you come back.</span></div></div><footer class="chat-compose"><div id="chat-preview" class="chat-preview"><div id="chat-preview-media"></div><div class="chat-preview-info"><strong id="chat-preview-title"></strong><span id="chat-preview-meta"></span></div><button type="button" id="chat-preview-clear" class="chat-preview-clear">×</button></div><div class="chat-input-row"><input id="chat-file" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime" hidden><button type="button" class="chat-icon-btn" onclick="document.getElementById('chat-file').click()" title="Add photo or video">＋</button><textarea id="chat-input" class="chat-input" placeholder="Write a message…" maxlength="{CHAT_MAX_MESSAGE}"></textarea><button id="chat-send" class="chat-send" disabled>Send</button></div><div id="chat-file-name" class="chat-file-name"></div></footer></section></section></main><script>window.__DN_CHAT_CONFIG__={{me:{str(me).lower()},username:{json.dumps(username)},maxMedia:{CHAT_MAX_MEDIA_BYTES}}};</script>{CHAT_PAGE_JS}</body></html>'''
 
 @app.get("/chat")
 async def chat_page(request: Request):
