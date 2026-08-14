@@ -1891,6 +1891,33 @@ def save_announcement_to_file(text: str):
 banner_text: str = load_banner_from_file()
 
 # -----------------------------
+# CHAT ADMIN SETTINGS (enable/disable Chat + ME-Chat independently)
+# -----------------------------
+CHAT_SETTINGS_FILE = os.path.join(CHAT_DATA_DIR, "chat_settings.json")
+chat_settings_lock = asyncio.Lock()
+
+def _load_chat_settings() -> dict:
+    defaults = {"chat_enabled": True, "me_chat_enabled": True}
+    if not os.path.exists(CHAT_SETTINGS_FILE):
+        return defaults
+    try:
+        with open(CHAT_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            saved = json.load(f)
+        for k in defaults:
+            if k in saved:
+                defaults[k] = bool(saved[k])
+    except Exception:
+        pass
+    return defaults
+
+def _save_chat_settings(settings: dict) -> None:
+    _atomic_write(CHAT_SETTINGS_FILE, json.dumps(settings), mode=0o644)
+
+_chat_settings_initial = _load_chat_settings()
+chat_enabled: bool = _chat_settings_initial["chat_enabled"]
+me_chat_enabled: bool = _chat_settings_initial["me_chat_enabled"]
+
+# -----------------------------
 # GENERIC FILE HELPERS
 # -----------------------------
 
@@ -3895,65 +3922,133 @@ ADMIN_BASE_HTML = """
 <head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536">
     <title>Dex Admin</title>
     <style>
-        :root {{ --bg: #050509; --card-bg: #0f0f16; --accent1: #4fc3f7; --accent2: #7c4dff; --accent3: #ff5252; --accent4: #00e676; --border: #1c1c24; }}
-        * {{ box-sizing: border-box; }}
-        body {{
-            background: radial-gradient(circle at top left, #202040 0, #050509 40%, #000000 100%),
-                linear-gradient(135deg, rgba(79,195,247,0.08), rgba(255,82,82,0.08));
-            color:#e6e6e6; font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif; margin:0;
-        }}
-        .wrap {{ max-width:1200px; margin:40px auto; padding:0 20px 40px; }}
-        .card {{
-            background: linear-gradient(135deg, rgba(15,15,22,0.95), rgba(10,10,18,0.95));
-            border-radius:20px; padding:22px; margin-bottom:24px; border:1px solid rgba(79,195,247,0.18);
-            box-shadow:0 24px 60px rgba(0,0,0,0.75); position:relative; overflow:hidden;
-        }}
-        h1,h2 {{ margin-top:0; }}
-        h1 {{ font-size:26px; letter-spacing:0.04em; }}
-        h2 {{ font-size:20px; }}
-        input[type=password], input[type=text] {{
-            width:100%; padding:12px; border-radius:12px; border:1px solid #262636;
-            background:rgba(8,8,13,0.95); color:#e6e6e6; outline:none;
-        }}
-        textarea {{
-            width:100%; min-height:180px; background:rgba(8,8,13,0.95); color:#9eff9e;
-            border-radius:12px; border:1px solid #262636; padding:12px; font-family:monospace;
-            font-size:14px; outline:none;
-        }}
-        button {{
-            padding:10px 22px; border-radius:999px; border:none; cursor:pointer; font-weight:600;
-            background:linear-gradient(135deg,var(--accent1),var(--accent2)); color:#050509; margin-top:10px;
-        }}
-        button.secondary {{
-            background:linear-gradient(135deg,#3a3a4a,#25252f); color:#e6e6e6;
-        }}
-        .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:20px; }}
-        .label {{ font-size:13px; color:#b0b0c0; margin-bottom:6px; }}
-        .pill {{
-            display:inline-block; padding:4px 10px; border-radius:999px; font-size:11px;
-            background:rgba(79,195,247,0.18); border:1px solid rgba(79,195,247,0.4); color:#e6f7ff; margin-right:6px;
-        }}
-        .pill.red {{ background:rgba(255,82,82,0.18); border-color:rgba(255,82,82,0.4); color:#ffe6e6; }}
-        .pill.green {{ background:rgba(0,230,118,0.18); border-color:rgba(0,230,118,0.4); color:#e6fff3; }}
-        .pill.purple {{ background:rgba(124,77,255,0.18); border-color:rgba(124,77,255,0.4); color:#f0e6ff; }}
-        .stats-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-top:12px; }}
-        .stat-box {{ background:rgba(8,8,13,0.95); border-radius:12px; border:1px solid #262636; padding:10px 12px; font-size:13px; }}
-        .stat-label {{ color:#b0b0c0; font-size:12px; }}
-        .stat-value {{ font-size:18px; font-weight:600; margin-top:4px; }}
-        .small-text {{ font-size:12px; color:#8a8aa0; }}
-        .error {{ margin-top:10px; color:#ff5252; font-size:13px; }}
-        .locked-note {{
-            margin-top:8px; font-size:12px; color:#ffcf6b; background:rgba(255,193,7,0.1);
-            border:1px solid rgba(255,193,7,0.3); border-radius:8px; padding:8px 10px;
-        }}
-        .logs-box {{
-            background:rgba(8,8,13,0.95); border-radius:12px; border:1px solid #262636; padding:12px;
-            font-family:monospace; font-size:12px; max-height:240px; overflow:auto; white-space:pre-wrap;
-        }}
-        a.repo-link {{ color:#4fc3f7; }}
-    .admin-announcement-card{{position:relative;overflow:hidden}}.admin-control-form{{margin-top:16px}}.admin-control-form textarea{{width:100%;min-height:105px;resize:vertical;padding:14px 15px;border-radius:15px;border:1px solid rgba(148,163,184,.16);background:rgba(4,7,12,.72);color:#f8fafc;outline:none;font:inherit;transition:.2s ease}}.admin-control-form textarea:focus{{border-color:rgba(129,140,248,.65);box-shadow:0 0 0 4px rgba(99,102,241,.10)}}.admin-control-row{{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:11px;flex-wrap:wrap}}.admin-control-row>div{{display:flex;gap:8px}}.admin-control-row button{{min-width:145px}}.admin-control-row .ghost-btn{{background:rgba(255,255,255,.045)!important;border-color:rgba(255,255,255,.10)!important;box-shadow:none!important}}
+        /* NOTE: --dn-bg custom prop below is a deliberate no-op - the
+           site-wide UI middleware skips injecting its global purple theme
+           into any page whose own <style> already defines --dn-bg, which
+           is what lets this dashboard keep its own distinct look. */
+        :root {{ --dn-bg:#0a0c10; --bg:#0a0c10; --panel:#12151b; --panel-2:#15181f; --line:#232830; --line-soft:#1b1f27;
+            --text:#eef1f5; --muted:#8891a0; --dim:#5b6472; --accent:#f0a94e; --accent-ink:#1a1200; --accent-soft:rgba(240,169,78,.14);
+            --teal:#33d1c0; --teal-soft:rgba(51,209,192,.14); --danger:#ef5b5b; --danger-soft:rgba(239,91,91,.14);
+            --good:#39d98a; --good-soft:rgba(57,217,138,.14); --radius:14px; }}
+        * {{ box-sizing:border-box; }}
+        html,body {{ background:var(--bg); }}
+        body {{ margin:0; color:var(--text); font-family:'Segoe UI',system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+            display:flex; min-height:100vh; }}
+        ::-webkit-scrollbar {{ width:9px; height:9px; }}
+        ::-webkit-scrollbar-thumb {{ background:#262b34; border-radius:8px; }}
+
+        .dn-sidebar {{ width:236px; flex:0 0 236px; background:var(--panel-2); border-right:1px solid var(--line);
+            padding:22px 14px; position:sticky; top:0; align-self:flex-start; height:100vh; overflow-y:auto; }}
+        .dn-sidebar-brand {{ display:flex; align-items:center; gap:10px; padding:0 8px 18px; border-bottom:1px solid var(--line); margin-bottom:14px; }}
+        .dn-sidebar-brand .logo {{ width:32px; height:32px; border-radius:9px; flex:0 0 32px;
+            background:linear-gradient(135deg,var(--accent),var(--teal)); display:grid; place-items:center;
+            font-weight:900; color:var(--accent-ink); font-size:12px; }}
+        .dn-sidebar-brand strong {{ font-size:14px; letter-spacing:-.01em; display:block; }}
+        .dn-sidebar-brand span {{ display:block; font-size:10px; color:var(--muted); letter-spacing:.08em; text-transform:uppercase; margin-top:2px; }}
+        .dn-nav {{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:3px; }}
+        .dn-nav button {{ all:unset; box-sizing:border-box; cursor:pointer; display:flex; align-items:center; gap:10px;
+            padding:10px 12px; border-radius:10px; font-size:13px; font-weight:700; color:var(--muted); width:100%; }}
+        .dn-nav button:hover {{ background:rgba(255,255,255,.045); color:var(--text); }}
+        .dn-nav button.active {{ background:var(--accent-soft); color:var(--accent); }}
+        .dn-nav button.danger-tab.active {{ background:var(--danger-soft); color:#ffb3b3; }}
+        .dn-nav-icon {{ width:18px; text-align:center; font-size:14px; flex:0 0 18px; }}
+        .dn-sidebar-foot {{ margin-top:18px; padding-top:14px; border-top:1px solid var(--line); font-size:11px; color:var(--dim); padding-left:8px; }}
+        .dn-sidebar-foot a {{ color:var(--muted); text-decoration:none; font-weight:800; }}
+        .dn-sidebar-foot a:hover {{ color:var(--text); }}
+
+        .dn-main {{ flex:1; min-width:0; padding:26px 34px 60px; }}
+        .dn-topbar {{ display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:20px; flex-wrap:wrap; }}
+        .dn-topbar h1 {{ margin:0; font-size:21px; letter-spacing:-.02em; }}
+        .dn-topbar .sub {{ color:var(--muted); font-size:12.5px; margin-top:4px; max-width:640px; }}
+        .dn-session-pill {{ display:inline-flex; align-items:center; gap:7px; background:var(--good-soft);
+            border:1px solid rgba(57,217,138,.3); color:#a8f3cb; padding:7px 12px; border-radius:999px; font-size:12px; font-weight:700; white-space:nowrap; }}
+        .dn-session-pill i {{ width:6px; height:6px; border-radius:50%; background:var(--good); box-shadow:0 0 10px var(--good); }}
+        .dn-session-pill a {{ color:#a8f3cb; margin-left:8px; text-decoration:underline; }}
+
+        .tab-panel {{ display:none; }}
+        .tab-panel.active {{ display:block; animation:dnFade .22s ease both; }}
+        @keyframes dnFade {{ from {{ opacity:0; transform:translateY(4px); }} to {{ opacity:1; transform:translateY(0); }} }}
+
+        h1,h2,h3 {{ margin-top:0; color:var(--text); }}
+        h2 {{ font-size:16px; font-weight:800; letter-spacing:-.01em; }}
+        h3 {{ font-size:12px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); font-weight:800; }}
+        .card {{ background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--line-soft);
+            border-radius:var(--radius); padding:20px 22px; margin-bottom:16px; }}
+        .card.accent-amber {{ border-left-color:var(--accent); }}
+        .card.accent-teal {{ border-left-color:var(--teal); }}
+        .card.accent-danger {{ border-left-color:var(--danger); }}
+        .card.accent-good {{ border-left-color:var(--good); }}
+
+        input[type=password], input[type=text] {{ width:100%; padding:11px 13px; border-radius:10px; border:1px solid var(--line);
+            background:#0d0f14; color:var(--text); outline:none; font:inherit; }}
+        input:focus {{ border-color:var(--accent); }}
+        textarea {{ width:100%; min-height:150px; background:#0d0f14; color:#c9f7d3; border-radius:10px; border:1px solid var(--line);
+            padding:12px; font-family:Consolas,'JetBrains Mono',monospace; font-size:13px; outline:none; resize:vertical; }}
+        textarea:focus {{ border-color:var(--accent); }}
+
+        button {{ padding:9px 18px; border-radius:9px; border:1px solid transparent; cursor:pointer; font-weight:800;
+            font-size:13px; background:var(--accent); color:var(--accent-ink); transition:filter .15s ease, transform .15s ease; }}
+        button:hover {{ filter:brightness(1.08); transform:translateY(-1px); }}
+        button:active {{ transform:translateY(0); }}
+        button.secondary {{ background:transparent; border-color:var(--line); color:var(--text); }}
+        button.ghost-btn {{ background:transparent; border-color:var(--line); color:var(--muted); }}
+        button.danger-btn {{ background:var(--danger); color:#2b0808; }}
+        button.teal-btn {{ background:var(--teal); color:#052420; }}
+        button:disabled {{ opacity:.5; cursor:not-allowed; transform:none; }}
+
+        .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(270px,1fr)); gap:16px; }}
+        .label {{ font-size:12.5px; color:var(--muted); margin-bottom:6px; }}
+        .pill {{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:11px;
+            background:var(--teal-soft); border:1px solid rgba(51,209,192,.35); color:#bdf7f0; margin-right:6px; margin-bottom:4px; }}
+        .pill.red {{ background:var(--danger-soft); border-color:rgba(239,91,91,.4); color:#ffd6d6; }}
+        .pill.green {{ background:var(--good-soft); border-color:rgba(57,217,138,.4); color:#c7ffe4; }}
+        .pill.purple {{ background:var(--accent-soft); border-color:rgba(240,169,78,.4); color:#ffe6bd; }}
+        .stats-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-top:14px; }}
+        .stat-box {{ background:#0d0f14; border-radius:10px; border:1px solid var(--line); padding:12px 14px; }}
+        .stat-label {{ color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; }}
+        .stat-value {{ font-size:20px; font-weight:800; margin-top:5px; }}
+        .small-text {{ font-size:12px; color:var(--muted); }}
+        .error {{ margin-top:10px; color:#ffb0b0; font-size:13px; background:var(--danger-soft); border:1px solid rgba(239,91,91,.3); padding:9px 12px; border-radius:8px; }}
+        .locked-note {{ margin-top:8px; font-size:12px; color:#ffd58a; background:rgba(240,169,78,.1); border:1px solid rgba(240,169,78,.3); border-radius:8px; padding:8px 10px; }}
+        .logs-box {{ background:#0d0f14; border-radius:10px; border:1px solid var(--line); padding:12px; font-family:Consolas,monospace; font-size:12px; max-height:240px; overflow:auto; white-space:pre-wrap; }}
+        a {{ color:var(--teal); }}
+        a.repo-link {{ color:var(--teal); }}
+
+        .admin-control-form {{ margin-top:14px; }}
+        .admin-control-row {{ display:flex; align-items:center; justify-content:space-between; gap:14px; margin-top:11px; flex-wrap:wrap; }}
+        .admin-control-row>div {{ display:flex; gap:8px; }}
+
+        .dn-switch-row {{ display:flex; align-items:center; justify-content:space-between; gap:14px; padding:14px 0; border-bottom:1px solid var(--line-soft); }}
+        .dn-switch-row:last-of-type {{ border-bottom:none; }}
+        .dn-switch-row .meta strong {{ display:block; font-size:14px; }}
+        .dn-switch-row .meta span {{ font-size:12px; color:var(--muted); }}
+        .dn-switch {{ position:relative; display:inline-block; width:46px; height:26px; flex:0 0 46px; }}
+        .dn-switch input {{ opacity:0; width:0; height:0; position:absolute; }}
+        .dn-switch .slider {{ position:absolute; inset:0; background:#333844; transition:.2s ease; border-radius:999px; cursor:pointer; }}
+        .dn-switch .slider:before {{ position:absolute; content:""; height:20px; width:20px; left:3px; top:3px; background:#fff; transition:.2s ease; border-radius:50%; }}
+        .dn-switch input:checked+.slider {{ background:var(--good); }}
+        .dn-switch input:checked+.slider:before {{ transform:translateX(20px); }}
+        .dn-switch input:disabled+.slider {{ opacity:.5; cursor:not-allowed; }}
+        .dn-room-actions {{ display:flex; gap:8px; margin-top:2px; flex-wrap:wrap; }}
+
+        .me-admin-grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}}
+        .me-admin-form,.me-members{{padding:15px;border:1px solid var(--line);border-radius:12px;background:#0d0f14}}
+        .me-admin-form label{{display:block;color:var(--muted);font-size:12px;font-weight:800;margin-bottom:8px}}
+        .me-add-row{{display:flex;gap:8px}}.me-add-row select{{flex:1;min-width:0;background:#0d0f14;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px}}
+        .me-member{{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line-soft)}}
+        .me-member:last-child{{border-bottom:0}}
+        .me-member strong{{display:block;color:var(--text);font-size:12px}}
+        .me-member span{{display:block;color:var(--dim);font-size:10px;margin-top:3px}}
+        .me-remove{{background:var(--danger-soft)!important;color:#ffd6d6!important;border-color:rgba(239,91,91,.3)!important;padding:8px 10px!important;font-size:11px!important}}
+        .me-empty{{color:var(--dim);font-size:12px}}
+        @media(max-width:900px){{ body{{flex-direction:column}} .dn-sidebar{{position:relative;width:100%;flex:none;height:auto;border-right:none;border-bottom:1px solid var(--line)}} .dn-nav{{flex-direction:row;flex-wrap:wrap}} .me-admin-grid{{grid-template-columns:1fr}} }}
 </style>
     <script>
+        function showTab(id) {{
+            document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + id));
+            document.querySelectorAll('#dn-nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === id));
+            try {{ localStorage.setItem('dn-admin-tab', id); }} catch (e) {{}}
+        }}
         async function refreshStats() {{
             try {{
                 const res = await fetch('/admin/stats', {{ cache: 'no-store', credentials: 'same-origin' }});
@@ -3966,14 +4061,36 @@ ADMIN_BASE_HTML = """
                 document.getElementById('stat-sender').textContent = data.sender_connected ? 'Yes' : 'No';
                 document.getElementById('last-log-box').textContent = data.last_log || 'No logs yet.';
                 document.getElementById('recent-logs-box').textContent = data.recent_logs || 'No logs.';
-                document.getElementById('announcement-preview-box').textContent = data.announcement || 'No active announcement.';
-                document.getElementById('banner-preview-box').textContent = data.banner || 'No banner set.';
+                const annPreview = document.getElementById('announcement-preview-inline');
+                if (annPreview) annPreview.textContent = data.announcement || 'No active announcement.';
+                const bannerPreview = document.getElementById('banner-preview-inline');
+                if (bannerPreview) bannerPreview.textContent = data.banner || 'No banner set.';
                 document.getElementById('blacklist-preview-box').textContent = data.blacklisted_list || '';
                 document.getElementById('dexpaid-keys-box').textContent = data.dexpaid_keys_preview || 'No paid keys.';
                 document.getElementById('dexpaid-last-key-box').textContent = data.dexpaid_last_key || 'No key generated yet.';
                 document.getElementById('dexpaid-last-loadstring-box').textContent = data.dexpaid_last_loadstring || 'No loadstring generated yet.';
                 document.getElementById('admin-users-box').textContent = data.users_preview || 'No users.';
                 document.getElementById('admin-scripts-box').textContent = data.scripts_preview || 'No scripts.';
+
+                // Chat Control tab
+                const chatToggle = document.getElementById('chat-toggle-chat');
+                const meToggle = document.getElementById('chat-toggle-me');
+                if (chatToggle && document.activeElement !== chatToggle) chatToggle.checked = !!data.chat_enabled;
+                if (meToggle && document.activeElement !== meToggle) meToggle.checked = !!data.me_chat_enabled;
+                const chatCount = document.getElementById('chat-msg-count');
+                const meCount = document.getElementById('me-chat-msg-count');
+                if (chatCount) chatCount.textContent = (data.chat_message_count ?? 0) + ' message(s) · ' + (data.chat_online ?? 0) + ' online';
+                if (meCount) meCount.textContent = (data.me_chat_message_count ?? 0) + ' message(s) · ' + (data.me_chat_online ?? 0) + ' online';
+                const clearChatBtn = document.getElementById('chat-clear-chat');
+                const clearMeBtn = document.getElementById('chat-clear-me');
+                const clearBothBtn = document.getElementById('chat-clear-both');
+                const clearAllBtn = document.getElementById('danger-clear-all');
+                if (clearChatBtn) clearChatBtn.disabled = !(data.chat_message_count > 0);
+                if (clearMeBtn) clearMeBtn.disabled = !(data.me_chat_message_count > 0);
+                const totalMsgs = (data.chat_message_count || 0) + (data.me_chat_message_count || 0);
+                if (clearBothBtn) clearBothBtn.disabled = !(totalMsgs > 0);
+                if (clearAllBtn) clearAllBtn.disabled = !(totalMsgs > 0);
+
                 const history = Array.isArray(data.obfuscation_history) ? data.obfuscation_history : [];
                 const countEl = document.getElementById('obf-history-count');
                 if (countEl) countEl.textContent = `${{data.obfuscation_history_count || 0}} submissions`;
@@ -4019,18 +4136,56 @@ ADMIN_BASE_HTML = """
             form.addEventListener('submit', async (e)=>{{e.preventDefault();status.textContent='Saving…';const r=await fetch(endpoint,{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams({{text:area.value}}),credentials:'same-origin'}});const d=await r.json().catch(()=>({{}}));if(!r.ok){{status.textContent=d.error||'Could not save.';return}}status.textContent='Saved';area.value=d.text||'';refreshStats();}});
             clear.addEventListener('click',()=>{{area.value='';form.requestSubmit();}});
         }}
+        function wireChatToggle(id, room) {{
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener('change', async () => {{
+                const enabled = el.checked;
+                el.disabled = true;
+                try {{
+                    const r = await fetch('/admin/chat/toggle', {{ method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}}, body:new URLSearchParams({{room, enabled: enabled ? 'true' : 'false'}}), credentials:'same-origin' }});
+                    if (!r.ok) {{ el.checked = !enabled; alert('Could not update chat status.'); }}
+                }} catch (e) {{ el.checked = !enabled; alert('Could not update chat status.'); }}
+                el.disabled = false;
+                refreshStats();
+            }});
+        }}
+        function wireChatClear(btnId, room, label) {{
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+            btn.addEventListener('click', async () => {{
+                if (!confirm('Permanently delete all ' + label + ' messages? This cannot be undone, and clears the chat live for anyone currently online.')) return;
+                btn.disabled = true;
+                const old = btn.textContent; btn.textContent = 'Clearing…';
+                try {{
+                    const r = await fetch('/admin/chat/clear', {{ method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}}, body:new URLSearchParams({{room}}), credentials:'same-origin' }});
+                    const d = await r.json().catch(() => ({{}}));
+                    if (!r.ok) alert(d.error || 'Could not clear messages.');
+                }} catch (e) {{ alert('Could not clear messages.'); }}
+                btn.textContent = old; btn.disabled = false;
+                refreshStats();
+            }});
+        }}
         document.addEventListener('DOMContentLoaded', () => {{
+            document.querySelectorAll('#dn-nav button[data-tab]').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+            let savedTab = 'overview';
+            try {{ const t = localStorage.getItem('dn-admin-tab'); if (t && document.getElementById('tab-' + t)) savedTab = t; }} catch (e) {{}}
+            showTab(savedTab);
             wireAdminControl('admin-announcement-form','/admin/announcement','admin-announcement-text','admin-announcement-status','admin-clear-announcement');
             wireAdminControl('admin-banner-form','/admin/banner','admin-banner-text','admin-banner-status','admin-clear-banner');
+            wireChatToggle('chat-toggle-chat','chat');
+            wireChatToggle('chat-toggle-me','me');
+            wireChatClear('chat-clear-chat','chat','Chat');
+            wireChatClear('chat-clear-me','me','ME-Chat');
+            wireChatClear('chat-clear-both','both','Chat AND ME-Chat');
+            wireChatClear('danger-clear-all','both','Chat AND ME-Chat');
             refreshStats();
             setInterval(refreshStats, 3000);
         }});
     </script>
 </head>
 <body>
-    <div class="wrap">
-        {body}
-    </div>
+    {body}
 </body>
 </html>
 """
@@ -4039,22 +4194,24 @@ ADMIN_BASE_HTML = """
 def admin_login_form(error: str = "") -> str:
     err_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
     return f"""
-    <div class="card">
-        <h1>Dex Admin Login</h1>
-        <p class="label">
+    <main class="dn-main" style="max-width:480px;margin:0 auto;padding-top:9vh;">
+    <div class="card accent-amber">
+        <h1 style="font-size:24px;letter-spacing:-.02em;">Dex Admin</h1>
+        <p class="label" style="margin-top:10px;">
             <span class="pill">Private System</span>
             <span class="pill red">Key Protected</span>
             <span class="pill green">Loader Scripts</span>
             <span class="pill purple">Control Center</span>
         </p>
-        <p class="label">Use the admin password configured in Railway for this service. You must authenticate before any admin changes can be made.</p>
-        <form method="post">
-            <label class="label">Railway Admin Password</label><br>
+        <p class="label" style="margin-top:12px;">Use the admin password configured in Railway for this service. You must authenticate before any admin changes can be made.</p>
+        <form method="post" style="margin-top:14px;">
+            <label class="label">Railway Admin Password</label>
             <input type="password" name="key" placeholder="Enter your Railway admin password" autocomplete="current-password">
-            <button type="submit">Open Control Center</button>
+            <button type="submit" style="margin-top:14px;width:100%;">Open Control Center</button>
         </form>
         {err_html}
     </div>
+    </main>
     """
 
 
@@ -4225,89 +4382,187 @@ async def build_admin_dashboard_body() -> str:
         "Not configured - set DEX_GITHUB_OWNER and DEX_GITHUB_REPO"
     )
 
-    body = f"""
-    <div class="card">
-        <h1>Dex Control Center</h1>
-        <p class="label">
-            <span class="pill red">View-Only</span>
-            <span class="pill">/dexchilli</span>
-            <span class="pill">/dexfree</span>
-            <span class="pill">/dexserverhop</span>
-            <span class="pill purple">/dexhub</span>
-            <span class="pill green">/dexpaid</span>
-            <span class="pill green">/dexautoroll</span>
-            <span class="pill purple">/scripts</span>
-        </p>
-        <p class="label">Authenticated control center. Your Railway admin password is required to open this page, and every dashboard change is protected by the admin session.</p>
-        <div class="logs-box">Admin session: ACTIVE · Changes made below are saved immediately. <a href="/admin/logout">Log out</a></div>
-        <p class="small-text" style="margin-top:10px;">GitHub source: {github_status}</p>
-        <div class="stats-grid">
-            <div class="stat-box"><div class="stat-label">Registered Usernames</div><div class="stat-value" id="stat-usernames">0</div></div>
-            <div class="stat-box"><div class="stat-label">Blacklisted Users</div><div class="stat-value" id="stat-blacklisted">0</div></div>
-            <div class="stat-box"><div class="stat-label">Total Logs (Discord / Sender)</div><div class="stat-value" id="stat-logs">0</div></div>
-            <div class="stat-box"><div class="stat-label">Viewers Connected (WS)</div><div class="stat-value" id="stat-viewers">0</div></div>
-            <div class="stat-box"><div class="stat-label">Sender Connected</div><div class="stat-value" id="stat-sender">No</div></div>
-        </div>
-        <p class="small-text" style="margin-top:10px;">Last log entry:</p>
-        <div class="logs-box" id="last-log-box">No logs yet.</div>
-    </div>
+    me_group_panel = await build_me_group_admin_panel()
 
-    <div class="grid">
-        {fixed_cards_html}
-    </div>
+    sidebar = """
+    <nav class="dn-sidebar">
+        <div class="dn-sidebar-brand"><div class="logo">DX</div><div><strong>Dex Admin</strong><span>Control Center</span></div></div>
+        <ul class="dn-nav" id="dn-nav" style="list-style:none;margin:0;padding:0;">
+            <li><button class="active" data-tab="overview"><span class="dn-nav-icon">&#9679;</span>Overview</button></li>
+            <li><button data-tab="chat"><span class="dn-nav-icon">&#9993;</span>Chat Control</button></li>
+            <li><button data-tab="content"><span class="dn-nav-icon">&#9998;</span>Content</button></li>
+            <li><button data-tab="scripts"><span class="dn-nav-icon">&#9636;</span>Scripts &amp; Loaders</button></li>
+            <li><button data-tab="users"><span class="dn-nav-icon">&#9786;</span>Users &amp; Keys</button></li>
+            <li><button data-tab="obf"><span class="dn-nav-icon">&#9670;</span>Obfustucate</button></li>
+            <li><button class="danger-tab" data-tab="danger"><span class="dn-nav-icon">&#9888;</span>Danger Zone</button></li>
+        </ul>
+        <div class="dn-sidebar-foot">Signed in with the Railway admin session.<br><a href="/admin/logout">Log out &rarr;</a></div>
+    </nav>
+    """
 
-    <div class="grid">
-        <div class="card admin-announcement-card">
-            <span class="pill purple">SITE-WIDE</span><h2 style="margin:10px 0 5px;">Announcement</h2><p class="small-text">Shows as a dismissible announcement across the site's HTML pages. Leave empty to clear it.</p>
-            <form id="admin-announcement-form" class="admin-control-form"><textarea name="text" id="admin-announcement-text" maxlength="{MAX_BANNER_LEN}" placeholder="Write the announcement everyone should see…"></textarea><div class="admin-control-row"><span id="admin-announcement-status" class="small-text">Current: <b id="announcement-preview-inline">No active announcement.</b></span><div><button type="button" class="ghost-btn" id="admin-clear-announcement">Clear</button><button type="submit">Publish Announcement</button></div></div></form>
+    topbar = f"""
+    <div class="dn-topbar">
+        <div>
+            <h1>Dex Control Center</h1>
+            <p class="sub">Authenticated control center for this deployment. Your Railway admin password gates this page, and every change below is protected by the same admin session.</p>
         </div>
-        <div class="card admin-announcement-card">
-            <span class="pill green">PERSISTENT</span><h2 style="margin:10px 0 5px;">Site Banner</h2><p class="small-text">The existing persistent banner value used by the site. Leave empty to remove it.</p>
-            <form id="admin-banner-form" class="admin-control-form"><textarea name="text" id="admin-banner-text" maxlength="{MAX_BANNER_LEN}" placeholder="Write a persistent site banner…"></textarea><div class="admin-control-row"><span id="admin-banner-status" class="small-text">Current: <b id="banner-preview-inline">No banner set.</b></span><div><button type="button" class="ghost-btn" id="admin-clear-banner">Clear</button><button type="submit">Save Banner</button></div></div></form>
-        </div>
-        <div class="card">
-            <h2>Blacklisted Users</h2>
-            <p class="small-text">Read-only. Manage via POST /blacklisted or /unblacklisted with X-Api-Key.</p>
-            <div class="logs-box" id="blacklist-preview-box"></div>
+        <span class="dn-session-pill"><i></i>Session active<a href="/admin/logout">Log out</a></span>
+    </div>
+    <p class="small-text" style="margin:-8px 0 18px;">GitHub source: {github_status}</p>
+    """
+
+    tab_overview = f"""
+    <section class="tab-panel active" id="tab-overview">
+        <div class="card accent-teal">
+            <h2>System Overview</h2>
+            <p class="label" style="margin-top:8px;">
+                <span class="pill">/dexchilli</span>
+                <span class="pill">/dexfree</span>
+                <span class="pill">/dexserverhop</span>
+                <span class="pill purple">/dexhub</span>
+                <span class="pill green">/dexpaid</span>
+                <span class="pill green">/dexautoroll</span>
+                <span class="pill purple">/scripts</span>
+            </p>
+            <div class="stats-grid">
+                <div class="stat-box"><div class="stat-label">Registered Usernames</div><div class="stat-value" id="stat-usernames">0</div></div>
+                <div class="stat-box"><div class="stat-label">Blacklisted Users</div><div class="stat-value" id="stat-blacklisted">0</div></div>
+                <div class="stat-box"><div class="stat-label">Total Logs (Discord / Sender)</div><div class="stat-value" id="stat-logs">0</div></div>
+                <div class="stat-box"><div class="stat-label">Viewers Connected (WS)</div><div class="stat-value" id="stat-viewers">0</div></div>
+                <div class="stat-box"><div class="stat-label">Sender Connected</div><div class="stat-value" id="stat-sender">No</div></div>
+            </div>
+            <p class="small-text" style="margin-top:14px;">Last log entry:</p>
+            <div class="logs-box" id="last-log-box">No logs yet.</div>
         </div>
         <div class="card">
             <h2>Recent Logs (Discord / Sender)</h2>
             <div class="logs-box" id="recent-logs-box">No logs.</div>
         </div>
-    </div>
+    </section>
+    """
 
-    <div class="card obf-history-card">
-        <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;">
-            <div><h2 style="margin-bottom:6px;">Obfustucate History</h2><p class="small-text">Every submission made through <code>/obfustucate</code>. The public page does not display this history.</p></div>
-            <span class="pill purple" id="obf-history-count">0 submissions</span>
-        </div>
-        <div id="obf-history-box" class="obf-history-list">No Obfustucate submissions yet.</div>
-    </div>
+    tab_chat = """
+    <section class="tab-panel" id="tab-chat">
+        <div class="card accent-amber">
+            <h2>Chat Rooms</h2>
+            <p class="small-text" style="margin-top:6px;">Turn either room on or off site-wide, or wipe its message history. Both actions apply immediately - connected users are notified live, no page refresh needed.</p>
 
-    <div class="grid">
-        <div class="card">
-            <h2>DexPaid Keys</h2>
-            <p class="small-text">Read-only. Generate via POST /dexpaid/keys with X-Api-Key.</p>
-            <p class="small-text" style="margin-top:10px;">Last generated key:</p>
-            <div class="logs-box" id="dexpaid-last-key-box">No key generated yet.</div>
-            <p class="small-text" style="margin-top:10px;">Last generated loadstring:</p>
-            <div class="logs-box" id="dexpaid-last-loadstring-box">No loadstring generated yet.</div>
-            <p class="small-text" style="margin-top:10px;">All active paid keys:</p>
-            <div class="logs-box" id="dexpaid-keys-box">{keys_preview_text}</div>
+            <div class="dn-switch-row">
+                <div class="meta"><strong>Chat</strong><span>Public community room at <code>/chat</code>. <span id="chat-msg-count">0 message(s) · 0 online</span></span></div>
+                <label class="dn-switch"><input type="checkbox" id="chat-toggle-chat" checked><span class="slider"></span></label>
+            </div>
+            <div class="dn-room-actions">
+                <button type="button" class="danger-btn" id="chat-clear-chat">Clear Chat messages</button>
+            </div>
+
+            <div class="dn-switch-row" style="margin-top:6px;">
+                <div class="meta"><strong>ME-Chat</strong><span>Private room at <code>/ME-chat</code> for ME-Group members only. <span id="me-chat-msg-count">0 message(s) · 0 online</span></span></div>
+                <label class="dn-switch"><input type="checkbox" id="chat-toggle-me" checked><span class="slider"></span></label>
+            </div>
+            <div class="dn-room-actions">
+                <button type="button" class="danger-btn" id="chat-clear-me">Clear ME-Chat messages</button>
+            </div>
+
+            <div class="dn-room-actions" style="margin-top:16px;border-top:1px solid var(--line-soft);padding-top:16px;">
+                <button type="button" class="danger-btn" id="chat-clear-both">Clear BOTH rooms</button>
+            </div>
         </div>
-        <div class="card">
-            <h2>Users Overview</h2>
-            <p class="label">Registered usernames (password hashes are never displayed).</p>
-            <div class="logs-box" id="admin-users-box">{users_preview}</div>
+    </section>
+    """
+
+    tab_content = f"""
+    <section class="tab-panel" id="tab-content">
+        <div class="grid">
+            <div class="card accent-teal admin-announcement-card">
+                <span class="pill purple">SITE-WIDE</span><h2 style="margin:10px 0 5px;">Announcement</h2><p class="small-text">Shows as a dismissible announcement across the site's HTML pages. Leave empty to clear it.</p>
+                <form id="admin-announcement-form" class="admin-control-form"><textarea name="text" id="admin-announcement-text" maxlength="{MAX_BANNER_LEN}" placeholder="Write the announcement everyone should see…"></textarea><div class="admin-control-row"><span id="admin-announcement-status" class="small-text">Current: <b id="announcement-preview-inline">No active announcement.</b></span><div><button type="button" class="ghost-btn" id="admin-clear-announcement">Clear</button><button type="submit">Publish Announcement</button></div></div></form>
+            </div>
+            <div class="card accent-good admin-announcement-card">
+                <span class="pill green">PERSISTENT</span><h2 style="margin:10px 0 5px;">Site Banner</h2><p class="small-text">The existing persistent banner value used by the site. Leave empty to remove it.</p>
+                <form id="admin-banner-form" class="admin-control-form"><textarea name="text" id="admin-banner-text" maxlength="{MAX_BANNER_LEN}" placeholder="Write a persistent site banner…"></textarea><div class="admin-control-row"><span id="admin-banner-status" class="small-text">Current: <b id="banner-preview-inline">No banner set.</b></span><div><button type="button" class="ghost-btn" id="admin-clear-banner">Clear</button><button type="submit">Save Banner</button></div></div></form>
+            </div>
+            <div class="card">
+                <h2>Blacklisted Users</h2>
+                <p class="small-text">Read-only. Manage via POST /blacklisted or /unblacklisted with X-Api-Key.</p>
+                <div class="logs-box" id="blacklist-preview-box"></div>
+            </div>
+        </div>
+    </section>
+    """
+
+    tab_scripts = f"""
+    <section class="tab-panel" id="tab-scripts">
+        <div class="grid">
+            {fixed_cards_html}
         </div>
         <div class="card">
             <h2>Scripts Overview</h2>
             <div class="logs-box" id="admin-scripts-box">{scripts_preview}</div>
         </div>
-    </div>
+    </section>
     """
-    body += await build_me_group_admin_panel()
-    return body
+
+    tab_users = f"""
+    <section class="tab-panel" id="tab-users">
+        <div class="grid">
+            <div class="card">
+                <h2>Users Overview</h2>
+                <p class="label">Registered usernames (password hashes are never displayed).</p>
+                <div class="logs-box" id="admin-users-box">{users_preview}</div>
+            </div>
+            <div class="card">
+                <h2>DexPaid Keys</h2>
+                <p class="small-text">Read-only. Generate via POST /dexpaid/keys with X-Api-Key.</p>
+                <p class="small-text" style="margin-top:10px;">Last generated key:</p>
+                <div class="logs-box" id="dexpaid-last-key-box">No key generated yet.</div>
+                <p class="small-text" style="margin-top:10px;">Last generated loadstring:</p>
+                <div class="logs-box" id="dexpaid-last-loadstring-box">No loadstring generated yet.</div>
+                <p class="small-text" style="margin-top:10px;">All active paid keys:</p>
+                <div class="logs-box" id="dexpaid-keys-box">{keys_preview_text}</div>
+            </div>
+        </div>
+        {me_group_panel}
+    </section>
+    """
+
+    tab_obf = """
+    <section class="tab-panel" id="tab-obf">
+        <div class="card obf-history-card">
+            <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;">
+                <div><h2 style="margin-bottom:6px;">Obfustucate History</h2><p class="small-text">Every submission made through <code>/obfustucate</code>. The public page does not display this history.</p></div>
+                <span class="pill purple" id="obf-history-count">0 submissions</span>
+            </div>
+            <div id="obf-history-box" class="obf-history-list">No Obfustucate submissions yet.</div>
+        </div>
+    </section>
+    """
+
+    tab_danger = """
+    <section class="tab-panel" id="tab-danger">
+        <div class="card accent-danger">
+            <h2 style="color:#ffb3b3;">Danger Zone</h2>
+            <p class="small-text" style="margin-top:6px;">Destructive, irreversible actions. Double-check before clicking anything here.</p>
+            <div class="dn-switch-row">
+                <div class="meta"><strong>Wipe all chat history</strong><span>Deletes every stored message in both Chat and ME-Chat, and clears it live for anyone currently connected. Room on/off switches and media files are unaffected.</span></div>
+                <button type="button" class="danger-btn" id="danger-clear-all">Clear all messages</button>
+            </div>
+        </div>
+    </section>
+    """
+
+    return (
+        sidebar
+        + '<main class="dn-main">'
+        + topbar
+        + tab_overview
+        + tab_chat
+        + tab_content
+        + tab_scripts
+        + tab_users
+        + tab_obf
+        + tab_danger
+        + "</main>"
+    )
 
 
 @app.post("/admin")
@@ -4512,9 +4767,20 @@ async def admin_stats(request: Request):
         history = _load_obf_history()
     obf_preview = [{k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url")} for item in reversed(history[-OBF_HISTORY_META_PREVIEW:])]
 
+    async with chat_lock:
+        chat_message_count = len(chat_history_cache)
+    async with me_chat_lock:
+        me_chat_message_count = len(me_chat_history_cache)
+
     return JSONResponse(
         {
             "usernames_count": usernames_count,
+            "chat_enabled": chat_enabled,
+            "me_chat_enabled": me_chat_enabled,
+            "chat_message_count": chat_message_count,
+            "me_chat_message_count": me_chat_message_count,
+            "chat_online": len(chat_connections),
+            "me_chat_online": len(me_chat_connections),
             "blacklisted_count": blacklisted_count,
             "logs_count": logs_count,
             "messages_count": messages_count,
@@ -6284,14 +6550,14 @@ CHAT_PAGE_JS = r'''
 <script>
 (()=>{
 const cfg=window.__DN_CHAT_CONFIG__||{},box=document.getElementById('chat-messages'),input=document.getElementById('chat-input'),file=document.getElementById('chat-file'),fileName=document.getElementById('chat-file-name'),send=document.getElementById('chat-send'),count=document.getElementById('chat-count'),status=document.getElementById('chat-status'),preview=document.getElementById('chat-preview'),previewMedia=document.getElementById('chat-preview-media'),previewTitle=document.getElementById('chat-preview-title'),previewMeta=document.getElementById('chat-preview-meta');
-let ws=null,selectedFile=null,previewUrl=null,reconnectTimer=null,renderedIds=new Set();
+let ws=null,selectedFile=null,previewUrl=null,reconnectTimer=null,renderedIds=new Set(),stopped=false;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const t=v=>new Date((Number(v)||Date.now())*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
 function toast(x){const e=document.createElement('div');e.className='chat-toast';e.textContent=x;document.body.appendChild(e);setTimeout(()=>e.remove(),2600)}
 function scrollToBottom(){box.scrollTop=box.scrollHeight;requestAnimationFrame(()=>{box.scrollTop=box.scrollHeight})}
 function render(m){if(!m||m.type==='Presence'||m.type==='System'||m.type==='History')return;if(m.id&&renderedIds.has(m.id))return;if(m.id)renderedIds.add(m.id);if(box.querySelector('.chat-empty'))box.innerHTML='';const mine=m.username===cfg.username,e=document.createElement('article');e.className='msg'+(mine?' me':'');let c='';if(m.type==='Message'||m.type==='ME-Chat')c='<div class="msg-text">'+esc(m.message)+'</div>';else if(m.type==='Picture'||m.type==='ME-Photo')c='<img class="msg-media" loading="lazy" src="'+esc(m.url)+'" alt="'+esc(m.filename||'picture')+'" onclick="window.open(this.src,\'_blank\')">';else if(m.type==='Video'||m.type==='ME-Video')c='<video class="msg-media" controls preload="metadata" playsinline src="'+esc(m.url)+'"></video>';e.innerHTML='<div class="msg-head"><span class="msg-name">'+esc(m.display_name||m.username)+'</span><span class="msg-time">@'+esc(m.account_username||m.username)+' · '+esc(t(m.timestamp))+'</span></div>'+c;box.appendChild(e);const media=e.querySelector('img.msg-media,video.msg-media');if(media){const onReady=()=>scrollToBottom();media.addEventListener('load',onReady,{once:true});media.addEventListener('loadedmetadata',onReady,{once:true});media.addEventListener('error',onReady,{once:true})}scrollToBottom()}
 function renderHistory(items){if(!Array.isArray(items))return;box.innerHTML='';renderedIds.clear();if(!items.length){box.innerHTML='<div class="chat-empty"><b>No messages yet</b><span>Start the conversation.</span></div>';return}items.forEach(render);scrollToBottom()}
-function connect(){clearTimeout(reconnectTimer);const proto=location.protocol==='https:'?'wss':'ws',path=cfg.me?'/ws/me-chat':'/ws/chat';ws=new WebSocket(proto+'://'+location.host+path);ws.onopen=()=>{status.textContent='Online';status.className='chat-count chat-online';send.disabled=false};ws.onclose=()=>{status.textContent='Reconnecting…';status.className='chat-count';send.disabled=true;reconnectTimer=setTimeout(connect,1800)};ws.onerror=()=>{try{ws.close()}catch{}};ws.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.type==='System')return toast(d.message||'');if(d.type==='Presence'){count.textContent=(d.online||0)+' online';return}if(d.type==='History'){renderHistory(d.messages||[]);return}render(d)}catch{}}}
+function connect(){if(stopped)return;clearTimeout(reconnectTimer);const proto=location.protocol==='https:'?'wss':'ws',path=cfg.me?'/ws/me-chat':'/ws/chat';ws=new WebSocket(proto+'://'+location.host+path);ws.onopen=()=>{status.textContent='Online';status.className='chat-count chat-online';send.disabled=false};ws.onclose=()=>{if(stopped){status.textContent='Chat disabled';status.className='chat-count';send.disabled=true;return}status.textContent='Reconnecting…';status.className='chat-count';send.disabled=true;reconnectTimer=setTimeout(connect,1800)};ws.onerror=()=>{try{ws.close()}catch{}};ws.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.type==='Disabled'){stopped=true;toast(d.message||'This chat has been disabled.');status.textContent='Chat disabled';status.className='chat-count';send.disabled=true;try{ws.close()}catch{}return}if(d.type==='System')return toast(d.message||'');if(d.type==='Presence'){count.textContent=(d.online||0)+' online';return}if(d.type==='History'){renderHistory(d.messages||[]);return}render(d)}catch{}}}
 function clearFile(){selectedFile=null;if(previewUrl){URL.revokeObjectURL(previewUrl);previewUrl=null}if(file)file.value='';if(fileName)fileName.textContent='';if(preview){preview.classList.remove('show');previewMedia.innerHTML='';previewTitle.textContent='';previewMeta.textContent=''}}
 function showPreview(f){if(!preview)return;clearFile();selectedFile=f;previewUrl=URL.createObjectURL(f);const isVideo=f.type.startsWith('video/');previewMedia.innerHTML=isVideo?'<video src="'+previewUrl+'" muted playsinline></video>':'<img src="'+previewUrl+'" alt="preview">';previewTitle.textContent=f.name;previewMeta.textContent=(isVideo?'Video':'Image')+' · '+(f.size/1024/1024).toFixed(2)+' MB';preview.classList.add('show');fileName.textContent='Ready to send';}
 async function submit(){if(!ws||ws.readyState!==1)return toast('Chat is reconnecting…');const text=input.value.trim();if(selectedFile){const f=selectedFile;if(f.size>cfg.maxMedia)return toast('That file is too large.');const mime=f.type.toLowerCase();if(!/^image\/(jpeg|png|gif|webp)$/.test(mime)&&!/^video\/(mp4|webm|quicktime)$/.test(mime))return toast('Unsupported media type.');send.disabled=true;const r=new FileReader();const reset=()=>{send.disabled=false};r.onload=()=>{const b64=String(r.result).split(',')[1]||'',type=cfg.me?(mime.startsWith('image/')?'ME-Photo':'ME-Video'):(mime.startsWith('image/')?'Picture':'Video');try{ws.send(JSON.stringify({type,data:b64,mime,filename:f.name}));if(text)ws.send(JSON.stringify({type:cfg.me?'ME-Chat':'Message',message:text}));}catch{toast('Could not send that attachment.')}clearFile();input.value='';reset()};r.onerror=()=>{toast('Could not read that file.');reset()};r.onabort=reset;r.readAsDataURL(f);return}if(text){try{ws.send(JSON.stringify({type:cfg.me?'ME-Chat':'Message',message:text}));input.value=''}catch{toast('Message could not be sent.')}}}
@@ -6299,6 +6565,7 @@ file?.addEventListener('change',()=>{const f=file.files?.[0];if(f)showPreview(f)
 })();
 </script>
 '''
+CHAT_DISABLED_PAGE_HTML = '''<!doctype html><html lang="en"><head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#050608"><title>{title} — DexNotifier</title><style>body{{background:#050608;color:#f7f7fb;font-family:Inter,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px}}.box{{max-width:440px;text-align:center;background:linear-gradient(145deg,rgba(17,20,27,.88),rgba(8,10,14,.9));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:36px 28px}}.box h1{{margin:0 0 10px;font-size:22px}}.box p{{color:#8f98a9;font-size:14px;line-height:1.6}}.box a{{color:#a5b4fc;text-decoration:none;font-weight:700}}</style></head><body><div class="box"><h1>{title} is currently disabled</h1><p>An admin has temporarily turned {title} off. Please check back later.</p><p><a href="/home">← Back to dashboard</a></p></div></body></html>'''
 async def _chat_user_from_ws(websocket: WebSocket, me: bool = False) -> Optional[str]:
     token = websocket.cookies.get("dex_session")
     username = verify_session_token(token, SESSION_MAX_AGE)
@@ -6318,6 +6585,7 @@ def _chat_page_html(username: str, me: bool = False) -> str:
 async def chat_page(request: Request):
     username = get_logged_in_user(request)
     if not username: return RedirectResponse("/home?next=/chat", status_code=303)
+    if not chat_enabled: return HTMLResponse(CHAT_DISABLED_PAGE_HTML.format(title="Chat"))
     return HTMLResponse(_chat_page_html(username, False))
 
 @app.get("/ME-chat")
@@ -6326,6 +6594,7 @@ async def me_chat_page(request: Request):
     if not username: return RedirectResponse("/", status_code=303)
     async with me_group_lock: allowed = username in me_group_users
     if not allowed: return RedirectResponse("/", status_code=303)
+    if not me_chat_enabled: return HTMLResponse(CHAT_DISABLED_PAGE_HTML.format(title="ME-Chat"))
     return HTMLResponse(_chat_page_html(username, True))
 
 @app.get("/chat/media/{room}/{filename}")
@@ -6360,9 +6629,53 @@ CHAT_CONNECT_RATE_WINDOW = 60.0
 CHAT_MEDIA_RATE_LIMIT = 6
 CHAT_MEDIA_RATE_WINDOW = 60.0
 
+async def _clear_chat_room(me: bool) -> int:
+    """Wipes stored history for a chat room (from memory + disk) and pushes
+    an empty History frame to everyone currently connected so their screen
+    clears live, with no refresh needed. Returns how many messages were removed."""
+    lock_obj = me_chat_lock if me else chat_lock
+    history_cache = me_chat_history_cache if me else chat_history_cache
+    history_file = ME_CHAT_HISTORY_FILE if me else CHAT_HISTORY_FILE
+    connections = me_chat_connections if me else chat_connections
+    async with lock_obj:
+        removed = len(history_cache)
+        history_cache.clear()
+        save_chat_history_file(history_file, history_cache)
+    await _broadcast_chat(connections, {"type": "History", "messages": []})
+    return removed
+
+
+async def _set_chat_enabled(me: bool, enabled: bool) -> None:
+    """Flips Chat or ME-Chat on/off, persists the setting so it survives a
+    redeploy, and - when turning it off - immediately disconnects anyone
+    currently connected to that room."""
+    global chat_enabled, me_chat_enabled
+    if me:
+        me_chat_enabled = enabled
+    else:
+        chat_enabled = enabled
+    async with chat_settings_lock:
+        _save_chat_settings({"chat_enabled": chat_enabled, "me_chat_enabled": me_chat_enabled})
+    if not enabled:
+        connections = me_chat_connections if me else chat_connections
+        label = "ME-Chat" if me else "Chat"
+        await _broadcast_chat(connections, {"type": "Disabled", "message": f"{label} has been disabled by an admin."})
+        for ws in list(connections):
+            try: await ws.close(code=4404)
+            except Exception: pass
+        connections.clear()
+
+
 async def _handle_chat_ws(websocket: WebSocket, me: bool = False):
     username=await _chat_user_from_ws(websocket,me)
     if not username: await websocket.close(code=4403); return
+    if not (me_chat_enabled if me else chat_enabled):
+        label = "ME-Chat" if me else "Chat"
+        await websocket.accept()
+        try: await websocket.send_text(json.dumps({"type":"Disabled","message":f"{label} is currently disabled by an admin."}))
+        except Exception: pass
+        await websocket.close(code=4404)
+        return
     ip=_ws_client_ip(websocket)
     room_key="me_chat" if me else "chat"
     if rate_limited(ip, room_key+"_connect", CHAT_CONNECT_RATE_LIMIT, CHAT_CONNECT_RATE_WINDOW):
@@ -6415,6 +6728,40 @@ async def websocket_chat(websocket: WebSocket): await _handle_chat_ws(websocket,
 
 @app.websocket("/ws/me-chat")
 async def websocket_me_chat(websocket: WebSocket): await _handle_chat_ws(websocket,True)
+
+# -----------------------------
+# ADMIN CHAT CONTROLS - enable/disable each room independently and wipe
+# stored history on demand. Both take effect immediately for anyone
+# currently connected, not just on their next page load.
+# -----------------------------
+
+@app.post("/admin/chat/toggle")
+async def admin_chat_toggle(request: Request):
+    if not require_admin_session(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    if reject_if_oversized(request, MAX_GENERIC_BODY): return PlainTextResponse("Payload too large.", status_code=413)
+    raw = await request.body()
+    if len(raw) > MAX_GENERIC_BODY: return PlainTextResponse("Payload too large.", status_code=413)
+    data = parse_qs(raw.decode(errors="ignore"))
+    room = data.get("room", [""])[0].strip().lower()
+    if room not in {"chat", "me"}: return JSONResponse({"error":"room must be 'chat' or 'me'"},status_code=400)
+    enabled = data.get("enabled", [""])[0].strip().lower() in {"1","true","on","yes"}
+    await _set_chat_enabled(room == "me", enabled)
+    return JSONResponse({"ok": True, "room": room, "enabled": enabled})
+
+
+@app.post("/admin/chat/clear")
+async def admin_chat_clear(request: Request):
+    if not require_admin_session(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    if reject_if_oversized(request, MAX_GENERIC_BODY): return PlainTextResponse("Payload too large.", status_code=413)
+    raw = await request.body()
+    if len(raw) > MAX_GENERIC_BODY: return PlainTextResponse("Payload too large.", status_code=413)
+    data = parse_qs(raw.decode(errors="ignore"))
+    room = data.get("room", [""])[0].strip().lower()
+    if room not in {"chat", "me", "both"}: return JSONResponse({"error":"room must be 'chat', 'me', or 'both'"},status_code=400)
+    removed = 0
+    if room in {"chat", "both"}: removed += await _clear_chat_room(False)
+    if room in {"me", "both"}: removed += await _clear_chat_room(True)
+    return JSONResponse({"ok": True, "room": room, "removed": removed})
 
 # -----------------------------
 # DYNAMIC LOADER ENDPOINTS - rate-limited, with a separate failed-attempt
