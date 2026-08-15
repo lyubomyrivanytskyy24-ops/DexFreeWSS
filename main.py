@@ -6898,6 +6898,174 @@ async def dynamic_loader(slug: str, request: Request):
     await clear_attempts("slug_key_guess", ip)
     return PlainTextResponse(code)
 
+
+# -----------------------------
+# DISCORD <-> DEX BOT BRIDGE
+# -----------------------------
+# A small job queue used by the Discord bot and the local Playwright bridge.
+# POST /bridge/jobs creates work; GET /bridge/jobs/next claims the oldest job;
+# GET /bridge/jobs/{id} retrieves its state/result; POST /bridge/jobs/{id}/result
+# posts the Discord reply back to the bot.
+BRIDGE_JOB_TTL = int(os.environ.get("DEX_BRIDGE_JOB_TTL", "900"))
+BRIDGE_MAX_JOBS = int(os.environ.get("DEX_BRIDGE_MAX_JOBS", "250"))
+bridge_jobs: Dict[str, Dict[str, Any]] = {}
+bridge_jobs_lock = asyncio.Lock()
+
+
+def _bridge_cleanup_locked() -> None:
+    now = time.time()
+    stale = [
+        jid for jid, job in bridge_jobs.items()
+        if now - float(job.get("created_at", now)) > BRIDGE_JOB_TTL
+    ]
+    for jid in stale:
+        bridge_jobs.pop(jid, None)
+    if len(bridge_jobs) > BRIDGE_MAX_JOBS:
+        ordered = sorted(bridge_jobs.items(), key=lambda item: float(item[1].get("created_at", 0)))
+        for jid, _job in ordered[: max(0, len(bridge_jobs) - BRIDGE_MAX_JOBS)]:
+            bridge_jobs.pop(jid, None)
+
+
+def _bridge_job_public(job: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(job)
+    out.pop("source_text", None)
+    out.pop("result_attachment_b64", None)
+    return out
+
+
+@app.post("/bridge/jobs")
+async def bridge_create_job(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "bridge_create", 30, 10.0):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+    if not is_valid_key(request.headers.get("X-Api-Key", "")):
+        await record_failed_attempt("bridge_create_auth", ip)
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "expected JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid body"}, status_code=400)
+    job_id = secrets.token_urlsafe(18).rstrip("=")
+    source_url = str(body.get("source_url") or "").strip()
+    source_text = body.get("source_text")
+    if source_text is not None and not isinstance(source_text, str):
+        source_text = str(source_text)
+    if not source_url and not (source_text and source_text.strip()):
+        return JSONResponse({"error": "source_url or source_text is required"}, status_code=400)
+    if source_text and len(source_text.encode("utf-8")) > MAX_SCRIPT_BODY:
+        return JSONResponse({"error": "source too large"}, status_code=413)
+    job = {
+        "id": job_id,
+        "state": "pending",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "source_url": source_url,
+        "source_text": source_text or "",
+        "filename": str(body.get("filename") or "source.lua")[:180],
+        "requester_id": str(body.get("requester_id") or ""),
+        "requester_name": str(body.get("requester_name") or ""),
+        "result_text": "",
+        "result_filename": "",
+        "result_attachment_b64": "",
+        "result_error": "",
+    }
+    async with bridge_jobs_lock:
+        _bridge_cleanup_locked()
+        bridge_jobs[job_id] = job
+    input_url = f"{BASE_URL}/bridge/input/{job_id}"
+    return JSONResponse({"ok": True, "job_id": job_id, "state": "pending", "input_url": input_url})
+
+
+@app.get("/bridge/jobs/next")
+async def bridge_next_job(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "bridge_next", 60, 10.0):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+    if not is_valid_key(request.headers.get("X-Api-Key", "")):
+        await record_failed_attempt("bridge_next_auth", ip)
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    async with bridge_jobs_lock:
+        _bridge_cleanup_locked()
+        candidates = [j for j in bridge_jobs.values() if j.get("state") == "pending"]
+        if not candidates:
+            return JSONResponse({"ok": True, "job": None})
+        job = min(candidates, key=lambda j: float(j.get("created_at", 0)))
+        job["state"] = "processing"
+        job["updated_at"] = time.time()
+        public = _bridge_job_public(job)
+        if job.get("source_text"):
+            public["input_url"] = f"{BASE_URL}/bridge/input/{job['id']}"
+        return JSONResponse({"ok": True, "job": public})
+
+
+@app.get("/bridge/input/{job_id}")
+async def bridge_input(job_id: str, request: Request):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,40}", job_id):
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+    async with bridge_jobs_lock:
+        _bridge_cleanup_locked()
+        job = bridge_jobs.get(job_id)
+        if not job:
+            return PlainTextResponse("NOT_FOUND", status_code=404)
+        source_text = str(job.get("source_text") or "")
+        if not source_text:
+            return PlainTextResponse("NOT_FOUND", status_code=404)
+    return PlainTextResponse(source_text, media_type="text/plain", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/bridge/jobs/{job_id}")
+async def bridge_get_job(job_id: str, request: Request):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,40}", job_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not is_valid_key(request.headers.get("X-Api-Key", "")):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    async with bridge_jobs_lock:
+        _bridge_cleanup_locked()
+        job = bridge_jobs.get(job_id)
+        if not job:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        public = _bridge_job_public(job)
+        if job.get("result_attachment_b64"):
+            public["result_attachment_b64"] = job["result_attachment_b64"]
+        return JSONResponse(public)
+
+
+@app.post("/bridge/jobs/{job_id}/result")
+async def bridge_set_result(job_id: str, request: Request):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,40}", job_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not is_valid_key(request.headers.get("X-Api-Key", "")):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "expected JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid body"}, status_code=400)
+    state = str(body.get("state") or "complete").lower().strip()
+    if state not in {"complete", "error"}:
+        return JSONResponse({"error": "invalid state"}, status_code=400)
+    result_text = str(body.get("result_text") or "")
+    attachment_b64 = str(body.get("attachment_b64") or "")
+    if len(attachment_b64) > 15 * 1024 * 1024:
+        return JSONResponse({"error": "attachment too large"}, status_code=413)
+    async with bridge_jobs_lock:
+        _bridge_cleanup_locked()
+        job = bridge_jobs.get(job_id)
+        if not job:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        job.update({
+            "state": state,
+            "updated_at": time.time(),
+            "result_text": result_text[:MAX_LOG_LEN],
+            "result_filename": str(body.get("attachment_name") or "")[:180],
+            "result_attachment_b64": attachment_b64,
+            "result_error": str(body.get("error") or "")[:1000],
+        })
+    return JSONResponse({"ok": True, "job_id": job_id, "state": state})
+
 # -----------------------------
 # RUN
 # -----------------------------
