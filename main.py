@@ -5131,7 +5131,7 @@ def _build_loadstring(raw_url):
     return "loadstring(game:HttpGet(" + json.dumps(raw_url) + "))()"
 
 
-def obfuscate_lua(source: str, publish=True, level="hard") -> str:
+def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) -> str:
 
     if source is None:
         raise ValueError(
@@ -6259,6 +6259,10 @@ def obfuscate_lua(source: str, publish=True, level="hard") -> str:
         + body
     )
 
+
+    if minimum_size:
+        payload = _pad_lua_payload_to_minimum(payload)
+
     if publish:
         # The raw backend receives the complete executable payload. The Lua
         # file itself must contain that payload, never the user-facing loader.
@@ -6271,6 +6275,39 @@ def obfuscate_lua(source: str, publish=True, level="hard") -> str:
 # ═════════════════════════════════════════════════════════════════════════════
 # SAFE PUBLIC API
 # ═════════════════════════════════════════════════════════════════════════════
+
+_MIN_LUA_PAYLOAD_BYTES = 2 * 1024 * 1024
+
+
+def _pad_lua_payload_to_minimum(payload):
+    if not isinstance(payload, str):
+        payload = str(payload)
+
+    current_size = len(payload.encode("utf-8"))
+    if current_size >= _MIN_LUA_PAYLOAD_BYTES:
+        return payload
+
+    remaining = _MIN_LUA_PAYLOAD_BYTES - current_size
+    body_len = max(0, remaining - 8)
+
+    alphabet = (
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789"
+        "_+-=.,;:!?~"
+    )
+
+    rng = random.SystemRandom()
+    chunks = []
+    left = body_len
+
+    while left:
+        take = min(8192, left)
+        chunks.append("".join(rng.choice(alphabet) for _ in range(take)))
+        left -= take
+
+    return payload + "--[[\n" + "".join(chunks) + "\n]]\n"
+
 
 def obfuscate_lua_bundle(source, publish=True, level="hard"):
     """
@@ -6304,10 +6341,18 @@ def obfuscate_lua_bundle(source, publish=True, level="hard"):
 
     # Build the protected Lua payload without publishing it twice.
     level = normalize_obf_level(level)
-    lua_file = obfuscate_lua(source, publish=False, level=level)
+    lua_file = obfuscate_lua(source, publish=False, level=level, minimum_size=True)
 
     if publish:
-        raw_url, _loader_id = _publish_local_payload(lua_file)
+        # Keep the hosted raw-loader copy compact. The executable content is
+        # identical; only the inert minimum-size comment is omitted.
+        backend_payload = obfuscate_lua(
+            source,
+            publish=False,
+            level=level,
+            minimum_size=False,
+        )
+        raw_url, _loader_id = _publish_local_payload(backend_payload)
         loader_text = _build_loadstring(raw_url)
     else:
         # A deterministic local placeholder is useful for tests. No fake
