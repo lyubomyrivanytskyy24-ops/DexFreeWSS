@@ -6933,6 +6933,31 @@ def _bridge_job_public(job: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+async def _bridge_fetch_source_url(source_url: str) -> str:
+    """Fetch a bridge source URL into source_text so /bridge/input/{id} is always usable."""
+    source_url = str(source_url or "").strip()
+    if not source_url:
+        return ""
+    if not re.match(r"^https?://", source_url, re.IGNORECASE):
+        raise ValueError("source_url must use http:// or https://")
+    max_bytes = int(MAX_SCRIPT_BODY)
+    def _fetch():
+        req = urllib.request.Request(
+            source_url,
+            headers={
+                "User-Agent": "DexBridge/1.0",
+                "Accept": "*/*",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=20) as response:
+            data = response.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError("source too large")
+        return data.decode("utf-8", errors="replace")
+    return await asyncio.to_thread(_fetch)
+
+
 @app.post("/bridge/jobs")
 async def bridge_create_job(request: Request):
     ip = _client_ip(request)
@@ -6954,6 +6979,13 @@ async def bridge_create_job(request: Request):
         source_text = str(source_text)
     if not source_url and not (source_text and source_text.strip()):
         return JSONResponse({"error": "source_url or source_text is required"}, status_code=400)
+    if source_url and not (source_text and source_text.strip()):
+        try:
+            source_text = await _bridge_fetch_source_url(source_url)
+        except Exception as exc:
+            return JSONResponse({"error": f"source_url fetch failed: {str(exc)[:500]}"}, status_code=400)
+        if not source_text.strip():
+            return JSONResponse({"error": "source_url returned an empty source"}, status_code=400)
     if source_text and len(source_text.encode("utf-8")) > MAX_SCRIPT_BODY:
         return JSONResponse({"error": "source too large"}, status_code=413)
     job = {
@@ -6995,8 +7027,7 @@ async def bridge_next_job(request: Request):
         job["state"] = "processing"
         job["updated_at"] = time.time()
         public = _bridge_job_public(job)
-        if job.get("source_text"):
-            public["input_url"] = f"{BASE_URL}/bridge/input/{job['id']}"
+        public["input_url"] = f"{BASE_URL}/bridge/input/{job['id']}"
         return JSONResponse({"ok": True, "job": public})
 
 
@@ -7010,9 +7041,32 @@ async def bridge_input(job_id: str, request: Request):
         if not job:
             return PlainTextResponse("NOT_FOUND", status_code=404)
         source_text = str(job.get("source_text") or "")
-        if not source_text:
-            return PlainTextResponse("NOT_FOUND", status_code=404)
-    return PlainTextResponse(source_text, media_type="text/plain", headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+        source_url = str(job.get("source_url") or "").strip()
+
+    if not source_text and source_url:
+        try:
+            fetched = await _bridge_fetch_source_url(source_url)
+        except Exception:
+            fetched = ""
+        if fetched.strip():
+            async with bridge_jobs_lock:
+                job = bridge_jobs.get(job_id)
+                if job is not None:
+                    job["source_text"] = fetched
+                    job["updated_at"] = time.time()
+                    source_text = fetched
+
+    if not source_text:
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+
+    return PlainTextResponse(
+        source_text,
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/bridge/jobs/{job_id}")
