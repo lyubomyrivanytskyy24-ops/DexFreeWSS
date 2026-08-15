@@ -5367,7 +5367,7 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
     lines = []
 
     lines.append(
-        "-- This file was protected using Dex Obfustucator v3.2 [.gg/dexfinder]"
+        "-- This file was protected using Dex Obfustucator v4.2 [.gg/dexfinder]"
     )
 
     lines.append("")
