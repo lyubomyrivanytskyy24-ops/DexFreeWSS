@@ -245,10 +245,10 @@ GLOBAL_UI_JS = r"""
   if (window.matchMedia('(pointer:fine)').matches) window.addEventListener('pointermove', move, {passive:true});
 
   const existingChrome = document.querySelector('.dn-chrome');
-  const shouldAddChrome = !existingChrome && path !== '/' && path !== '/obfustucate' && !document.querySelector('.dn-nav');
+  const shouldAddChrome = !existingChrome && path !== '/' && path !== '/obfuscate' && !document.querySelector('.dn-nav');
   if (shouldAddChrome && document.body) {
     const links = [
-      ['/obfustucate','Obfustucate'],
+      ['/obfuscate','Obfustucate'],
       ['/scripts','Scripts'],
       ['/home','Dashboard'],
       ['/chat','Chat'],
@@ -294,7 +294,7 @@ GLOBAL_UI_JS = r"""
   const ALL_LINKS = [
     ['/', 'Home', 'home'],
     ['/scripts', 'Scripts', 'scripts'],
-    ['/obfustucate', 'Obf.', 'obf'],
+    ['/obfuscate', 'Obf.', 'obf'],
     ['/chat', 'Chat', 'chat'],
     ['/home', 'Panel', 'panel'],
     ['/ME-chat', 'ME-Chat', 'mechat'],
@@ -2915,7 +2915,7 @@ async def index(request: Request):
       <main class="dn-home"><div class="dn-home-inner">
         <nav class="dn-nav">
           <div class="dn-brand"><div class="dn-logo"><span>D</span></div><span>DexNotifier</span></div>
-          <div class="dn-navlinks"><a href="/obfustucate">Obfustucate</a><a href="/chat">Chat</a><a href="/scripts">Scripts</a><a href="/home">Home</a><a href="/admin">Admin</a>{auth_nav_html}</div>
+          <div class="dn-navlinks"><a href="/obfuscate">Obfustucate</a><a href="/chat">Chat</a><a href="/scripts">Scripts</a><a href="/home">Home</a><a href="/admin">Admin</a>{auth_nav_html}</div>
         </nav>
         {notice_html}
         <section class="dn-hero">
@@ -2923,7 +2923,7 @@ async def index(request: Request):
             <div class="dn-eyebrow"><i class="dn-dot"></i> DexNotifier infrastructure</div>
             <h1>Build. Protect.<br><span>Ship Lua.</span></h1>
             <p>A modern control layer for your Lua loaders, protected payloads, script endpoints and private administration tools — all from one fast backend.</p>
-            <div class="dn-actions"><a class="dn-primary" href="/obfustucate">Open Obfustucate →</a><a class="dn-secondary" href="/chat">Open Chat</a><a class="dn-secondary" href="/scripts">Browse scripts</a></div>
+            <div class="dn-actions"><a class="dn-primary" href="/obfuscate">Open Obfustucate →</a><a class="dn-secondary" href="/chat">Open Chat</a><a class="dn-secondary" href="/scripts">Browse scripts</a></div>
           </div>
           <aside class="dn-side">
             <div class="dn-side-head"><strong>System overview</strong><span class="dn-status"><i class="dn-dot"></i> Online</span></div>
@@ -4116,7 +4116,7 @@ ADMIN_BASE_HTML = """
                             const pre = details.querySelector('.obf-source-preview');
                             if (!id || !pre) return;
                             try {{
-                                const response = await fetch(`/admin/obfustucate/${{encodeURIComponent(id)}}/source`, {{credentials:'same-origin', cache:'no-store'}});
+                                const response = await fetch(`/admin/obfuscate/${{encodeURIComponent(id)}}/source`, {{credentials:'same-origin', cache:'no-store'}});
                                 if (!response.ok) throw new Error('Could not load source');
                                 pre.textContent = await response.text();
                                 details.dataset.loaded = '1';
@@ -4529,7 +4529,7 @@ async def build_admin_dashboard_body() -> str:
     <section class="tab-panel" id="tab-obf">
         <div class="card obf-history-card">
             <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;">
-                <div><h2 style="margin-bottom:6px;">Obfustucate History</h2><p class="small-text">Every submission made through <code>/obfustucate</code>. The public page does not display this history.</p></div>
+                <div><h2 style="margin-bottom:6px;">Obfustucate History</h2><p class="small-text">Every submission made through <code>/obfuscate</code>. The public page does not display this history.</p></div>
                 <span class="pill purple" id="obf-history-count">0 submissions</span>
             </div>
             <div id="obf-history-box" class="obf-history-list">No Obfustucate submissions yet.</div>
@@ -6413,15 +6413,15 @@ OBF_PAGE = r"""<!doctype html>
 <script>
 const $=id=>document.getElementById(id),status=$('status');
 async function copyText(text,button){try{if(navigator.clipboard)await navigator.clipboard.writeText(text);else{const t=document.createElement('textarea');t.value=text;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove()}const old=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=old,1000)}catch(e){button.textContent='Copy failed';setTimeout(()=>button.textContent='Copy',1000)}}
-$('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return}$('go').disabled=true;status.textContent='Protecting…';status.className='status';try{const r=await fetch('/obfustucate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfustucation failed');$('loadstring').textContent=d.loadstring;$('payload').textContent=d.payload;$('results').style.display='grid';status.textContent='Complete';status.className='status ok';$('results').scrollIntoView({behavior:'smooth',block:'nearest'})}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
+$('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return}$('go').disabled=true;status.textContent='Protecting…';status.className='status';try{const r=await fetch('/obfuscate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfustucation failed');$('loadstring').textContent=d.loadstring;$('payload').textContent=d.payload;$('results').style.display='grid';status.textContent='Complete';status.className='status ok';$('results').scrollIntoView({behavior:'smooth',block:'nearest'})}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
 document.querySelectorAll('.copy').forEach(b=>b.addEventListener('click',()=>copyText($(b.dataset.copy).textContent,b)));
 </script></body></html>"""
 
-@app.get("/obfustucate")
+@app.get("/obfuscate")
 async def obfuscate_page():
     return HTMLResponse(OBF_PAGE)
 
-@app.post("/obfustucate")
+@app.post("/obfuscate")
 async def obfuscate_api(request: Request):
     ip = _client_ip(request)
     if rate_limited(ip, "obfustucate", OBF_RATE_LIMIT, OBF_RATE_WINDOW):
@@ -6455,7 +6455,7 @@ async def obfuscate_api(request: Request):
 # -----------------------------
 # ADMIN-ONLY OBFUSTUCATE SOURCE VIEW
 # -----------------------------
-@app.get("/admin/obfustucate/{submission_id}/source")
+@app.get("/admin/obfuscate/{submission_id}/source")
 async def admin_obfustucate_source(submission_id: str, request: Request):
     if not require_admin_session(request):
         return PlainTextResponse("Unauthorized", status_code=401)
@@ -6524,7 +6524,7 @@ async def internal_status(request: Request):
 @app.get("/internal/routes")
 async def internal_routes(request: Request):
     if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"},status_code=401)
-    hidden_prefixes = ("/internal", "/info", "/metrics", "/admin/stats", "/admin/obfustucate/", "/admin/me-group")
+    hidden_prefixes = ("/internal", "/info", "/metrics", "/admin/stats", "/admin/obfuscate/", "/admin/me-group")
     routes = []
     for r in app.routes:
         path = getattr(r, "path", None)
@@ -6535,7 +6535,7 @@ async def internal_routes(request: Request):
     return JSONResponse({"ok":True,"routes":routes})
 
 
-@app.get("/internal/obfustucate/history")
+@app.get("/internal/obfuscate/history")
 async def internal_obfustucate_history(request: Request):
     if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"}, status_code=401)
     async with obf_history_lock:
@@ -6544,7 +6544,7 @@ async def internal_obfustucate_history(request: Request):
     return JSONResponse({"ok": True, "count": len(safe), "submissions": safe})
 
 
-@app.get("/internal/obfustucate/history/{submission_id}")
+@app.get("/internal/obfuscate/history/{submission_id}")
 async def internal_obfustucate_history_item(submission_id: str, request: Request):
     if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"}, status_code=401)
     if not RAW_LOADER_ID_PATTERN.fullmatch(submission_id): return JSONResponse({"error":"not found"}, status_code=404)
@@ -6556,7 +6556,7 @@ async def internal_obfustucate_history_item(submission_id: str, request: Request
     return JSONResponse({"error":"not found"}, status_code=404)
 
 
-@app.get("/internal/obfustucate/source/{submission_id}")
+@app.get("/internal/obfuscate/source/{submission_id}")
 async def internal_obfustucate_source(submission_id: str, request: Request):
     if not _private_key_ok(request): return PlainTextResponse("UNAUTHORIZED", status_code=401)
     if not RAW_LOADER_ID_PATTERN.fullmatch(submission_id): return PlainTextResponse("NOT_FOUND", status_code=404)
@@ -6583,7 +6583,7 @@ async def internal_version(request: Request):
 @app.get("/internal/config")
 async def internal_config(request: Request):
     if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"},status_code=401)
-    return JSONResponse({"ok":True,"base_url":BASE_URL,"github_configured":github_configured(),"github_branch":GITHUB_BRANCH,"obfuscation_max_source_bytes":OBF_MAX_SOURCE,"public_obfuscator":"/obfustucate","chat":"/chat","me_chat":"/ME-chat"})
+    return JSONResponse({"ok":True,"base_url":BASE_URL,"github_configured":github_configured(),"github_branch":GITHUB_BRANCH,"obfuscation_max_source_bytes":OBF_MAX_SOURCE,"public_obfuscator":"/obfuscate","chat":"/chat","me_chat":"/ME-chat"})
 
 # ============================================================================
 # LIVE CHAT / ME-CHAT
@@ -6624,7 +6624,7 @@ def _chat_page_html(username: str, me: bool = False) -> str:
     title = "ME-Chat" if me else "Chat"
     subtitle = "Your private ME-Group conversation" if me else "A fast, live place to talk and share media"
     badge = "ME-GROUP • PRIVATE" if me else "LIVE COMMUNITY"
-    return f'''<!doctype html><html lang="en"><head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#050608"><title>{title} — DexNotifier</title><style>{CHAT_PAGE_CSS}</style></head><body><main class="chat-page"><section class="chat-hero"><div><span class="chat-badge"><i style="width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 14px #34d399"></i>{badge}</span><h1>{title}</h1><p>{subtitle}. You're signed in as <strong>{html.escape(username)}</strong>.</p></div><nav class="dn-chrome-links"><a href="/">Home</a><a href="/obfustucate">Obfustucate</a><a href="/chat">Chat</a><a href="/ME-chat">ME-Chat</a><a href="/home">Dashboard</a></nav></section><section class="chat-shell"><aside class="chat-side"><div class="chat-side-card"><strong>{html.escape(username)}</strong><span>Your account</span><span class="chat-online" style="margin-top:10px"><i></i> Online</span></div><div class="chat-side-card"><strong>{'ME-Group' if me else 'Community'}</strong><span>{'Private conversation for approved accounts.' if me else 'Everyone who is signed in can join.'}</span></div><div class="chat-side-card"><strong>Share media</strong><span>Send photos and videos directly in the conversation.</span></div></aside><section class="chat-main"><header class="chat-top"><div><strong>{title}</strong><small id="chat-status">Connecting…</small></div><span id="chat-count" class="chat-count">0 online</span></header><div id="chat-messages" class="chat-messages"><div class="chat-empty"><b>Welcome to {title}</b><span>Your conversation is saved automatically and stays available when you come back.</span></div></div><footer class="chat-compose"><div id="chat-preview" class="chat-preview"><div id="chat-preview-media"></div><div class="chat-preview-info"><strong id="chat-preview-title"></strong><span id="chat-preview-meta"></span></div><button type="button" id="chat-preview-clear" class="chat-preview-clear">×</button></div><div class="chat-input-row"><input id="chat-file" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime" hidden><button type="button" class="chat-icon-btn" onclick="document.getElementById('chat-file').click()" title="Add photo or video">＋</button><textarea id="chat-input" class="chat-input" placeholder="Write a message…" maxlength="{CHAT_MAX_MESSAGE}"></textarea><button id="chat-send" class="chat-send" disabled>Send</button></div><div id="chat-file-name" class="chat-file-name"></div></footer></section></section></main><script>window.__DN_CHAT_CONFIG__={{me:{str(me).lower()},username:{json.dumps(username)},maxMedia:{CHAT_MAX_MEDIA_BYTES}}};</script>{CHAT_PAGE_JS}</body></html>'''
+    return f'''<!doctype html><html lang="en"><head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#050608"><title>{title} — DexNotifier</title><style>{CHAT_PAGE_CSS}</style></head><body><main class="chat-page"><section class="chat-hero"><div><span class="chat-badge"><i style="width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 14px #34d399"></i>{badge}</span><h1>{title}</h1><p>{subtitle}. You're signed in as <strong>{html.escape(username)}</strong>.</p></div><nav class="dn-chrome-links"><a href="/">Home</a><a href="/obfuscate">Obfustucate</a><a href="/chat">Chat</a><a href="/ME-chat">ME-Chat</a><a href="/home">Dashboard</a></nav></section><section class="chat-shell"><aside class="chat-side"><div class="chat-side-card"><strong>{html.escape(username)}</strong><span>Your account</span><span class="chat-online" style="margin-top:10px"><i></i> Online</span></div><div class="chat-side-card"><strong>{'ME-Group' if me else 'Community'}</strong><span>{'Private conversation for approved accounts.' if me else 'Everyone who is signed in can join.'}</span></div><div class="chat-side-card"><strong>Share media</strong><span>Send photos and videos directly in the conversation.</span></div></aside><section class="chat-main"><header class="chat-top"><div><strong>{title}</strong><small id="chat-status">Connecting…</small></div><span id="chat-count" class="chat-count">0 online</span></header><div id="chat-messages" class="chat-messages"><div class="chat-empty"><b>Welcome to {title}</b><span>Your conversation is saved automatically and stays available when you come back.</span></div></div><footer class="chat-compose"><div id="chat-preview" class="chat-preview"><div id="chat-preview-media"></div><div class="chat-preview-info"><strong id="chat-preview-title"></strong><span id="chat-preview-meta"></span></div><button type="button" id="chat-preview-clear" class="chat-preview-clear">×</button></div><div class="chat-input-row"><input id="chat-file" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime" hidden><button type="button" class="chat-icon-btn" onclick="document.getElementById('chat-file').click()" title="Add photo or video">＋</button><textarea id="chat-input" class="chat-input" placeholder="Write a message…" maxlength="{CHAT_MAX_MESSAGE}"></textarea><button id="chat-send" class="chat-send" disabled>Send</button></div><div id="chat-file-name" class="chat-file-name"></div></footer></section></section></main><script>window.__DN_CHAT_CONFIG__={{me:{str(me).lower()},username:{json.dumps(username)},maxMedia:{CHAT_MAX_MEDIA_BYTES}}};</script>{CHAT_PAGE_JS}</body></html>'''
 
 @app.get("/chat")
 async def chat_page(request: Request):
