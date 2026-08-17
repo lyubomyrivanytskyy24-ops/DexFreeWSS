@@ -7102,7 +7102,15 @@ async def bridge_set_result(job_id: str, request: Request):
     if state not in {"complete", "error"}:
         return JSONResponse({"error": "invalid state"}, status_code=400)
     result_text = str(body.get("result_text") or "")
-    attachment_b64 = str(body.get("attachment_b64") or "")
+
+    # Accept both field names used by bridge versions. The canonical stored
+    # field remains result_attachment_b64.
+    attachment_b64 = str(
+        body.get("attachment_b64")
+        or body.get("result_attachment_b64")
+        or ""
+    )
+
     if len(attachment_b64) > 15 * 1024 * 1024:
         return JSONResponse({"error": "attachment too large"}, status_code=413)
     async with bridge_jobs_lock:
@@ -7114,9 +7122,13 @@ async def bridge_set_result(job_id: str, request: Request):
             "state": state,
             "updated_at": time.time(),
             "result_text": result_text[:MAX_LOG_LEN],
-            "result_filename": str(body.get("attachment_name") or "")[:180],
+            "result_filename": str(
+                body.get("attachment_name")
+                or body.get("result_filename")
+                or ""
+            )[:180],
             "result_attachment_b64": attachment_b64,
-            "result_error": str(body.get("error") or "")[:1000],
+            "result_error": str(body.get("error") or body.get("result_error") or "")[:1000],
         })
     return JSONResponse({"ok": True, "job_id": job_id, "state": state})
 
