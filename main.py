@@ -6921,61 +6921,8 @@ async def dynamic_loader(slug: str, request: Request):
 # disappear before the puller/bot pair can finish it.
 BRIDGE_JOB_TTL = int(os.environ.get("DEX_BRIDGE_JOB_TTL", "0"))
 BRIDGE_MAX_JOBS = int(os.environ.get("DEX_BRIDGE_MAX_JOBS", "0"))
-
-# Bridge jobs are persisted so a normal API1 restart/deploy does not erase
-# pending, processing, or completed work.  Processing jobs are recovered as
-# pending on startup so the puller can safely pick them up again.
-BRIDGE_STORE_FILE = os.path.join(DATA_DIR, "bridge_jobs.json")
-
-
-def _bridge_load_jobs() -> Dict[str, Dict[str, Any]]:
-    try:
-        if not os.path.exists(BRIDGE_STORE_FILE):
-            return {}
-        with open(BRIDGE_STORE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            return {}
-        now = time.time()
-        recovered = {}
-        for job_id, job in data.items():
-            if not isinstance(job, dict):
-                continue
-            item = dict(job)
-            if str(item.get("state") or "").lower() == "processing":
-                item["state"] = "pending"
-                item["updated_at"] = now
-            recovered[str(job_id)] = item
-        return recovered
-    except Exception as exc:
-        print(f"[BRIDGE] Failed to load persisted jobs: {exc}")
-        return {}
-
-
-bridge_jobs: Dict[str, Dict[str, Any]] = _bridge_load_jobs()
+bridge_jobs: Dict[str, Dict[str, Any]] = {}
 bridge_jobs_lock = asyncio.Lock()
-
-
-def _bridge_save_jobs_locked() -> None:
-    try:
-        _atomic_write(
-            BRIDGE_STORE_FILE,
-            json.dumps(
-                bridge_jobs,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
-            mode=0o600,
-        )
-    except Exception as exc:
-        # Never make the bridge request itself fail because persistence failed.
-        print(f"[BRIDGE] Failed to persist jobs: {exc}")
-
-
-def _bridge_input_url(job_id: str) -> str:
-    # Keep a .lua suffix because some external dump/deobfuscation services
-    # validate the URL path before downloading it.
-    return f"{BASE_URL}/bridge/input/{job_id}.lua"
 
 
 def _bridge_cleanup_locked() -> None:
@@ -7065,8 +7012,7 @@ async def bridge_create_job(request: Request):
     async with bridge_jobs_lock:
         _bridge_cleanup_locked()
         bridge_jobs[job_id] = job
-        _bridge_save_jobs_locked()
-    input_url = _bridge_input_url(job_id)
+    input_url = f"{BASE_URL}/bridge/input/{job_id}"
     return JSONResponse({"ok": True, "job_id": job_id, "state": "pending", "input_url": input_url})
 
 
@@ -7085,16 +7031,15 @@ async def bridge_next_job(request: Request):
         job = min(candidates, key=lambda j: float(j.get("created_at", 0)))
         job["state"] = "processing"
         job["updated_at"] = time.time()
-        _bridge_save_jobs_locked()
         public = _bridge_job_public(job)
-        public["input_url"] = _bridge_input_url(job["id"])
+        public["input_url"] = f"{BASE_URL}/bridge/input/{job['id']}"
         return JSONResponse({"ok": True, "job": public})
 
 
-async def _bridge_input_response(job_id: str):
+@app.get("/bridge/input/{job_id}")
+async def bridge_input(job_id: str, request: Request):
     if not re.fullmatch(r"[A-Za-z0-9_-]{16,40}", job_id):
         return PlainTextResponse("NOT_FOUND", status_code=404)
-
     async with bridge_jobs_lock:
         _bridge_cleanup_locked()
         job = bridge_jobs.get(job_id)
@@ -7114,7 +7059,6 @@ async def _bridge_input_response(job_id: str):
                 if job is not None:
                     job["source_text"] = fetched
                     job["updated_at"] = time.time()
-                    _bridge_save_jobs_locked()
                     source_text = fetched
 
     if not source_text:
@@ -7124,23 +7068,10 @@ async def _bridge_input_response(job_id: str):
         source_text,
         media_type="text/plain",
         headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-            "Pragma": "no-cache",
+            "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
-            "Content-Disposition": 'inline; filename="source.lua"',
         },
     )
-
-
-@app.get("/bridge/input/{job_id}.lua")
-async def bridge_input_lua(job_id: str):
-    return await _bridge_input_response(job_id)
-
-
-# Keep the old URL form working for already-created jobs and older pullers.
-@app.get("/bridge/input/{job_id}")
-async def bridge_input_legacy(job_id: str):
-    return await _bridge_input_response(job_id)
 
 
 @app.get("/bridge/jobs/{job_id}")
@@ -7204,7 +7135,6 @@ async def bridge_set_result(job_id: str, request: Request):
             "result_attachment_b64": attachment_b64 if state != "pending" else "",
             "result_error": str(body.get("error") or body.get("result_error") or "")[:1000],
         })
-        _bridge_save_jobs_locked()
     return JSONResponse({"ok": True, "job_id": job_id, "state": state})
 
 
@@ -7236,7 +7166,6 @@ async def bridge_ack_job(job_id: str, request: Request):
 
         # Delete only after the consumer explicitly acknowledges the result.
         bridge_jobs.pop(job_id, None)
-        _bridge_save_jobs_locked()
 
     return JSONResponse({"ok": True, "job_id": job_id, "state": "acknowledged"})
 
