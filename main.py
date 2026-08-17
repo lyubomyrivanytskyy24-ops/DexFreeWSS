@@ -6915,24 +6915,21 @@ async def dynamic_loader(slug: str, request: Request):
 # POST /bridge/jobs creates work; GET /bridge/jobs/next claims the oldest job;
 # GET /bridge/jobs/{id} retrieves its state/result; POST /bridge/jobs/{id}/result
 # posts the Discord reply back to the bot.
-BRIDGE_JOB_TTL = int(os.environ.get("DEX_BRIDGE_JOB_TTL", "900"))
-BRIDGE_MAX_JOBS = int(os.environ.get("DEX_BRIDGE_MAX_JOBS", "250"))
+# Bridge jobs are durable until the Discord bot explicitly acknowledges
+# receipt of the puller's result. Do not expire or size-prune pending,
+# processing, or complete jobs; losing one here would make a bridge request
+# disappear before the puller/bot pair can finish it.
+BRIDGE_JOB_TTL = int(os.environ.get("DEX_BRIDGE_JOB_TTL", "0"))
+BRIDGE_MAX_JOBS = int(os.environ.get("DEX_BRIDGE_MAX_JOBS", "0"))
 bridge_jobs: Dict[str, Dict[str, Any]] = {}
 bridge_jobs_lock = asyncio.Lock()
 
 
 def _bridge_cleanup_locked() -> None:
-    now = time.time()
-    stale = [
-        jid for jid, job in bridge_jobs.items()
-        if now - float(job.get("created_at", now)) > BRIDGE_JOB_TTL
-    ]
-    for jid in stale:
-        bridge_jobs.pop(jid, None)
-    if len(bridge_jobs) > BRIDGE_MAX_JOBS:
-        ordered = sorted(bridge_jobs.items(), key=lambda item: float(item[1].get("created_at", 0)))
-        for jid, _job in ordered[: max(0, len(bridge_jobs) - BRIDGE_MAX_JOBS)]:
-            bridge_jobs.pop(jid, None)
+    # Intentionally do nothing. A bridge job is removed only by the explicit
+    # /bridge/jobs/{job_id}/ack endpoint after the Discord bot has consumed
+    # the result.
+    return
 
 
 def _bridge_job_public(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -7107,7 +7104,7 @@ async def bridge_set_result(job_id: str, request: Request):
     if not isinstance(body, dict):
         return JSONResponse({"error": "invalid body"}, status_code=400)
     state = str(body.get("state") or "complete").lower().strip()
-    if state not in {"complete", "error"}:
+    if state not in {"pending", "complete", "error"}:
         return JSONResponse({"error": "invalid state"}, status_code=400)
     result_text = str(body.get("result_text") or "")
 
@@ -7129,16 +7126,49 @@ async def bridge_set_result(job_id: str, request: Request):
         job.update({
             "state": state,
             "updated_at": time.time(),
-            "result_text": result_text[:MAX_LOG_LEN],
+            "result_text": result_text[:MAX_LOG_LEN] if state != "pending" else "",
             "result_filename": str(
                 body.get("attachment_name")
                 or body.get("result_filename")
                 or ""
-            )[:180],
-            "result_attachment_b64": attachment_b64,
+            )[:180] if state != "pending" else "",
+            "result_attachment_b64": attachment_b64 if state != "pending" else "",
             "result_error": str(body.get("error") or body.get("result_error") or "")[:1000],
         })
     return JSONResponse({"ok": True, "job_id": job_id, "state": state})
+
+
+@app.post("/bridge/jobs/{job_id}/ack")
+async def bridge_ack_job(job_id: str, request: Request):
+    """
+    Permanently acknowledge a completed bridge result.
+
+    The Discord bot calls this only after it has successfully consumed the
+    puller's result and finalized it for the requesting Discord user. Until
+    this endpoint succeeds, the completed job remains in API1.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,40}", job_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not is_valid_key(request.headers.get("X-Api-Key", "")):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    async with bridge_jobs_lock:
+        job = bridge_jobs.get(job_id)
+        if not job:
+            return JSONResponse({"error": "not found"}, status_code=404)
+
+        state = str(job.get("state") or "").lower().strip()
+        if state not in {"complete", "error"}:
+            return JSONResponse(
+                {"error": "job is not complete", "state": state},
+                status_code=409,
+            )
+
+        # Delete only after the consumer explicitly acknowledges the result.
+        bridge_jobs.pop(job_id, None)
+
+    return JSONResponse({"ok": True, "job_id": job_id, "state": "acknowledged"})
+
 
 # -----------------------------
 # RUN
