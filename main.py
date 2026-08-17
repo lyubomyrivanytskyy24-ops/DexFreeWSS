@@ -2126,7 +2126,16 @@ GLOBAL_HTTP_RATE_WINDOW = 10.0
 async def global_rate_limit_and_security_headers(request: Request, call_next):
     ip = _client_ip(request)
 
-    if rate_limited(ip, "global_http", max_requests=GLOBAL_HTTP_RATE_LIMIT, window_seconds=GLOBAL_HTTP_RATE_WINDOW):
+    # The private Discord bridge is an internal job transport. Do not apply
+    # the site's normal per-IP request budget to bridge traffic; the bridge
+    # worker polls it continuously and must be able to receive/submit jobs
+    # without this middleware returning 429. Authentication is still checked
+    # by each bridge endpoint below.
+    is_bridge_request = request.url.path.startswith("/bridge/")
+
+    if not is_bridge_request and rate_limited(
+        ip, "global_http", max_requests=GLOBAL_HTTP_RATE_LIMIT, window_seconds=GLOBAL_HTTP_RATE_WINDOW
+    ):
         return PlainTextResponse("RATE_LIMITED", status_code=429)
 
     response = await call_next(request)
@@ -6961,8 +6970,8 @@ async def _bridge_fetch_source_url(source_url: str) -> str:
 @app.post("/bridge/jobs")
 async def bridge_create_job(request: Request):
     ip = _client_ip(request)
-    if rate_limited(ip, "bridge_create", 30, 10.0):
-        return JSONResponse({"error": "rate limited"}, status_code=429)
+    # Bridge endpoints intentionally have no application-level request-rate
+    # limiter. The API key remains mandatory.
     if not is_valid_key(request.headers.get("X-Api-Key", "")):
         await record_failed_attempt("bridge_create_auth", ip)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -7013,8 +7022,7 @@ async def bridge_create_job(request: Request):
 @app.get("/bridge/jobs/next")
 async def bridge_next_job(request: Request):
     ip = _client_ip(request)
-    if rate_limited(ip, "bridge_next", 60, 10.0):
-        return JSONResponse({"error": "rate limited"}, status_code=429)
+    # Bridge polling is intentionally not rate limited.
     if not is_valid_key(request.headers.get("X-Api-Key", "")):
         await record_failed_attempt("bridge_next_auth", ip)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
