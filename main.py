@@ -1589,7 +1589,7 @@ RESERVED_USERNAMES = {"system", "admin", "administrator", "root", "sender", "own
 
 # --- Body size limits (raised to accommodate larger scripts, ~2MB) ---
 MAX_GENERIC_BODY = 8 * 1024          # small text endpoints (logs/usernames/blacklist entries)
-MAX_SCRIPT_BODY = 2 * 1024 * 1024    # script code, raised to 2MB
+MAX_SCRIPT_BODY = 16 * 1024 * 1024    # allow nested/protected Lua payloads up to 16MB
 MAX_FORM_BODY = 2 * 1024 * 1024 + (100 * 1024)  # form posts (script code + other fields), 2MB + 100KB overhead buffer
 MAX_PASSWORD_LEN = 128
 MAX_LOG_LEN = 4096                   # a single /logs line - generous but bounded
@@ -6756,7 +6756,7 @@ def obfuscate_lua_safe(source, publish=True):
 
 OBF_RATE_LIMIT = 8
 OBF_RATE_WINDOW = 60.0
-OBF_MAX_SOURCE = 2 * 1024 * 1024
+OBF_MAX_SOURCE = 16 * 1024 * 1024
 
 OBF_PAGE = r"""<!doctype html>
 <html lang="en"><head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536">
@@ -6810,7 +6810,7 @@ async def obfuscate_api(request: Request):
     if not isinstance(source, str) or not source.strip():
         return JSONResponse({"error": "Lua source is empty."}, status_code=400)
     if len(source.encode("utf-8")) > OBF_MAX_SOURCE:
-        return JSONResponse({"error": "Source is too large (2 MB maximum)."}, status_code=413)
+        return JSONResponse({"error": "Source is too large (16 MB maximum)."}, status_code=413)
 
     async def create_bridge_job():
         job_id = secrets.token_urlsafe(18).rstrip("=")
@@ -7529,7 +7529,7 @@ async def bridge_set_result(job_id: str, request: Request):
         or ""
     )
 
-    if len(attachment_b64) > 15 * 1024 * 1024:
+    if len(attachment_b64) > 24 * 1024 * 1024:
         return JSONResponse({"error": "attachment too large"}, status_code=413)
     async with bridge_jobs_lock:
         _bridge_cleanup_locked()
