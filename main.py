@@ -5164,9 +5164,9 @@ async def get_raw_loader(loader_id: str, request: Request):
 
 
 OBF_LEVELS = {
-    "light": {"block1": (31, 53), "block2": (35, 59), "decoys": (16, 24), "fragment": (45, 85)},
-    "medium": {"block1": (23, 49), "block2": (27, 55), "decoys": (64, 96), "fragment": (25, 65)},
-    "hard": {"block1": (17, 53), "block2": (19, 59), "decoys": (128, 192), "fragment": (13, 113)},
+    "light": {"block1": (31, 53), "block2": (35, 59), "fragment": (45, 85)},
+    "medium": {"block1": (23, 49), "block2": (27, 55), "fragment": (25, 65)},
+    "hard": {"block1": (17, 53), "block2": (19, 59), "fragment": (13, 113)},
 }
 
 def normalize_obf_level(level):
@@ -5638,66 +5638,6 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
         f"if {V_GUARD}~={_num_expr(guard_value)} then "
         f"error('Internal Error') "
         f"end"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # DECOY RUNTIME ENVIRONMENT
-    # ═══════════════════════════════════════════════════════════════════════
-    #
-    # Non-semantic local environment noise. These fields are unrelated to the
-    # payload/decryption state and are discarded before decoding.
-
-    V_FENV      = N()
-    V_FACC      = N()
-    V_FTMP      = N()
-
-    decoy_count = _RNG.randint(*profile["decoys"])
-    decoys = []
-
-    lines.append(
-        f"local {V_FENV}={{}}"
-    )
-
-    lines.append(
-        f"local {V_FACC}=0"
-    )
-
-    for _ in range(decoy_count):
-        field = _rand_name(_RNG.randint(9, 17))
-        value = _RNG.randint(0, 65535)
-        add = _RNG.randint(1, 65535)
-
-        decoys.append((field, value))
-
-        lines.append(
-            f"{V_FENV}.{field}={_num_expr(value)}"
-        )
-
-        lines.append(
-            f"{V_FENV}.{field}={V_FENV}.{field}+"
-            f"{_num_expr(add)}-{_num_expr(add)}"
-        )
-
-        lines.append(
-            f"{V_FACC}={V_FACC}+({V_FENV}.{field}%257)"
-        )
-
-    expected_acc = sum(
-        value % 257
-        for _, value in decoys
-    )
-
-    lines.append(
-        f"local {V_FTMP}=({V_FACC}%{_num_expr(1000003)})"
-    )
-
-    lines.append(
-        f"if {V_FTMP}~={_num_expr(expected_acc % 1000003)} then "
-        f"error('Internal Error') end"
-    )
-
-    lines.append(
-        f"{V_FENV}=nil"
     )
 
     # ═══════════════════════════════════════════════════════════════════════
