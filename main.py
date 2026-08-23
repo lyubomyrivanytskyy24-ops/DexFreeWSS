@@ -5010,6 +5010,63 @@ def _create_raw_loader_id() -> str:
     raise RuntimeError("Could not allocate a unique loader id.")
 
 
+
+# -----------------------------------------------------------------------------
+# PUBLIC RUNTIME TAMPER CHECK
+# -----------------------------------------------------------------------------
+# No build-specific token/key is used. The protected Luau loader sends a
+# runtime declaration plus JSON request headers; API1 validates that contract
+# and returns an explicit ALLOW/DENY decision. This is a tamper signal, not
+# cryptographic proof of Roblox identity.
+@app.post("/runtime/check")
+async def runtime_tamper_check(request: Request):
+    runtime = str(request.headers.get("x-dex-runtime", "")).strip()
+    accept = str(request.headers.get("accept", "")).strip()
+    content_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
+    user_agent = str(request.headers.get("user-agent", "")).strip().lower()
+
+    browser_markers = (
+        "mozilla/", "chrome/", "safari/", "firefox/", "edg/",
+        "opr/", "opera/", "postmanruntime", "insomnia", "curl/",
+        "python-requests", "httpie"
+    )
+
+    try:
+        raw = await request.body()
+        data = json.loads(raw.decode("utf-8")) if raw else {}
+    except Exception:
+        data = {}
+
+    body_runtime = str(data.get("runtime", "")).strip() if isinstance(data, dict) else ""
+
+    allowed = (
+        runtime == "Roblox-Luau"
+        and body_runtime == "Roblox-Luau"
+        and content_type == "application/json"
+        and accept == "application/json"
+        and not any(marker in user_agent for marker in browser_markers)
+    )
+
+    response_headers = {
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+        "X-Dex-Runtime": "Roblox-Luau" if allowed else "Rejected",
+        "X-Dex-Decision": "ALLOW" if allowed else "DENY",
+    }
+
+    if not allowed:
+        return JSONResponse(
+            {"ok": False, "runtime": "Roblox-Luau", "decision": "DENY"},
+            status_code=403,
+            headers=response_headers,
+        )
+
+    return JSONResponse(
+        {"ok": True, "runtime": "Roblox-Luau", "decision": "ALLOW"},
+        status_code=200,
+        headers=response_headers,
+    )
+
 @app.post("/raw")
 async def create_raw_loader(request: Request):
     ip = _client_ip(request)
@@ -5259,6 +5316,7 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
 
     V_GUARD      = N()
     V_GUARD2     = N()
+    V_TAMPER     = N()
 
     # ═══════════════════════════════════════════════════════════════════════
     # RANDOM BUILD STATE
@@ -5422,6 +5480,23 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
         f"if not {V_LOAD} then "
         f"error('Loadstring Is Not Supported On This Executer') "
         f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # REMOTE RUNTIME TAMPER CHECK
+    # ═══════════════════════════════════════════════════════════════════════
+    # Execute the exact remote Luau tamper-check before any protected payload
+    # decryption or execution. The remote script is authoritative and raises
+    # on a rejected runtime.
+    tamper_url = "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/Tamper-Check/refs/heads/main/.lua"
+    lines.append(
+        f"local {V_TAMPER}={V_LOAD}(game:HttpGet({json.dumps(tamper_url)}))"
+    )
+    lines.append(
+        f"if not {V_TAMPER} then error('Tamper Check Failed') end"
+    )
+    lines.append(
+        f"{V_TAMPER}()"
     )
 
     # ═══════════════════════════════════════════════════════════════════════
