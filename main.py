@@ -5010,112 +5010,6 @@ def _create_raw_loader_id() -> str:
     raise RuntimeError("Could not allocate a unique loader id.")
 
 
-
-# -----------------------------------------------------------------------------
-# PUBLIC RUNTIME TAMPER CHECK
-# -----------------------------------------------------------------------------
-# No build-specific token/key is used. The protected Luau loader sends a
-# runtime declaration plus JSON request headers; API1 validates that contract
-# and returns an explicit ALLOW/DENY decision. This is a tamper signal, not
-# cryptographic proof of Roblox identity.
-@app.post("/runtime/check")
-async def runtime_tamper_check(request: Request):
-    """
-    Runtime gate used by the generated Luau loader.
-
-    This validates the complete request contract that the loader is expected
-    to send. It deliberately does NOT pretend that HTTP headers are a
-    cryptographic proof of Roblox identity: a client that controls its HTTP
-    stack can forge headers. The gate therefore treats the Roblox/WinInet
-    User-Agent + exact Dex headers/body as a compatibility/tamper signal.
-    """
-    runtime = str(request.headers.get("x-dex-runtime", "")).strip()
-    accept = str(request.headers.get("accept", "")).strip()
-    content_type = str(
-        request.headers.get("content-type", "")
-    ).split(";", 1)[0].strip().lower()
-    user_agent = str(request.headers.get("user-agent", "")).strip()
-
-    ua_lower = user_agent.lower()
-
-    # Roblox's RequestAsync commonly presents itself as Roblox/WinInet.
-    # Keep this exact enough to reject normal browsers/tools while allowing
-    # Roblox's versioned UA form (for example Roblox/WinInet).
-    roblox_ua = (
-        ua_lower.startswith("roblox/")
-        and "wininet" in ua_lower
-    )
-
-    forbidden_client_markers = (
-        "mozilla/",
-        "chrome/",
-        "safari/",
-        "firefox/",
-        "edg/",
-        "opr/",
-        "opera/",
-        "postmanruntime",
-        "insomnia",
-        "curl/",
-        "python-requests",
-        "httpie",
-        "wget/",
-        "powershell",
-        "axios/",
-        "node-fetch",
-    )
-
-    try:
-        raw = await request.body()
-        data = json.loads(raw.decode("utf-8")) if raw else {}
-    except Exception:
-        data = {}
-
-    body_runtime = (
-        str(data.get("runtime", "")).strip()
-        if isinstance(data, dict)
-        else ""
-    )
-
-    allowed = (
-        runtime == "Roblox-Luau"
-        and body_runtime == "Roblox-Luau"
-        and content_type == "application/json"
-        and accept == "application/json"
-        and roblox_ua
-        and not any(marker in ua_lower for marker in forbidden_client_markers)
-    )
-
-    response_headers = {
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "Pragma": "no-cache",
-        "X-Content-Type-Options": "nosniff",
-        "X-Dex-Runtime": "Roblox-Luau" if allowed else "Rejected",
-        "X-Dex-Decision": "ALLOW" if allowed else "DENY",
-    }
-
-    if not allowed:
-        return JSONResponse(
-            {
-                "ok": False,
-                "runtime": "Roblox-Luau",
-                "decision": "DENY",
-            },
-            status_code=403,
-            headers=response_headers,
-        )
-
-    return JSONResponse(
-        {
-            "ok": True,
-            "runtime": "Roblox-Luau",
-            "decision": "ALLOW",
-        },
-        status_code=200,
-        headers=response_headers,
-    )
-
-
 @app.post("/raw")
 async def create_raw_loader(request: Request):
     ip = _client_ip(request)
@@ -5213,9 +5107,9 @@ async def get_raw_loader(loader_id: str, request: Request):
 
 
 OBF_LEVELS = {
-    "light": {"block1": (31, 53), "block2": (35, 59), "fragment": (45, 85)},
-    "medium": {"block1": (23, 49), "block2": (27, 55), "fragment": (25, 65)},
-    "hard": {"block1": (17, 53), "block2": (19, 59), "fragment": (13, 113)},
+    "light": {"block1": (31, 53), "block2": (35, 59), "decoys": (16, 24), "fragment": (45, 85)},
+    "medium": {"block1": (23, 49), "block2": (27, 55), "decoys": (64, 96), "fragment": (25, 65)},
+    "hard": {"block1": (17, 53), "block2": (19, 59), "decoys": (256, 384), "fragment": (13, 113)},
 }
 
 def normalize_obf_level(level):
@@ -5244,38 +5138,6 @@ def _build_loadstring(raw_url):
     # JSON string quoting is also valid Lua string quoting for URLs and avoids
     # accidental breakage if the URL ever contains a quote or backslash.
     return "loadstring(game:HttpGet(" + json.dumps(raw_url) + "))()"
-
-
-
-def _assert_clean_lua_output(payload: str) -> str:
-    """
-    Hard invariant for the current no-fenv build.
-
-    The old generator emitted explicit `getfenv()` / `fenv.*` noise.  This
-    build never emits that construct.  Fail closed if either token ever
-    appears in generated output, including if a future edit accidentally
-    reintroduces it.
-    """
-    if not isinstance(payload, str):
-        payload = str(payload)
-
-    lowered = payload.lower()
-
-    forbidden = (
-        "getfenv",
-        "setfenv",
-        "fenv.",
-    )
-
-    for token in forbidden:
-        if token in lowered:
-            raise RuntimeError(
-                "Generated Lua contains forbidden legacy environment "
-                f"construct: {token}"
-            )
-
-    return payload
-
 
 
 def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) -> str:
@@ -5397,7 +5259,6 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
 
     V_GUARD      = N()
     V_GUARD2     = N()
-    V_TAMPER     = N()
 
     # ═══════════════════════════════════════════════════════════════════════
     # RANDOM BUILD STATE
@@ -5515,7 +5376,7 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
     lines = []
 
     lines.append(
-        "-- This file was protected using Dex Obfustucator v4.2 [.gg/dexfinder]"
+        "-- This file was protected using Dex Obfustucator v4.5 [.gg/dexfinder]"
     )
 
     lines.append("")
@@ -5561,23 +5422,6 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
         f"if not {V_LOAD} then "
         f"error('Loadstring Is Not Supported On This Executer') "
         f"end"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # REMOTE RUNTIME TAMPER CHECK
-    # ═══════════════════════════════════════════════════════════════════════
-    # Execute the exact remote Luau tamper-check before any protected payload
-    # decryption or execution. The remote script is authoritative and raises
-    # on a rejected runtime.
-    tamper_url = "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/Tamper-Check/refs/heads/main/.lua"
-    lines.append(
-        f"local {V_TAMPER}={V_LOAD}(game:HttpGet({json.dumps(tamper_url)}))"
-    )
-    lines.append(
-        f"if not {V_TAMPER} then error('Tamper Check Failed') end"
-    )
-    lines.append(
-        f"{V_TAMPER}()"
     )
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -5720,6 +5564,115 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
         f"error('Internal Error') "
         f"end"
     )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # DECOY RUNTIME ENVIRONMENT
+    # ═══════════════════════════════════════════════════════════════════════
+    #
+    # Non-semantic local environment noise. These fields are unrelated to the
+    # payload/decryption state and are discarded before decoding.
+
+    V_FENV      = N()
+    V_FACC      = N()
+    V_FTMP      = N()
+
+    decoy_count = _RNG.randint(*profile["decoys"])
+    decoys = []
+
+    lines.append(
+        f"local {V_FENV}={{}}"
+    )
+
+    lines.append(
+        f"local {V_FACC}=0"
+    )
+
+    for _ in range(decoy_count):
+        field = _rand_name(_RNG.randint(9, 17))
+        value = _RNG.randint(0, 65535)
+        add = _RNG.randint(1, 65535)
+
+        decoys.append((field, value))
+
+        lines.append(
+            f"{V_FENV}.{field}={_num_expr(value)}"
+        )
+
+        lines.append(
+            f"{V_FENV}.{field}={V_FENV}.{field}+"
+            f"{_num_expr(add)}-{_num_expr(add)}"
+        )
+
+        lines.append(
+            f"{V_FACC}={V_FACC}+({V_FENV}.{field}%257)"
+        )
+
+    expected_acc = sum(
+        value % 257
+        for _, value in decoys
+    )
+
+    lines.append(
+        f"local {V_FTMP}=({V_FACC}%{_num_expr(1000003)})"
+    )
+
+    lines.append(
+        f"if {V_FTMP}~={_num_expr(expected_acc % 1000003)} then "
+        f"error('Internal Error') end"
+    )
+
+    lines.append(
+        f"{V_FENV}=nil"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # EXPANDED FAKE GETFENV / ENVIRONMENT NOISE
+    # ═══════════════════════════════════════════════════════════════════════
+    # Non-semantic environment probes. Every call is protected with pcall so
+    # executors without getfenv support continue to execute normally.
+
+    V_GETFENV = N()
+    V_ENVPROBE = N()
+    V_ENVSINK = N()
+    V_ENVSEED = N()
+
+    lines.append(f"local {V_GETFENV}=getfenv")
+    lines.append(f"local {V_ENVSINK}=0")
+    lines.append(f"local {V_ENVSEED}={_num_expr(_RNG.randint(1, 65535))}")
+    lines.append(f"local {V_ENVPROBE}={{}}")
+
+    fake_env_calls = _RNG.randint(280, 440)
+    fake_indices = [0, 1, 2, -1, -2, 3, 4, 5, 7, 8, 16, 32, 64]
+    for _ in range(fake_env_calls):
+        index = _RNG.choice(fake_indices)
+        salt = _RNG.randint(1, 65535)
+        field = _rand_name(_RNG.randint(8, 15))
+        lines.append(
+            f"{V_ENVPROBE}.{field}=pcall({V_GETFENV},{_num_expr(index)})"
+        )
+        lines.append(
+            f"{V_ENVSINK}=({V_ENVSINK}+{_num_expr(salt)})%65536"
+        )
+        lines.append(
+            f"if {V_ENVPROBE}.{field}==nil then {V_ENVSINK}=({V_ENVSINK}+1)%65536 end"
+        )
+
+    # Keep the probe state live without affecting the protected payload.
+    lines.append(
+        f"{V_ENVSINK}=({V_ENVSINK}+{V_ENVSEED}*0)%65536"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # RUNTIME API CANARIES / TAMPER CHECKS
+    # ═══════════════════════════════════════════════════════════════════════
+    V_TAMPER = N()
+    lines.append(f"local {V_TAMPER}=false")
+    lines.append(
+        f"if string.byte~={V_BYTE} or string.char~={V_CHAR} or "
+        f"string.len~={V_LEN} or table.concat~={V_CONCAT} or "
+        f"table.insert~={V_INSERT} or math.floor~={V_FLOOR} then {V_TAMPER}=true end"
+    )
+    lines.append(f"if {V_TAMPER} then error('Runtime integrity check failed') end")
 
     # ═══════════════════════════════════════════════════════════════════════
     # TOKEN PAYLOAD
@@ -6319,6 +6272,17 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
     )
 
     # ═══════════════════════════════════════════════════════════════════════
+    # FINAL RUNTIME INTEGRITY RECHECK
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"if string.byte~={V_BYTE} or string.char~={V_CHAR} or "
+        f"string.len~={V_LEN} or table.concat~={V_CONCAT} or "
+        f"table.insert~={V_INSERT} or math.floor~={V_FLOOR} then "
+        f"error('Runtime tamper detected') end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
     # FINAL LOAD
     # ═══════════════════════════════════════════════════════════════════════
 
@@ -6373,10 +6337,6 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
         # file itself must contain that payload, never the user-facing loader.
         # The loader is exposed separately by obfuscate_lua_bundle().
         _raw_backend_publish(payload)
-
-    # Final no-fenv invariant: never return a generated file containing
-    # the legacy fake-environment constructs.
-    payload = _assert_clean_lua_output(payload)
 
     return payload
 
@@ -6451,7 +6411,6 @@ def obfuscate_lua_bundle(source, publish=True, level="hard"):
     # Build the protected Lua payload without publishing it twice.
     level = normalize_obf_level(level)
     lua_file = obfuscate_lua(source, publish=False, level=level, minimum_size=True)
-    lua_file = _assert_clean_lua_output(lua_file)
 
     if publish:
         # Keep the hosted raw-loader copy compact. The executable content is
@@ -6549,7 +6508,7 @@ async def obfuscate_api(request: Request):
         return JSONResponse({"error": "Source is too large (2 MB maximum)."}, status_code=413)
     try:
         # One public protection profile. The old client-selectable level is gone.
-        bundle = obfuscate_lua_bundle(source, publish=True, level="medium")
+        bundle = obfuscate_lua_bundle(source, publish=True, level="hard")
         if bundle.get("loader_id") and bundle.get("raw_url"):
             try:
                 async with obf_history_lock:
