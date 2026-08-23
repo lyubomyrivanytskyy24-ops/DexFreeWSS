@@ -6921,7 +6921,6 @@ async def dynamic_loader(slug: str, request: Request):
 # disappear before the puller/bot pair can finish it.
 BRIDGE_JOB_TTL = int(os.environ.get("DEX_BRIDGE_JOB_TTL", "0"))
 BRIDGE_MAX_JOBS = int(os.environ.get("DEX_BRIDGE_MAX_JOBS", "0"))
-BRIDGE_STALE_SECONDS = int(os.environ.get("DEX_BRIDGE_STALE_SECONDS", "600"))
 bridge_jobs: Dict[str, Dict[str, Any]] = {}
 bridge_jobs_lock = asyncio.Lock()
 
@@ -6947,7 +6946,8 @@ async def _bridge_fetch_source_url(source_url: str) -> str:
         return ""
     if not re.match(r"^https?://", source_url, re.IGNORECASE):
         raise ValueError("source_url must use http:// or https://")
-    max_bytes = int(MAX_SCRIPT_BODY)
+    # Bridge source fetching intentionally has no application-level size cap.
+    # The upstream/platform remains responsible for hard infrastructure limits.
     def _fetch():
         req = urllib.request.Request(
             source_url,
@@ -6958,9 +6958,7 @@ async def _bridge_fetch_source_url(source_url: str) -> str:
             method="GET",
         )
         with urllib.request.urlopen(req, timeout=20) as response:
-            data = response.read(max_bytes + 1)
-        if len(data) > max_bytes:
-            raise ValueError("source too large")
+            data = response.read()
         return data.decode("utf-8", errors="replace")
     return await asyncio.to_thread(_fetch)
 
@@ -6993,8 +6991,9 @@ async def bridge_create_job(request: Request):
             return JSONResponse({"error": f"source_url fetch failed: {str(exc)[:500]}"}, status_code=400)
         if not source_text.strip():
             return JSONResponse({"error": "source_url returned an empty source"}, status_code=400)
-    if source_text and len(source_text.encode("utf-8")) > MAX_SCRIPT_BODY:
-        return JSONResponse({"error": "source too large"}, status_code=413)
+    # No application-level size rejection for bridge source_text.
+    # Keep the value exactly as supplied so large bridge inputs can flow
+    # through API1 to the puller.
     job = {
         "id": job_id,
         "state": "pending",
@@ -7014,7 +7013,6 @@ async def bridge_create_job(request: Request):
         _bridge_cleanup_locked()
         bridge_jobs[job_id] = job
     input_url = f"{BASE_URL}/bridge/input/{job_id}"
-    print(f"[bridge] job created {job_id} requester={job['requester_name']!r} filename={job['filename']!r}", flush=True)
     return JSONResponse({"ok": True, "job_id": job_id, "state": "pending", "input_url": input_url})
 
 
@@ -7027,24 +7025,12 @@ async def bridge_next_job(request: Request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     async with bridge_jobs_lock:
         _bridge_cleanup_locked()
-        now = time.time()
-        # If the puller died after claiming a job, make the job available again
-        # after a long safety window. Normal jobs are unaffected.
-        for stale_job in bridge_jobs.values():
-            if stale_job.get("state") == "processing":
-                updated = float(stale_job.get("updated_at") or stale_job.get("created_at") or now)
-                if BRIDGE_STALE_SECONDS > 0 and now - updated >= BRIDGE_STALE_SECONDS:
-                    stale_job["state"] = "pending"
-                    stale_job["updated_at"] = now
-                    print(f"[bridge] requeued stale job {stale_job.get('id')}", flush=True)
-
         candidates = [j for j in bridge_jobs.values() if j.get("state") == "pending"]
         if not candidates:
             return JSONResponse({"ok": True, "job": None})
         job = min(candidates, key=lambda j: float(j.get("created_at", 0)))
         job["state"] = "processing"
         job["updated_at"] = time.time()
-        print(f"[bridge] job claimed {job.get('id')}", flush=True)
         public = _bridge_job_public(job)
         public["input_url"] = f"{BASE_URL}/bridge/input/{job['id']}"
         return JSONResponse({"ok": True, "job": public})
@@ -7149,7 +7135,6 @@ async def bridge_set_result(job_id: str, request: Request):
             "result_attachment_b64": attachment_b64 if state != "pending" else "",
             "result_error": str(body.get("error") or body.get("result_error") or "")[:1000],
         })
-        print(f"[bridge] result stored {job_id} state={state}", flush=True)
     return JSONResponse({"ok": True, "job_id": job_id, "state": state})
 
 
