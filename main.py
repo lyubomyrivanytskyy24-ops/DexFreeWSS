@@ -4942,9 +4942,6 @@ RAW_LOADER_POST_RATE_WINDOW = 60.0
 RAW_LOADER_GET_RATE_LIMIT = 120
 RAW_LOADER_GET_RATE_WINDOW = 10.0
 RAW_LOADER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
-RAW_ATTESTATION_FILE = os.environ.get("DEX_RAW_ATTESTATION_FILE", "").strip() or os.path.join(DATA_DIR, "raw_attestations.json")
-RAW_ATTESTATION_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
-RAW_ATTESTATION_LOCK = asyncio.Lock()
 
 OBF_HISTORY_DIR = os.environ.get("DEX_OBF_HISTORY_DIR", "").strip() or os.path.join(DATA_DIR, "obf_history")
 OBF_HISTORY_FILE = os.path.join(OBF_HISTORY_DIR, "index.json")
@@ -4986,21 +4983,12 @@ def _record_obfustucate_submission(source: str, loader_id: str, raw_url: str) ->
     return entry
 
 
-def _publish_local_payload(payload: str, attestation_key: str = ""):
+def _publish_local_payload(payload: str):
     if not isinstance(payload, str) or not payload.strip():
         raise ValueError("Raw payload is empty.")
     loader_id = _create_raw_loader_id()
     path = _raw_loader_path(loader_id)
     _atomic_write(path, payload, mode=0o600)
-    if not RAW_ATTESTATION_KEY_PATTERN.fullmatch(str(attestation_key or "").strip()):
-        raise ValueError("Runtime attestation key is required.")
-    attestations = _load_raw_attestations()
-    attestations[_attestation_digest(attestation_key)] = {
-        "loader_id": loader_id,
-        "created_at": time.time(),
-        "last_seen": 0,
-    }
-    _save_raw_attestations(attestations)
     raw_url = f"https://dexnotifier.xyz/raw/{loader_id}"
     return raw_url, loader_id
 
@@ -5022,90 +5010,6 @@ def _create_raw_loader_id() -> str:
     raise RuntimeError("Could not allocate a unique loader id.")
 
 
-def _load_raw_attestations() -> dict:
-    try:
-        with open(RAW_ATTESTATION_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_raw_attestations(data: dict) -> None:
-    os.makedirs(os.path.dirname(RAW_ATTESTATION_FILE) or DATA_DIR, exist_ok=True)
-    _atomic_write(RAW_ATTESTATION_FILE, json.dumps(data, ensure_ascii=False), mode=0o600)
-
-
-def _attestation_digest(value: str) -> str:
-    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
-
-
-def _looks_like_browser_user_agent(value: str) -> bool:
-    ua = str(value or "").lower()
-    browser_markers = (
-        "mozilla/", "chrome/", "safari/", "firefox/", "edg/",
-        "opr/", "opera/", "postmanruntime", "insomnia", "curl/",
-    )
-    return any(marker in ua for marker in browser_markers)
-
-
-@app.post("/runtime/attest")
-async def runtime_attest(request: Request):
-    ip = _client_ip(request)
-    if rate_limited(ip, "runtime_attest", 60, 60.0):
-        return JSONResponse({"error": "rate limited"}, status_code=429)
-
-    runtime_header = str(request.headers.get("X-Dex-Runtime", "")).strip()
-    attestation_key = str(request.headers.get("X-Dex-Attestation", "")).strip()
-    accept = str(request.headers.get("Accept", "")).lower()
-    content_type = str(request.headers.get("Content-Type", "")).lower()
-    user_agent = str(request.headers.get("User-Agent", "")).strip()
-
-    # A normal browser/client request is not accepted. The Lua payload sends
-    # the exact custom Roblox/Luau runtime marker plus its per-build token.
-    if runtime_header != "Roblox-Luau":
-        return JSONResponse({"error": "runtime environment rejected"}, status_code=403)
-    if not RAW_ATTESTATION_KEY_PATTERN.fullmatch(attestation_key):
-        return JSONResponse({"error": "runtime environment rejected"}, status_code=403)
-    if "application/json" not in accept:
-        return JSONResponse({"error": "runtime environment rejected"}, status_code=403)
-    if "application/json" not in content_type:
-        return JSONResponse({"error": "runtime environment rejected"}, status_code=403)
-    if _looks_like_browser_user_agent(user_agent):
-        return JSONResponse({"error": "browser clients are not accepted"}, status_code=403)
-
-    digest = _attestation_digest(attestation_key)
-    async with RAW_ATTESTATION_LOCK:
-        attestations = _load_raw_attestations()
-        record = attestations.get(digest)
-        if not isinstance(record, dict):
-            return JSONResponse({"error": "runtime attestation is invalid"}, status_code=403)
-        loader_id = str(record.get("loader_id") or "")
-        if not RAW_LOADER_ID_PATTERN.fullmatch(loader_id):
-            return JSONResponse({"error": "runtime attestation is invalid"}, status_code=403)
-        if not os.path.exists(_raw_loader_path(loader_id)):
-            return JSONResponse({"error": "runtime attestation is expired"}, status_code=403)
-        record["last_seen"] = time.time()
-        attestations[digest] = record
-        _save_raw_attestations(attestations)
-
-    return JSONResponse(
-        {
-            "ok": True,
-            "runtime": "Roblox-Luau",
-            "decision": "ALLOW",
-            "attestation": attestation_key,
-        },
-        headers={
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-            "X-Dex-Runtime": "Roblox-Luau",
-            "X-Dex-Decision": "ALLOW",
-            "X-Dex-Attestation": attestation_key,
-        },
-    )
-
-
 @app.post("/raw")
 async def create_raw_loader(request: Request):
     ip = _client_ip(request)
@@ -5122,10 +5026,6 @@ async def create_raw_loader(request: Request):
     if not is_valid_key(api_key):
         await record_failed_attempt("raw_loader_auth", ip)
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    attestation_key = str(request.headers.get("X-Dex-Attestation-Key", "")).strip()
-    if not RAW_ATTESTATION_KEY_PATTERN.fullmatch(attestation_key):
-        return JSONResponse({"error": "runtime attestation key is required"}, status_code=400)
 
     if reject_if_oversized(request, MAX_SCRIPT_BODY):
         return JSONResponse({"error": "payload too large"}, status_code=413)
@@ -5153,14 +5053,6 @@ async def create_raw_loader(request: Request):
         loader_id = _create_raw_loader_id()
         path = _raw_loader_path(loader_id)
         _atomic_write(path, payload, mode=0o600)
-        async with RAW_ATTESTATION_LOCK:
-            attestations = _load_raw_attestations()
-            attestations[_attestation_digest(attestation_key)] = {
-                "loader_id": loader_id,
-                "created_at": time.time(),
-                "last_seen": 0,
-            }
-            _save_raw_attestations(attestations)
     except Exception as exc:
         print(f"[RAW_LOADER] Failed to store payload: {exc}")
         return JSONResponse({"error": "could not store payload"}, status_code=500)
@@ -5174,7 +5066,6 @@ async def create_raw_loader(request: Request):
             "loader_id": loader_id,
             "raw_url": raw_url,
             "loadstring": f'loadstring(game:HttpGet("{raw_url}"))()',
-            "runtime_attestation": True,
         }
     )
 
@@ -5249,7 +5140,7 @@ def _build_loadstring(raw_url):
     return "loadstring(game:HttpGet(" + json.dumps(raw_url) + "))()"
 
 
-def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True, attestation_key="") -> str:
+def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) -> str:
 
     if source is None:
         raise ValueError(
@@ -5266,9 +5157,6 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True, at
 
     level = normalize_obf_level(level)
     profile = OBF_LEVELS[level]
-
-    if publish and not str(attestation_key or "").strip():
-        attestation_key = secrets.token_urlsafe(32)
 
     src = source.encode("utf-8")
 
@@ -6335,37 +6223,6 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True, at
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # RUNTIME ENVIRONMENT ATTESTATION
-    # ═══════════════════════════════════════════════════════════════════════
-    _att_key = str(attestation_key or "").strip()
-    if not _att_key:
-        raise RuntimeError("Runtime attestation key was not generated.")
-
-    att_url = "https://dexapi1.up.railway.app/runtime/attest"
-    V_HTTP = N()
-    V_REQ = N()
-    V_RESP = N()
-    V_HTTP_OK = N()
-    V_HTTP_BODY = N()
-    V_HTTP_HEADERS = N()
-    V_JSON_OK = N()
-    V_JSON = N()
-
-    lines.append(f"local {V_HTTP}=game:GetService('HttpService')")
-    lines.append(f"local {V_REQ}={{Url={json.dumps(att_url)},Method='POST',Headers={{['X-Dex-Runtime']='Roblox-Luau',['X-Dex-Attestation']={json.dumps(_att_key)},['Accept']='application/json',['Content-Type']='application/json'}},Body={V_HTTP}:JSONEncode({{runtime='Roblox-Luau',attestation={json.dumps(_att_key)}}})}}")
-    lines.append(f"local {V_HTTP_OK},{V_RESP}=pcall(function() return {V_HTTP}:RequestAsync({V_REQ}) end)")
-    lines.append(f"if not {V_HTTP_OK} or not {V_RESP} or not {V_RESP}.Success or {V_RESP}.StatusCode~=200 then error('Runtime Environment Rejected') end")
-    lines.append(f"local {V_HTTP_HEADERS}={V_RESP}.Headers or {{}}")
-    lines.append(f"local {V_HTTP_BODY}={V_RESP}.Body or ''")
-    lines.append(f"local {V_JSON_OK},{V_JSON}=pcall(function() return {V_HTTP}:JSONDecode({V_HTTP_BODY}) end)")
-    lines.append(f"if not {V_JSON_OK} or type({V_JSON})~='table' then error('Runtime Environment Rejected') end")
-    lines.append(f"local {V_VALUE}=tostring({V_HTTP_HEADERS}['X-Dex-Runtime'] or {V_HTTP_HEADERS}['x-dex-runtime'] or '')")
-    lines.append(f"local {V_ADD}=tostring({V_HTTP_HEADERS}['X-Dex-Decision'] or {V_HTTP_HEADERS}['x-dex-decision'] or '')")
-    lines.append(f"local {V_ROTATION}=tostring({V_HTTP_HEADERS}['X-Dex-Attestation'] or {V_HTTP_HEADERS}['x-dex-attestation'] or '')")
-    lines.append(f"if {V_VALUE}~='Roblox-Luau' or {V_ADD}~='ALLOW' or {V_ROTATION}~={json.dumps(_att_key)} then error('Runtime Environment Rejected') end")
-    lines.append(f"if {V_JSON}.ok~=true or tostring({V_JSON}.runtime)~='Roblox-Luau' or tostring({V_JSON}.decision)~='ALLOW' or tostring({V_JSON}.attestation)~={json.dumps(_att_key)} then error('Runtime Environment Rejected') end")
-
-    # ═══════════════════════════════════════════════════════════════════════
     # FINAL LOAD
     # ═══════════════════════════════════════════════════════════════════════
 
@@ -6490,11 +6347,10 @@ def obfuscate_lua_bundle(source, publish=True, level="hard"):
         )
 
     src = source.encode("utf-8")
-    attestation_key = secrets.token_urlsafe(32)
 
     # Build the protected Lua payload without publishing it twice.
     level = normalize_obf_level(level)
-    lua_file = obfuscate_lua(source, publish=False, level=level, minimum_size=True, attestation_key=attestation_key)
+    lua_file = obfuscate_lua(source, publish=False, level=level, minimum_size=True)
 
     if publish:
         # Keep the hosted raw-loader copy compact. The executable content is
@@ -6504,9 +6360,8 @@ def obfuscate_lua_bundle(source, publish=True, level="hard"):
             publish=False,
             level=level,
             minimum_size=False,
-            attestation_key=attestation_key,
         )
-        raw_url, _loader_id = _publish_local_payload(backend_payload, attestation_key=attestation_key)
+        raw_url, _loader_id = _publish_local_payload(backend_payload)
         loader_text = _build_loadstring(raw_url)
     else:
         # A deterministic local placeholder is useful for tests. No fake
@@ -6528,7 +6383,6 @@ def obfuscate_lua_bundle(source, publish=True, level="hard"):
         "display_text": display_text,
         "loader_id": _loader_id if publish else "",
         "raw_url": raw_url if publish else "",
-        "attestation": attestation_key,
     }
 
 
