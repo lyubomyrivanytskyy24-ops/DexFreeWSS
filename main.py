@@ -880,7 +880,8 @@ def _num_expr(value):
 
     if style == 6:
         a = _RNG.randint(1, 300)
-        return f"(({value}~={value+a}) and {value} or {value})"
+        b = _RNG.randint(1, 300)
+        return f"((({value}+{a})-{a})+({b}-{b}))"
 
     if style == 7:
         a = _RNG.randint(1, 1000)
@@ -5109,7 +5110,7 @@ async def get_raw_loader(loader_id: str, request: Request):
 OBF_LEVELS = {
     "light": {"block1": (31, 53), "block2": (35, 59), "decoys": (16, 24), "fragment": (45, 85)},
     "medium": {"block1": (23, 49), "block2": (27, 55), "decoys": (64, 96), "fragment": (25, 65)},
-    "hard": {"block1": (17, 53), "block2": (19, 59), "decoys": (256, 384), "fragment": (13, 113)},
+    "hard": {"block1": (7, 31), "block2": (9, 37), "decoys": (1536, 2048), "fragment": (5, 43)},
 }
 
 def normalize_obf_level(level):
@@ -5194,8 +5195,53 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
     V_SEED7      = N()
     V_SEED8      = N()
 
+    # Ten independent cipher layers. Each build gets fresh seeds and fresh
+    # block schedules; the runtime reverses all ten layers before loading.
+    V_SEED9      = N()
+    V_SEED10     = N()
+    V_SEED11     = N()
+    V_SEED12     = N()
+
+    # Seven additional independent cipher layers (10 total).
+    V_SEED13     = N()
+    V_SEED14     = N()
+    V_SEED15     = N()
+    V_SEED16     = N()
+    V_SEED17     = N()
+    V_SEED18     = N()
+    V_SEED19     = N()
+    V_SEED20     = N()
+    V_SEED21     = N()
+    V_SEED22     = N()
+    V_SEED23     = N()
+    V_SEED24     = N()
+    V_SEED25     = N()
+    V_SEED26     = N()
+    V_SEED27     = N()
+    V_SEED28     = N()
+    V_SEED29     = N()
+    V_SEED30     = N()
+    V_SEED31     = N()
+    V_SEED32     = N()
+    V_SEED33     = N()
+    V_SEED34     = N()
+    V_SEED35     = N()
+    V_SEED36     = N()
+    V_SEED37     = N()
+    V_SEED38     = N()
+    V_SEED39     = N()
+    V_SEED40     = N()
+
     V_BLOCKSIZE  = N()
     V_BLOCKSIZE2 = N()
+    V_BLOCKSIZE3 = N()
+    V_BLOCKSIZE4 = N()
+    V_BLOCKSIZE5 = N()
+    V_BLOCKSIZE6 = N()
+    V_BLOCKSIZE7 = N()
+    V_BLOCKSIZE8 = N()
+    V_BLOCKSIZE9 = N()
+    V_BLOCKSIZE10 = N()
 
     V_PARTS      = N()
     V_PAYLOAD    = N()
@@ -5274,17 +5320,59 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
     seed7 = _RNG.randint(0, 0xFFFF)
     seed8 = _RNG.randint(0, 0xFFFF)
 
+    seed9 = _RNG.randint(0, 0xFFFF)
+    seed10 = _RNG.randint(0, 0xFFFF)
+    seed11 = _RNG.randint(0, 0xFFFF)
+    seed12 = _RNG.randint(0, 0xFFFF)
+    seed13 = _RNG.randint(0, 0xFFFF)
+    seed14 = _RNG.randint(0, 0xFFFF)
+    seed15 = _RNG.randint(0, 0xFFFF)
+    seed16 = _RNG.randint(0, 0xFFFF)
+    seed17 = _RNG.randint(0, 0xFFFF)
+    seed18 = _RNG.randint(0, 0xFFFF)
+    seed19 = _RNG.randint(0, 0xFFFF)
+    seed20 = _RNG.randint(0, 0xFFFF)
+    seed21 = _RNG.randint(0, 0xFFFF)
+    seed22 = _RNG.randint(0, 0xFFFF)
+    seed23 = _RNG.randint(0, 0xFFFF)
+    seed24 = _RNG.randint(0, 0xFFFF)
+    seed25 = _RNG.randint(0, 0xFFFF)
+    seed26 = _RNG.randint(0, 0xFFFF)
+    seed27 = _RNG.randint(0, 0xFFFF)
+    seed28 = _RNG.randint(0, 0xFFFF)
+    seed29 = _RNG.randint(0, 0xFFFF)
+    seed30 = _RNG.randint(0, 0xFFFF)
+    seed31 = _RNG.randint(0, 0xFFFF)
+    seed32 = _RNG.randint(0, 0xFFFF)
+    seed33 = _RNG.randint(0, 0xFFFF)
+    seed34 = _RNG.randint(0, 0xFFFF)
+    seed35 = _RNG.randint(0, 0xFFFF)
+    seed36 = _RNG.randint(0, 0xFFFF)
+    seed37 = _RNG.randint(0, 0xFFFF)
+    seed38 = _RNG.randint(0, 0xFFFF)
+    seed39 = _RNG.randint(0, 0xFFFF)
+    seed40 = _RNG.randint(0, 0xFFFF)
+
     block_size = _RNG.randint(*profile["block1"])
     block_size2 = _RNG.randint(*profile["block2"])
+    block_size3 = _RNG.randint(*profile["block1"])
+    block_size4 = _RNG.randint(*profile["block2"])
+    block_size5 = _RNG.randint(*profile["block1"])
+    block_size6 = _RNG.randint(*profile["block2"])
+    block_size7 = _RNG.randint(*profile["block1"])
+    block_size8 = _RNG.randint(*profile["block2"])
+    block_size9 = _RNG.randint(*profile["block1"])
+    block_size10 = _RNG.randint(*profile["block2"])
 
     token_zero, token_one = (
         _make_token_alphabet()
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # FIRST CIPHER LAYER
+    # TEN-LAYER CIPHER PIPELINE
     # ═══════════════════════════════════════════════════════════════════════
 
+    # Layer 1: independent permutation/XOR/rotation/additive round.
     encrypted1 = _encrypt_round(
         src,
         seed1,
@@ -5294,10 +5382,7 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
         block_size
     )
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # SECOND CIPHER LAYER
-    # ═══════════════════════════════════════════════════════════════════════
-
+    # Layer 2: independent permutation/XOR/rotation/additive round.
     encrypted2 = _encrypt_round(
         encrypted1,
         seed5,
@@ -5307,31 +5392,135 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
         block_size2
     )
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # INTERNAL ROUND-TRIP TEST
-    # ═══════════════════════════════════════════════════════════════════════
-
-    test1 = _decrypt_round(
+    # Layer 3: independent permutation/XOR/rotation/additive round.
+    encrypted3 = _encrypt_round(
         encrypted2,
-        seed5,
-        seed6,
-        seed7,
-        seed8,
-        block_size2
+        seed9,
+        seed10,
+        seed11,
+        seed12,
+        block_size3
     )
 
-    test2 = _decrypt_round(
-        test1,
-        seed1,
-        seed2,
-        seed3,
-        seed4,
-        block_size
+    # Layer 4: independent permutation/XOR/rotation/additive round.
+    encrypted4 = _encrypt_round(
+        encrypted3,
+        seed13,
+        seed14,
+        seed15,
+        seed16,
+        block_size4
     )
 
-    if test2 != src:
+    # Layer 5: independent permutation/XOR/rotation/additive round.
+    encrypted5 = _encrypt_round(
+        encrypted4,
+        seed17,
+        seed18,
+        seed19,
+        seed20,
+        block_size5
+    )
+
+    # Layer 6: independent permutation/XOR/rotation/additive round.
+    encrypted6 = _encrypt_round(
+        encrypted5,
+        seed21,
+        seed22,
+        seed23,
+        seed24,
+        block_size6
+    )
+
+    # Layer 7: independent permutation/XOR/rotation/additive round.
+    encrypted7 = _encrypt_round(
+        encrypted6,
+        seed25,
+        seed26,
+        seed27,
+        seed28,
+        block_size7
+    )
+
+    # Layer 8: independent permutation/XOR/rotation/additive round.
+    encrypted8 = _encrypt_round(
+        encrypted7,
+        seed29,
+        seed30,
+        seed31,
+        seed32,
+        block_size8
+    )
+
+    # Layer 9: independent permutation/XOR/rotation/additive round.
+    encrypted9 = _encrypt_round(
+        encrypted8,
+        seed33,
+        seed34,
+        seed35,
+        seed36,
+        block_size9
+    )
+
+    # Layer 10: independent permutation/XOR/rotation/additive round.
+    encrypted10 = _encrypt_round(
+        encrypted9,
+        seed37,
+        seed38,
+        seed39,
+        seed40,
+        block_size10
+    )
+
+    # Every layer is independently reversible; the final ciphertext is encrypted10.
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # INTERNAL TEN-LAYER ROUND-TRIP TEST
+    # ═══════════════════════════════════════════════════════════════════════
+
+    roundtrip9 = _decrypt_round(
+        encrypted10, seed37, seed38, seed39, seed40, block_size10
+    )
+
+    roundtrip8 = _decrypt_round(
+        roundtrip9, seed33, seed34, seed35, seed36, block_size9
+    )
+
+    roundtrip7 = _decrypt_round(
+        roundtrip8, seed29, seed30, seed31, seed32, block_size8
+    )
+
+    roundtrip6 = _decrypt_round(
+        roundtrip7, seed25, seed26, seed27, seed28, block_size7
+    )
+
+    roundtrip5 = _decrypt_round(
+        roundtrip6, seed21, seed22, seed23, seed24, block_size6
+    )
+
+    roundtrip4 = _decrypt_round(
+        roundtrip5, seed17, seed18, seed19, seed20, block_size5
+    )
+
+    roundtrip3 = _decrypt_round(
+        roundtrip4, seed13, seed14, seed15, seed16, block_size4
+    )
+
+    roundtrip2 = _decrypt_round(
+        roundtrip3, seed9, seed10, seed11, seed12, block_size3
+    )
+
+    roundtrip1 = _decrypt_round(
+        roundtrip2, seed5, seed6, seed7, seed8, block_size2
+    )
+
+    roundtrip0 = _decrypt_round(
+        roundtrip1, seed1, seed2, seed3, seed4, block_size
+    )
+
+    if roundtrip0 != src:
         raise RuntimeError(
-            "Internal encryption/decryption error."
+            "Internal ten-layer encryption/decryption error."
         )
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -5343,7 +5532,7 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
     )
 
     expected_ch1, expected_ch2, expected_ch3 = (
-        _cipher_digest(encrypted2)
+        _cipher_digest(encrypted10)
     )
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -5351,7 +5540,7 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
     # ═══════════════════════════════════════════════════════════════════════
 
     token_payload = _encode_binary_tokens(
-        encrypted2,
+        encrypted10,
         token_zero,
         token_one
     )
@@ -5360,7 +5549,7 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
         token_payload,
         token_zero,
         token_one
-    ) != encrypted2:
+    ) != encrypted10:
         raise RuntimeError(
             "Binary token encoder failure."
         )
@@ -5499,8 +5688,48 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
         (V_SEED6, seed6),
         (V_SEED7, seed7),
         (V_SEED8, seed8),
+        (V_SEED9, seed9),
+        (V_SEED10, seed10),
+        (V_SEED11, seed11),
+        (V_SEED12, seed12),
+        (V_SEED13, seed13),
+        (V_SEED14, seed14),
+        (V_SEED15, seed15),
+        (V_SEED16, seed16),
+        (V_SEED17, seed17),
+        (V_SEED18, seed18),
+        (V_SEED19, seed19),
+        (V_SEED20, seed20),
+        (V_SEED21, seed21),
+        (V_SEED22, seed22),
+        (V_SEED23, seed23),
+        (V_SEED24, seed24),
+        (V_SEED25, seed25),
+        (V_SEED26, seed26),
+        (V_SEED27, seed27),
+        (V_SEED28, seed28),
+        (V_SEED29, seed29),
+        (V_SEED30, seed30),
+        (V_SEED31, seed31),
+        (V_SEED32, seed32),
+        (V_SEED33, seed33),
+        (V_SEED34, seed34),
+        (V_SEED35, seed35),
+        (V_SEED36, seed36),
+        (V_SEED37, seed37),
+        (V_SEED38, seed38),
+        (V_SEED39, seed39),
+        (V_SEED40, seed40),
         (V_BLOCKSIZE, block_size),
         (V_BLOCKSIZE2, block_size2),
+        (V_BLOCKSIZE3, block_size3),
+        (V_BLOCKSIZE4, block_size4),
+        (V_BLOCKSIZE5, block_size5),
+        (V_BLOCKSIZE6, block_size6),
+        (V_BLOCKSIZE7, block_size7),
+        (V_BLOCKSIZE8, block_size8),
+        (V_BLOCKSIZE9, block_size9),
+        (V_BLOCKSIZE10, block_size10),
     ):
         lines.append(
             f"local {variable}={_num_expr(value)}"
@@ -5641,7 +5870,7 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
     lines.append(f"local {V_ENVSEED}={_num_expr(_RNG.randint(1, 65535))}")
     lines.append(f"local {V_ENVPROBE}={{}}")
 
-    fake_env_calls = _RNG.randint(280, 440)
+    fake_env_calls = _RNG.randint(2500, 4000)
     fake_indices = [0, 1, 2, -1, -2, 3, 4, 5, 7, 8, 16, 32, 64]
     for _ in range(fake_env_calls):
         index = _RNG.choice(fake_indices)
@@ -5699,7 +5928,7 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
 
     lines.append(
         f"local {V_EXPECTLEN}="
-        f"{_num_expr(len(encrypted2))}"
+        f"{_num_expr(len(encrypted10))}"
     )
 
     lines.append(
@@ -5863,7 +6092,7 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
     )
 
     # ═══════════════════════════════════════════════════════════════════════
-    # TWO-LAYER DECRYPTION
+    # THREE-LAYER DECRYPTION
     # ═══════════════════════════════════════════════════════════════════════
 
     def emit_decryption_layer(
@@ -6160,6 +6389,74 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
             f"{V_SOURCE}="
             f"{V_CONCAT}({V_RESULT})"
         )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # REVERSE TEN-LAYER DECRYPTION
+    # ═══════════════════════════════════════════════════════════════════════
+
+    emit_decryption_layer(
+        f"{V_SEED37}",
+        f"{V_SEED38}",
+        f"{V_SEED39}",
+        f"{V_SEED40}",
+        f"{V_BLOCKSIZE10}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED33}",
+        f"{V_SEED34}",
+        f"{V_SEED35}",
+        f"{V_SEED36}",
+        f"{V_BLOCKSIZE9}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED29}",
+        f"{V_SEED30}",
+        f"{V_SEED31}",
+        f"{V_SEED32}",
+        f"{V_BLOCKSIZE8}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED25}",
+        f"{V_SEED26}",
+        f"{V_SEED27}",
+        f"{V_SEED28}",
+        f"{V_BLOCKSIZE7}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED21}",
+        f"{V_SEED22}",
+        f"{V_SEED23}",
+        f"{V_SEED24}",
+        f"{V_BLOCKSIZE6}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED17}",
+        f"{V_SEED18}",
+        f"{V_SEED19}",
+        f"{V_SEED20}",
+        f"{V_BLOCKSIZE5}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED13}",
+        f"{V_SEED14}",
+        f"{V_SEED15}",
+        f"{V_SEED16}",
+        f"{V_BLOCKSIZE4}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED9}",
+        f"{V_SEED10}",
+        f"{V_SEED11}",
+        f"{V_SEED12}",
+        f"{V_BLOCKSIZE3}",
+    )
 
     emit_decryption_layer(
         f"{V_SEED5}",
@@ -6492,6 +6789,14 @@ async def obfuscate_page():
 
 @app.post("/obfuscate")
 async def obfuscate_api(request: Request):
+    """Bridge public obfuscation through the GoofyScator browser worker, then
+    apply the same Dex obfuscator locally to the returned source.
+
+    The browser worker is responsible for sending `.goofy <API1 URL>` and
+    returning the attachment here. This keeps the website flow identical to
+    the Discord `.obf` bridge flow while preserving the existing Dex output
+    schema.
+    """
     ip = _client_ip(request)
     if rate_limited(ip, "obfustucate", OBF_RATE_LIMIT, OBF_RATE_WINDOW):
         return JSONResponse({"error": "Too many obfuscation requests. Try again shortly."}, status_code=429)
@@ -6506,20 +6811,63 @@ async def obfuscate_api(request: Request):
         return JSONResponse({"error": "Lua source is empty."}, status_code=400)
     if len(source.encode("utf-8")) > OBF_MAX_SOURCE:
         return JSONResponse({"error": "Source is too large (2 MB maximum)."}, status_code=413)
-    try:
-        # One public protection profile. The old client-selectable level is gone.
-        bundle = obfuscate_lua_bundle(source, publish=True, level="hard")
-        if bundle.get("loader_id") and bundle.get("raw_url"):
-            try:
-                async with obf_history_lock:
-                    _record_obfustucate_submission(source, bundle["loader_id"], bundle["raw_url"])
-            except Exception as history_exc:
-                print(f"[OBF_HISTORY] failed to record submission: {history_exc}")
-        return JSONResponse({"ok": True, "loadstring": bundle["loadstring"], "payload": bundle["lua_file"]})
-    except Exception as exc:
-        print(f"[OBF] failed: {exc}")
-        return JSONResponse({"error": "Obfuscation failed. Check that the source is valid Lua."}, status_code=400)
 
+    async def create_bridge_job():
+        job_id = secrets.token_urlsafe(18).rstrip("=")
+        job = {
+            "id": job_id, "state": "pending",
+            "created_at": time.time(), "updated_at": time.time(),
+            "source_url": "", "source_text": source,
+            "filename": "source.lua", "requester_id": "",
+            "requester_name": "web", "operation": "goofy",
+            "result_text": "", "result_filename": "",
+            "result_attachment_b64": "", "result_error": "",
+        }
+        async with bridge_jobs_lock:
+            bridge_jobs[job_id] = job
+        return job_id
+
+    try:
+        job_id = await create_bridge_job()
+        deadline = time.monotonic() + max(30, int(os.environ.get("DEX_OBF_BRIDGE_TIMEOUT", "600")))
+        while time.monotonic() < deadline:
+            async with bridge_jobs_lock:
+                job = bridge_jobs.get(job_id)
+                snapshot = dict(job) if job else None
+            if not snapshot:
+                return JSONResponse({"error": "Bridge job disappeared."}, status_code=502)
+            state = str(snapshot.get("state") or "").lower()
+            if state == "complete":
+                import base64
+                raw = b""
+                encoded = str(snapshot.get("result_attachment_b64") or "")
+                if encoded:
+                    raw = base64.b64decode(encoded, validate=True)
+                goofy_source = raw.decode("utf-8", errors="replace") if raw else str(snapshot.get("result_text") or "")
+                goofy_source = re.sub(r"^\s*-- This file is protected by goofyscator V10 BETA-2\.1 >> goofyscator\.lua\.cz <<\s*$", "", goofy_source, flags=re.IGNORECASE | re.MULTILINE)
+                goofy_source = re.sub(r"^\s*--\[\[ obfuscated @ discord\.gg/25ms \]\]\s*$", "", goofy_source, flags=re.IGNORECASE | re.MULTILINE)
+                goofy_source = goofy_source.strip()
+                if not goofy_source:
+                    return JSONResponse({"error": "GoofyScator returned an empty source."}, status_code=502)
+                bundle = obfuscate_lua_bundle(goofy_source, publish=True, level="hard")
+                if bundle.get("loader_id") and bundle.get("raw_url"):
+                    try:
+                        async with obf_history_lock:
+                            _record_obfustucate_submission(goofy_source, bundle["loader_id"], bundle["raw_url"])
+                    except Exception as history_exc:
+                        print(f"[OBF_HISTORY] failed to record submission: {history_exc}")
+                async with bridge_jobs_lock:
+                    bridge_jobs.pop(job_id, None)
+                return JSONResponse({"ok": True, "loadstring": bundle["loadstring"], "payload": bundle["lua_file"]})
+            if state == "error":
+                async with bridge_jobs_lock:
+                    bridge_jobs.pop(job_id, None)
+                return JSONResponse({"error": str(snapshot.get("result_error") or "GoofyScator bridge failed.")}, status_code=502)
+            await asyncio.sleep(0.25)
+        return JSONResponse({"error": "GoofyScator bridge timed out."}, status_code=504)
+    except Exception as exc:
+        print(f"[OBF_BRIDGE] failed: {exc}")
+        return JSONResponse({"error": "Obfuscation failed. Check that the source is valid Lua."}, status_code=400)
 
 # -----------------------------
 # ADMIN-ONLY OBFUSTUCATE SOURCE VIEW
@@ -7054,6 +7402,10 @@ async def bridge_create_job(request: Request):
     # No application-level size rejection for bridge source_text.
     # Keep the value exactly as supplied so large bridge inputs can flow
     # through API1 to the puller.
+    operation = str(body.get("operation") or body.get("mode") or "deobfuscate").strip().lower()
+    if operation not in {"deobfuscate", "goofy", "goofy_obf", "obfuscate"}:
+        return JSONResponse({"error": "invalid bridge operation"}, status_code=400)
+
     job = {
         "id": job_id,
         "state": "pending",
@@ -7064,6 +7416,7 @@ async def bridge_create_job(request: Request):
         "filename": str(body.get("filename") or "source.lua")[:180],
         "requester_id": str(body.get("requester_id") or ""),
         "requester_name": str(body.get("requester_name") or ""),
+        "operation": operation,
         "result_text": "",
         "result_filename": "",
         "result_attachment_b64": "",
