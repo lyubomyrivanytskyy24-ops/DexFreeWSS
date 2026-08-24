@@ -7503,6 +7503,9 @@ async def bridge_create_job(request: Request):
     # Keep the value exactly as supplied so large bridge inputs can flow
     # through API1 to the puller.
     operation = str(body.get("operation") or body.get("mode") or "deobfuscate").strip().lower()
+    # `.goofy` is a direct passthrough mode: the puller receives the
+    # GoofyScator attachment and returns it without a Dex obfuscation or
+    # minify pass. Legacy minify remains accepted for unrelated callers.
     if operation not in {"deobfuscate", "goofy", "goofy_obf", "obfuscate", "minify"}:
         return JSONResponse({"error": "invalid bridge operation"}, status_code=400)
 
