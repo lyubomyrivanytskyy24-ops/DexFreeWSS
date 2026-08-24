@@ -5110,7 +5110,7 @@ async def get_raw_loader(loader_id: str, request: Request):
 OBF_LEVELS = {
     "light": {"block1": (31, 53), "block2": (35, 59), "decoys": (16, 24), "fragment": (45, 85)},
     "medium": {"block1": (23, 49), "block2": (27, 55), "decoys": (64, 96), "fragment": (25, 65)},
-    "hard": {"block1": (7, 31), "block2": (9, 37), "decoys": (1536, 2048), "fragment": (5, 43)},
+    "hard": {"block1": (9, 27), "block2": (11, 31), "decoys": (256, 384), "fragment": (8, 32)},
 }
 
 def normalize_obf_level(level):
@@ -6642,7 +6642,7 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
 # SAFE PUBLIC API
 # ═════════════════════════════════════════════════════════════════════════════
 
-_MIN_LUA_PAYLOAD_BYTES = 2 * 1024 * 1024
+_MIN_LUA_PAYLOAD_BYTES = 128 * 1024
 
 
 def _pad_lua_payload_to_minimum(payload):
@@ -6783,6 +6783,58 @@ $('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){stat
 document.querySelectorAll('.copy').forEach(b=>b.addEventListener('click',()=>copyText($(b.dataset.copy).textContent,b)));
 </script></body></html>"""
 
+def _minify_lua_preserve_strings(source: str) -> str:
+    """Compact Lua while preserving quoted/long strings and token boundaries."""
+    if not isinstance(source, str):
+        source = str(source)
+    out=[]; i=0; n=len(source); quote=None; long_level=None; pending_space=False
+    ident=lambda c: c.isalnum() or c in "_"
+    while i<n:
+        c=source[i]
+        if quote:
+            out.append(c)
+            if c=='\\' and i+1<n:
+                out.append(source[i+1]); i+=2; continue
+            if c==quote: quote=None
+            i+=1; continue
+        if long_level is not None:
+            end=']'+('='*long_level)+']'
+            j=source.find(end,i)
+            if j<0: out.append(source[i:]); break
+            out.append(source[i:j+len(end)]); i=j+len(end); long_level=None; continue
+        if c in "'\"":
+            if pending_space and out and ident(out[-1][-1]): out.append(' ')
+            pending_space=False; quote=c; out.append(c); i+=1; continue
+        if c=='[':
+            m=re.match(r'\[(=*)\[', source[i:])
+            if m:
+                if pending_space and out and ident(out[-1][-1]): out.append(' ')
+                pending_space=False; long_level=len(m.group(1)); end='['+m.group(1)+'['; out.append(end); i+=len(end); continue
+        if c=='-' and i+1<n and source[i+1]=='-':
+            if i+2<n and source[i+2]=='[':
+                m=re.match(r'\-\-\[(=*)\[', source[i:])
+                if m:
+                    end='='+m.group(1)+'='  # unused; find closing long comment
+                    close=']'+('='*len(m.group(1)))+']'
+                    j=source.find(close,i+len(m.group(0)))
+                    i=n if j<0 else j+len(close)
+                    pending_space=True
+                    continue
+            j=source.find('\n',i+2); i=n if j<0 else j+1; pending_space=True; continue
+        if c.isspace(): pending_space=True; i+=1; continue
+        if pending_space and out:
+            prev=out[-1][-1]
+            if ident(prev) and ident(c): out.append(' ')
+        pending_space=False
+        out.append(c); i+=1
+    return ''.join(out).strip()
+
+_MINIFIED_HEADER='-- This file was protected using Dex Obfustucator v4.5 [.gg/dexfinder]'
+
+def _format_minified_lua(source: str) -> str:
+    body=_minify_lua_preserve_strings(source)
+    return _MINIFIED_HEADER+'\\n\\n'+body
+
 @app.get("/obfuscate")
 async def obfuscate_page():
     return HTMLResponse(OBF_PAGE)
@@ -6849,7 +6901,55 @@ async def obfuscate_api(request: Request):
                 goofy_source = goofy_source.strip()
                 if not goofy_source:
                     return JSONResponse({"error": "GoofyScator returned an empty source."}, status_code=502)
-                bundle = obfuscate_lua_bundle(goofy_source, publish=True, level="hard")
+                bundle = obfuscate_lua_bundle(goofy_source, publish=True, level="medium")
+                # Final compacting pass: send the completed Dex payload back through
+                # the Discord browser bridge as `.minify <API1 URL>`.
+                minify_job_id = secrets.token_urlsafe(18).rstrip("=")
+                minify_job = {
+                    "id": minify_job_id, "state": "pending",
+                    "created_at": time.time(), "updated_at": time.time(),
+                    "source_url": "", "source_text": bundle["lua_file"],
+                    "filename": "obfuscated.lua", "requester_id": "",
+                    "requester_name": "web", "operation": "minify",
+                    "result_text": "", "result_filename": "",
+                    "result_attachment_b64": "", "result_error": "",
+                }
+                async with bridge_jobs_lock:
+                    bridge_jobs[minify_job_id] = minify_job
+                minify_deadline = time.monotonic() + max(30, int(os.environ.get("DEX_MINIFY_BRIDGE_TIMEOUT", "600")))
+                minified_payload = ""
+                while time.monotonic() < minify_deadline:
+                    async with bridge_jobs_lock:
+                        mj = bridge_jobs.get(minify_job_id)
+                        ms = dict(mj) if mj else None
+                    if not ms:
+                        break
+                    if str(ms.get("state") or "").lower() == "complete":
+                        enc = str(ms.get("result_attachment_b64") or "")
+                        if enc:
+                            try:
+                                minified_payload = base64.b64decode(enc, validate=True).decode("utf-8", errors="replace")
+                            except Exception:
+                                minified_payload = ""
+                        if not minified_payload:
+                            minified_payload = str(ms.get("result_text") or "")
+                        break
+                    if str(ms.get("state") or "").lower() == "error":
+                        break
+                    await asyncio.sleep(0.25)
+                async with bridge_jobs_lock:
+                    bridge_jobs.pop(minify_job_id, None)
+                if not minified_payload.strip():
+                    minified_payload = _format_minified_lua(bundle["lua_file"])
+                # Hard safety cap: minified output is never allowed above 3 MiB.
+                if len(minified_payload.encode("utf-8")) > 3 * 1024 * 1024:
+                    return JSONResponse({"error": "Final protected payload exceeds the 3 MB output limit."}, status_code=413)
+                bundle["lua_file"] = minified_payload
+                final_raw_url, final_loader_id = _publish_local_payload(minified_payload)
+                bundle["raw_url"] = final_raw_url
+                bundle["loader_id"] = final_loader_id
+                bundle["loadstring"] = _build_loadstring(final_raw_url)
+
                 if bundle.get("loader_id") and bundle.get("raw_url"):
                     try:
                         async with obf_history_lock:
@@ -7403,7 +7503,7 @@ async def bridge_create_job(request: Request):
     # Keep the value exactly as supplied so large bridge inputs can flow
     # through API1 to the puller.
     operation = str(body.get("operation") or body.get("mode") or "deobfuscate").strip().lower()
-    if operation not in {"deobfuscate", "goofy", "goofy_obf", "obfuscate"}:
+    if operation not in {"deobfuscate", "goofy", "goofy_obf", "obfuscate", "minify"}:
         return JSONResponse({"error": "invalid bridge operation"}, status_code=400)
 
     job = {
