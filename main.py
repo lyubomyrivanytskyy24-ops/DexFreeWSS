@@ -6896,11 +6896,24 @@ async def obfuscate_api(request: Request):
                 if encoded:
                     raw = base64.b64decode(encoded, validate=True)
                 goofy_source = raw.decode("utf-8", errors="replace") if raw else str(snapshot.get("result_text") or "")
-                goofy_source = re.sub(r"^\s*-- This file is protected by goofyscator V10 BETA-2\.1 >> goofyscator\.lua\.cz <<\s*$", "", goofy_source, flags=re.IGNORECASE | re.MULTILINE)
-                goofy_source = re.sub(r"^\s*--\[\[ obfuscated @ discord\.gg/25ms \]\]\s*$", "", goofy_source, flags=re.IGNORECASE | re.MULTILINE)
-                goofy_source = goofy_source.strip()
-                if not goofy_source:
-                    return JSONResponse({"error": "GoofyScator returned an empty source."}, status_code=502)
+                goofy_source = goofy_source.replace("\ufeff", "", 1).replace("\r\n", "\n").replace("\r", "\n")
+
+                # GoofyScator's direct response is three physical lines. The
+                # payload is the line that starts with "return"; banner text
+                # is transport metadata and must not be passed onward.
+                goofy_payload = ""
+                for line in goofy_source.split("\n"):
+                    if line.lstrip().startswith("return"):
+                        goofy_payload = line.strip()
+                        break
+
+                if not goofy_payload:
+                    return JSONResponse(
+                        {"error": "GoofyScator returned no payload line starting with `return`."},
+                        status_code=502,
+                    )
+
+                goofy_source = goofy_payload
                 bundle = obfuscate_lua_bundle(goofy_source, publish=True, level="medium")
                 # Final compacting pass: send the completed Dex payload back through
                 # the Discord browser bridge as `.minify <API1 URL>`.
