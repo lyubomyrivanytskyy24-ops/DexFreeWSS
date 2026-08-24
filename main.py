@@ -6774,12 +6774,12 @@ OBF_PAGE = r"""<!doctype html>
 <section class="hero"><div class="eyebrow"><i class="live"></i> Lua protection tool</div><h1><span>Obfustucate</span></h1><p>Paste your raw Lua source below. DexNotifier generates the protected payload and the exact raw loadstring you can copy.</p></section>
 <section class="workspace"><div class="toolbar"><div class="traffic"><i></i><i></i><i></i></div><div class="toolbar-title">Protected Lua workspace</div><div style="width:39px"></div></div>
 <div class="editor-card"><div class="label"><span>Source</span><span class="hint">Lua · UTF-8</span></div><textarea id="source" class="editor" spellcheck="false" placeholder="-- paste your Lua source here"></textarea><div class="actionbar"><button id="go" class="go">Obfustucate Lua</button><span id="status" class="status">Ready</span></div></div>
-<div id="results" class="results" style="display:none"><div class="result"><div class="result-head"><strong>Raw loadstring</strong><span>copy-ready</span></div><div class="copyrow"><div id="loadstring" class="out"></div><button class="copy" data-copy="loadstring">Copy</button></div></div><div class="result"><div class="result-head"><strong>Protected payload</strong><span>complete Lua file</span></div><div class="copyrow"><div id="payload" class="out"></div><button class="copy" data-copy="payload">Copy</button></div></div></div>
+<div id="results" class="results" style="display:none"><div class="result"><div class="result-head"><strong>Protected payload</strong><span>complete Lua file</span></div><div class="copyrow"><div id="payload" class="out"></div><button class="copy" data-copy="payload">Copy</button></div></div></div>
 </section><div class="footer">DexNotifier · Obfustucate · Protected workspace</div></div></main>
 <script>
 const $=id=>document.getElementById(id),status=$('status');
 async function copyText(text,button){try{if(navigator.clipboard)await navigator.clipboard.writeText(text);else{const t=document.createElement('textarea');t.value=text;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove()}const old=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=old,1000)}catch(e){button.textContent='Copy failed';setTimeout(()=>button.textContent='Copy',1000)}}
-$('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return}$('go').disabled=true;status.textContent='Protecting…';status.className='status';try{const r=await fetch('/obfuscate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfustucation failed');$('loadstring').textContent=d.loadstring;$('payload').textContent=d.payload;$('results').style.display='grid';status.textContent='Complete';status.className='status ok';$('results').scrollIntoView({behavior:'smooth',block:'nearest'})}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
+$('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return}$('go').disabled=true;status.textContent='Protecting…';status.className='status';try{const r=await fetch('/obfuscate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfustucation failed');$('payload').textContent=d.payload||'';$('results').style.display='grid';status.textContent='Complete';status.className='status ok';$('results').scrollIntoView({behavior:'smooth',block:'nearest'})}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
 document.querySelectorAll('.copy').forEach(b=>b.addEventListener('click',()=>copyText($(b.dataset.copy).textContent,b)));
 </script></body></html>"""
 
@@ -6891,18 +6891,33 @@ async def obfuscate_api(request: Request):
             state = str(snapshot.get("state") or "").lower()
             if state == "complete":
                 import base64
+
                 raw = b""
                 encoded = str(snapshot.get("result_attachment_b64") or "")
                 if encoded:
-                    raw = base64.b64decode(encoded, validate=True)
-                goofy_source = raw.decode("utf-8", errors="replace") if raw else str(snapshot.get("result_text") or "")
-                goofy_source = goofy_source.replace("\ufeff", "", 1).replace("\r\n", "\n").replace("\r", "\n")
+                    try:
+                        raw = base64.b64decode(encoded, validate=True)
+                    except Exception as exc:
+                        return JSONResponse(
+                            {"error": "GoofyScator returned an invalid attachment."},
+                            status_code=502,
+                        )
 
-                # The puller normally strips GoofyScator's first two lines
-                # before returning the attachment to API1. Therefore API1 must
-                # accept BOTH forms:
-                #   raw Goofy = 3 lines, payload on line 3
-                #   cleaned bridge result = 1 line starting with return
+                goofy_source = (
+                    raw.decode("utf-8", errors="replace")
+                    if raw
+                    else str(snapshot.get("result_text") or "")
+                )
+                goofy_source = (
+                    goofy_source
+                    .replace("\ufeff", "", 1)
+                    .replace("\r\n", "\n")
+                    .replace("\r", "\n")
+                )
+
+                # The puller normally returns the already-cleaned Goofy
+                # payload as one line. Accept the original three-line form
+                # too, so API1 remains compatible with either bridge worker.
                 goofy_lines = goofy_source.split("\n")
                 if len(goofy_lines) >= 3:
                     goofy_payload = goofy_lines[2].strip()
@@ -6913,69 +6928,45 @@ async def obfuscate_api(request: Request):
 
                 if not goofy_payload.startswith("return"):
                     return JSONResponse(
-                        {"error": "GoofyScator returned an invalid payload; expected the third line or a cleaned line starting with `return`."},
+                        {
+                            "error": (
+                                "GoofyScator returned an invalid payload; "
+                                "expected the third line or a cleaned line "
+                                "starting with `return`."
+                            )
+                        },
                         status_code=502,
                     )
 
-                goofy_source = goofy_payload
-                bundle = obfuscate_lua_bundle(goofy_source, publish=True, level="medium")
-                # Final compacting pass: send the completed Dex payload back through
-                # the Discord browser bridge as `.minify <API1 URL>`.
-                minify_job_id = secrets.token_urlsafe(18).rstrip("=")
-                minify_job = {
-                    "id": minify_job_id, "state": "pending",
-                    "created_at": time.time(), "updated_at": time.time(),
-                    "source_url": "", "source_text": bundle["lua_file"],
-                    "filename": "obfuscated.lua", "requester_id": "",
-                    "requester_name": "web", "operation": "minify",
-                    "result_text": "", "result_filename": "",
-                    "result_attachment_b64": "", "result_error": "",
-                }
-                async with bridge_jobs_lock:
-                    bridge_jobs[minify_job_id] = minify_job
-                minify_deadline = time.monotonic() + max(30, int(os.environ.get("DEX_MINIFY_BRIDGE_TIMEOUT", "600")))
-                minified_payload = ""
-                while time.monotonic() < minify_deadline:
-                    async with bridge_jobs_lock:
-                        mj = bridge_jobs.get(minify_job_id)
-                        ms = dict(mj) if mj else None
-                    if not ms:
-                        break
-                    if str(ms.get("state") or "").lower() == "complete":
-                        enc = str(ms.get("result_attachment_b64") or "")
-                        if enc:
-                            try:
-                                minified_payload = base64.b64decode(enc, validate=True).decode("utf-8", errors="replace")
-                            except Exception:
-                                minified_payload = ""
-                        if not minified_payload:
-                            minified_payload = str(ms.get("result_text") or "")
-                        break
-                    if str(ms.get("state") or "").lower() == "error":
-                        break
-                    await asyncio.sleep(0.25)
-                async with bridge_jobs_lock:
-                    bridge_jobs.pop(minify_job_id, None)
-                if not minified_payload.strip():
-                    minified_payload = _format_minified_lua(bundle["lua_file"])
-                # Hard safety cap: minified output is never allowed above 3 MiB.
-                if len(minified_payload.encode("utf-8")) > 3 * 1024 * 1024:
-                    return JSONResponse({"error": "Final protected payload exceeds the 3 MB output limit."}, status_code=413)
-                bundle["lua_file"] = minified_payload
-                final_raw_url, final_loader_id = _publish_local_payload(minified_payload)
-                bundle["raw_url"] = final_raw_url
-                bundle["loader_id"] = final_loader_id
-                bundle["loadstring"] = _build_loadstring(final_raw_url)
+                dex_header = (
+                    "-- This file was protected using "
+                    "Dex Obfustucator v4.5 [.gg/dexfinder]"
+                )
 
-                if bundle.get("loader_id") and bundle.get("raw_url"):
-                    try:
-                        async with obf_history_lock:
-                            _record_obfustucate_submission(goofy_source, bundle["loader_id"], bundle["raw_url"])
-                    except Exception as history_exc:
-                        print(f"[OBF_HISTORY] failed to record submission: {history_exc}")
+                # Exact public /obfuscate output:
+                #   line 1 = Dex header
+                #   line 2 = blank
+                #   line 3 = Goofy return payload
+                final_payload = dex_header + "\n\n" + goofy_payload
+
+                if len(final_payload.encode("utf-8")) > 3 * 1024 * 1024:
+                    return JSONResponse(
+                        {"error": "Final protected payload exceeds the 3 MB output limit."},
+                        status_code=413,
+                    )
+
+                # The completed result is now consumed by /obfuscate.
+                # Removing the bridge job is the acknowledgement mechanism
+                # used by the puller: its wait loop observes 404 and exits.
                 async with bridge_jobs_lock:
                     bridge_jobs.pop(job_id, None)
-                return JSONResponse({"ok": True, "loadstring": bundle["loadstring"], "payload": bundle["lua_file"]})
+
+                return JSONResponse(
+                    {
+                        "ok": True,
+                        "payload": final_payload,
+                    }
+                )
             if state == "error":
                 async with bridge_jobs_lock:
                     bridge_jobs.pop(job_id, None)
