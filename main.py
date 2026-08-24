@@ -6898,18 +6898,22 @@ async def obfuscate_api(request: Request):
                 goofy_source = raw.decode("utf-8", errors="replace") if raw else str(snapshot.get("result_text") or "")
                 goofy_source = goofy_source.replace("\ufeff", "", 1).replace("\r\n", "\n").replace("\r", "\n")
 
-                # GoofyScator's direct response is positional: exactly three
-                # physical lines, with the payload on line 3.
+                # The puller normally strips GoofyScator's first two lines
+                # before returning the attachment to API1. Therefore API1 must
+                # accept BOTH forms:
+                #   raw Goofy = 3 lines, payload on line 3
+                #   cleaned bridge result = 1 line starting with return
                 goofy_lines = goofy_source.split("\n")
-                goofy_payload = (
-                    goofy_lines[2].strip()
-                    if len(goofy_lines) >= 3
-                    else ""
-                )
+                if len(goofy_lines) >= 3:
+                    goofy_payload = goofy_lines[2].strip()
+                elif len(goofy_lines) == 1:
+                    goofy_payload = goofy_lines[0].strip()
+                else:
+                    goofy_payload = ""
 
                 if not goofy_payload.startswith("return"):
                     return JSONResponse(
-                        {"error": "GoofyScator returned an invalid third-line payload; expected a line starting with `return`."},
+                        {"error": "GoofyScator returned an invalid payload; expected the third line or a cleaned line starting with `return`."},
                         status_code=502,
                     )
 
