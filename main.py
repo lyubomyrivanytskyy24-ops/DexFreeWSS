@@ -7665,7 +7665,16 @@ async def bridge_set_result(job_id: str, request: Request):
         body.get("attachment_b64")
         or body.get("result_attachment_b64")
         or ""
-    )
+    ).strip()
+
+    # Some bridge versions send the file as attachment_text. Rebuild the
+    # canonical base64 field so the Discord bot can ALWAYS attach the file.
+    if state == "complete" and not attachment_b64:
+        attachment_text = str(body.get("attachment_text") or "")
+        if attachment_text.strip():
+            attachment_b64 = base64.b64encode(
+                attachment_text.encode("utf-8")
+            ).decode("ascii")
 
     if len(attachment_b64) > 24 * 1024 * 1024:
         return JSONResponse({"error": "attachment too large"}, status_code=413)
