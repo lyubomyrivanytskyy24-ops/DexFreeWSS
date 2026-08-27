@@ -7437,15 +7437,25 @@ async def dynamic_loader(slug: str, request: Request):
 # disappear before the puller/bot pair can finish it.
 BRIDGE_JOB_TTL = int(os.environ.get("DEX_BRIDGE_JOB_TTL", "0"))
 BRIDGE_MAX_JOBS = int(os.environ.get("DEX_BRIDGE_MAX_JOBS", "0"))
+BRIDGE_COMPLETE_RETENTION_SECONDS = int(os.environ.get("DEX_BRIDGE_COMPLETE_RETENTION_SECONDS", "900"))
 bridge_jobs: Dict[str, Dict[str, Any]] = {}
 bridge_jobs_lock = asyncio.Lock()
 
 
 def _bridge_cleanup_locked() -> None:
-    # Intentionally do nothing. A bridge job is removed only by the explicit
-    # /bridge/jobs/{job_id}/ack endpoint after the Discord bot has consumed
-    # the result.
-    return
+    # Never remove pending/processing jobs here. Completed jobs are normally
+    # deleted by /ack; this bounded fallback only prevents an unacknowledged
+    # completed result from living forever after a network failure.
+    if BRIDGE_COMPLETE_RETENTION_SECONDS <= 0:
+        return
+    now = time.time()
+    stale = [
+        job_id for job_id, job in bridge_jobs.items()
+        if str(job.get("state") or "").lower() in {"complete", "error"}
+        and now - float(job.get("updated_at", job.get("created_at", now))) > BRIDGE_COMPLETE_RETENTION_SECONDS
+    ]
+    for job_id in stale:
+        bridge_jobs.pop(job_id, None)
 
 
 def _bridge_job_public(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -7667,6 +7677,7 @@ async def bridge_set_result(job_id: str, request: Request):
         job.update({
             "state": state,
             "updated_at": time.time(),
+            "operation": str(body.get("operation") or job.get("operation") or "deobfuscate").strip().lower(),
             "result_text": result_text[:MAX_LOG_LEN] if state != "pending" else "",
             "result_filename": str(
                 body.get("attachment_name")
