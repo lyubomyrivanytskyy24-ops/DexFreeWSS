@@ -7435,27 +7435,43 @@ async def dynamic_loader(slug: str, request: Request):
 # receipt of the puller's result. Do not expire or size-prune pending,
 # processing, or complete jobs; losing one here would make a bridge request
 # disappear before the puller/bot pair can finish it.
-BRIDGE_JOB_TTL = int(os.environ.get("DEX_BRIDGE_JOB_TTL", "0"))
-BRIDGE_MAX_JOBS = int(os.environ.get("DEX_BRIDGE_MAX_JOBS", "0"))
-BRIDGE_COMPLETE_RETENTION_SECONDS = int(os.environ.get("DEX_BRIDGE_COMPLETE_RETENTION_SECONDS", "900"))
+BRIDGE_JOB_TTL = int(os.environ.get("DEX_BRIDGE_JOB_TTL", "900"))
+BRIDGE_MAX_JOBS = int(os.environ.get("DEX_BRIDGE_MAX_JOBS", "1000"))
 bridge_jobs: Dict[str, Dict[str, Any]] = {}
 bridge_jobs_lock = asyncio.Lock()
 
 
 def _bridge_cleanup_locked() -> None:
-    # Never remove pending/processing jobs here. Completed jobs are normally
-    # deleted by /ack; this bounded fallback only prevents an unacknowledged
-    # completed result from living forever after a network failure.
-    if BRIDGE_COMPLETE_RETENTION_SECONDS <= 0:
-        return
     now = time.time()
+    ttl = max(60, int(BRIDGE_JOB_TTL or 900))
+
     stale = [
-        job_id for job_id, job in bridge_jobs.items()
-        if str(job.get("state") or "").lower() in {"complete", "error"}
-        and now - float(job.get("updated_at", job.get("created_at", now))) > BRIDGE_COMPLETE_RETENTION_SECONDS
+        job_id
+        for job_id, job in bridge_jobs.items()
+        if (
+            str(job.get("state") or "").lower() in {"complete", "error"}
+            and now - float(job.get("updated_at") or job.get("created_at") or now) > ttl
+        )
     ]
     for job_id in stale:
         bridge_jobs.pop(job_id, None)
+
+    if BRIDGE_MAX_JOBS > 0:
+        completed = [
+            (job_id, job)
+            for job_id, job in bridge_jobs.items()
+            if str(job.get("state") or "").lower() in {"complete", "error"}
+        ]
+        if len(completed) > BRIDGE_MAX_JOBS:
+            completed.sort(
+                key=lambda item: float(
+                    item[1].get("updated_at")
+                    or item[1].get("created_at")
+                    or 0
+                )
+            )
+            for job_id, _ in completed[:-BRIDGE_MAX_JOBS]:
+                bridge_jobs.pop(job_id, None)
 
 
 def _bridge_job_public(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -7665,16 +7681,7 @@ async def bridge_set_result(job_id: str, request: Request):
         body.get("attachment_b64")
         or body.get("result_attachment_b64")
         or ""
-    ).strip()
-
-    # Some bridge versions send the file as attachment_text. Rebuild the
-    # canonical base64 field so the Discord bot can ALWAYS attach the file.
-    if state == "complete" and not attachment_b64:
-        attachment_text = str(body.get("attachment_text") or "")
-        if attachment_text.strip():
-            attachment_b64 = base64.b64encode(
-                attachment_text.encode("utf-8")
-            ).decode("ascii")
+    )
 
     if len(attachment_b64) > 24 * 1024 * 1024:
         return JSONResponse({"error": "attachment too large"}, status_code=413)
@@ -7686,7 +7693,6 @@ async def bridge_set_result(job_id: str, request: Request):
         job.update({
             "state": state,
             "updated_at": time.time(),
-            "operation": str(body.get("operation") or job.get("operation") or "deobfuscate").strip().lower(),
             "result_text": result_text[:MAX_LOG_LEN] if state != "pending" else "",
             "result_filename": str(
                 body.get("attachment_name")
