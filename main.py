@@ -6905,6 +6905,10 @@ async def obfuscate_api(request: Request):
                             status_code=502,
                         )
 
+                # Replace every GoofyScator runtime-error marker in the extracted payload.
+                def _replace_goofy_runtime_errors(value):
+                    return re.sub(r"error\(\s*(['\"])runtime error\1\s*\)", "error('DEX: Tamper Detected')", str(value or ''), flags=re.IGNORECASE)
+
                 goofy_source = (
                     raw.decode("utf-8", errors="replace")
                     if raw
@@ -6922,11 +6926,13 @@ async def obfuscate_api(request: Request):
                 # too, so API1 remains compatible with either bridge worker.
                 goofy_lines = goofy_source.split("\n")
                 if len(goofy_lines) >= 3:
-                    goofy_payload = goofy_lines[2].strip()
+                    goofy_payload = _replace_goofy_runtime_errors(goofy_lines[2].strip())
                 elif len(goofy_lines) == 1:
-                    goofy_payload = goofy_lines[0].strip()
+                    goofy_payload = _replace_goofy_runtime_errors(goofy_lines[0].strip())
                 else:
                     goofy_payload = ""
+
+                goofy_payload = _replace_goofy_runtime_errors(goofy_payload)
 
                 if not goofy_payload.startswith("return"):
                     return JSONResponse(
