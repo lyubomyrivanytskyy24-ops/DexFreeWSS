@@ -6870,6 +6870,8 @@ async def obfuscate_api(request: Request):
             "id": job_id, "state": "pending",
             "created_at": time.time(), "updated_at": time.time(),
             "source_url": "", "source_text": source,
+            "source_length": len(source.encode("utf-8")),
+            "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
             "filename": "source.lua", "requester_id": "",
             "requester_name": "web", "operation": "goofy",
             "result_text": "", "result_filename": "",
@@ -7435,43 +7437,17 @@ async def dynamic_loader(slug: str, request: Request):
 # receipt of the puller's result. Do not expire or size-prune pending,
 # processing, or complete jobs; losing one here would make a bridge request
 # disappear before the puller/bot pair can finish it.
-BRIDGE_JOB_TTL = int(os.environ.get("DEX_BRIDGE_JOB_TTL", "900"))
-BRIDGE_MAX_JOBS = int(os.environ.get("DEX_BRIDGE_MAX_JOBS", "1000"))
+BRIDGE_JOB_TTL = int(os.environ.get("DEX_BRIDGE_JOB_TTL", "0"))
+BRIDGE_MAX_JOBS = int(os.environ.get("DEX_BRIDGE_MAX_JOBS", "0"))
 bridge_jobs: Dict[str, Dict[str, Any]] = {}
 bridge_jobs_lock = asyncio.Lock()
 
 
 def _bridge_cleanup_locked() -> None:
-    now = time.time()
-    ttl = max(60, int(BRIDGE_JOB_TTL or 900))
-
-    stale = [
-        job_id
-        for job_id, job in bridge_jobs.items()
-        if (
-            str(job.get("state") or "").lower() in {"complete", "error"}
-            and now - float(job.get("updated_at") or job.get("created_at") or now) > ttl
-        )
-    ]
-    for job_id in stale:
-        bridge_jobs.pop(job_id, None)
-
-    if BRIDGE_MAX_JOBS > 0:
-        completed = [
-            (job_id, job)
-            for job_id, job in bridge_jobs.items()
-            if str(job.get("state") or "").lower() in {"complete", "error"}
-        ]
-        if len(completed) > BRIDGE_MAX_JOBS:
-            completed.sort(
-                key=lambda item: float(
-                    item[1].get("updated_at")
-                    or item[1].get("created_at")
-                    or 0
-                )
-            )
-            for job_id, _ in completed[:-BRIDGE_MAX_JOBS]:
-                bridge_jobs.pop(job_id, None)
+    # Intentionally do nothing. A bridge job is removed only by the explicit
+    # /bridge/jobs/{job_id}/ack endpoint after the Discord bot has consumed
+    # the result.
+    return
 
 
 def _bridge_job_public(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -7495,13 +7471,30 @@ async def _bridge_fetch_source_url(source_url: str) -> str:
             source_url,
             headers={
                 "User-Agent": "DexBridge/1.0",
-                "Accept": "*/*",
+                "Accept": "text/plain,text/*,*/*;q=0.8",
+                "Cache-Control": "no-cache",
             },
             method="GET",
         )
         with urllib.request.urlopen(req, timeout=20) as response:
             data = response.read()
-        return data.decode("utf-8", errors="replace")
+            content_type = str(response.headers.get("Content-Type") or "").lower()
+
+        text = data.decode("utf-8", errors="replace")
+
+        # Raw Lua endpoints should never silently become an HTML page.
+        # If an upstream service returns a normal HTML error/login page, fail
+        # the bridge job with a useful error instead of sending '<' to Dex and
+        # producing the misleading Lua parser error shown to the user.
+        stripped = text.lstrip().lower()
+        if (
+            "text/html" in content_type
+            or stripped.startswith("<!doctype html")
+            or stripped.startswith("<html")
+        ):
+            raise ValueError("source_url returned HTML instead of Lua source")
+
+        return text
     return await asyncio.to_thread(_fetch)
 
 
@@ -7550,16 +7543,12 @@ async def bridge_create_job(request: Request):
         "updated_at": time.time(),
         "source_url": source_url,
         "source_text": source_text or "",
+        "source_length": len((source_text or "").encode("utf-8")),
+        "source_sha256": hashlib.sha256((source_text or "").encode("utf-8")).hexdigest(),
         "filename": str(body.get("filename") or "source.lua")[:180],
         "requester_id": str(body.get("requester_id") or ""),
         "requester_name": str(body.get("requester_name") or ""),
         "operation": operation,
-        # Snapshot the exact source handed to the browser bridge. The puller
-        # uses this to verify that its /bridge/input response is the same
-        # source belonging to this job, preventing stale/cross-job data from
-        # ever being sent to Discord.
-        "source_sha256": hashlib.sha256((source_text or "").encode("utf-8")).hexdigest(),
-        "source_length": len((source_text or "").encode("utf-8")),
         "result_text": "",
         "result_filename": "",
         "result_attachment_b64": "",
@@ -7624,8 +7613,11 @@ async def bridge_input(job_id: str, request: Request):
         source_text,
         media_type="text/plain",
         headers={
-            "Cache-Control": "no-store",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
             "X-Content-Type-Options": "nosniff",
+            "X-Dex-Bridge-Source": "1",
+            "X-Dex-Bridge-Job": job_id,
         },
     )
 
@@ -7663,17 +7655,6 @@ async def bridge_set_result(job_id: str, request: Request):
     if state not in {"pending", "complete", "error"}:
         return JSONResponse({"error": "invalid state"}, status_code=400)
     result_text = str(body.get("result_text") or "")
-
-    # Terminal Goofy errors are valid completed results even without an
-    # attachment. Keep the bridge text intact so DexBot can display:
-    #   Deobfuscated Code Result:
-    #   --Error Here
-    #   <actual dumper error>
-    if state == "complete" and not result_text.strip() and str(body.get("error") or "").strip():
-        result_text = (
-            "Deobfuscated Code Result:\n--Error Here\n"
-            + str(body.get("error") or "").strip()[:1000]
-        )
 
     # Accept both field names used by bridge versions. The canonical stored
     # field remains result_attachment_b64.
