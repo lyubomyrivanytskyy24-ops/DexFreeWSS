@@ -7528,6 +7528,12 @@ async def bridge_create_job(request: Request):
         "requester_id": str(body.get("requester_id") or ""),
         "requester_name": str(body.get("requester_name") or ""),
         "operation": operation,
+        # Snapshot the exact source handed to the browser bridge. The puller
+        # uses this to verify that its /bridge/input response is the same
+        # source belonging to this job, preventing stale/cross-job data from
+        # ever being sent to Discord.
+        "source_sha256": hashlib.sha256((source_text or "").encode("utf-8")).hexdigest(),
+        "source_length": len((source_text or "").encode("utf-8")),
         "result_text": "",
         "result_filename": "",
         "result_attachment_b64": "",
@@ -7631,6 +7637,17 @@ async def bridge_set_result(job_id: str, request: Request):
     if state not in {"pending", "complete", "error"}:
         return JSONResponse({"error": "invalid state"}, status_code=400)
     result_text = str(body.get("result_text") or "")
+
+    # Terminal Goofy errors are valid completed results even without an
+    # attachment. Keep the bridge text intact so DexBot can display:
+    #   Deobfuscated Code Result:
+    #   --Error Here
+    #   <actual dumper error>
+    if state == "complete" and not result_text.strip() and str(body.get("error") or "").strip():
+        result_text = (
+            "Deobfuscated Code Result:\n--Error Here\n"
+            + str(body.get("error") or "").strip()[:1000]
+        )
 
     # Accept both field names used by bridge versions. The canonical stored
     # field remains result_attachment_b64.
