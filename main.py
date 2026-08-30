@@ -34,10 +34,17 @@ class AnnouncementHTMLMiddleware(BaseHTTPMiddleware):
         body = b""
         async for chunk in response.body_iterator:
             body += chunk
+        # NOTE: body_iterator is now fully drained. From this point on we
+        # must always return a fresh Response built from `body` (or the
+        # transformed text) - never the original `response` object, since
+        # re-streaming its now-empty iterator would silently serve a blank
+        # page (this was a real prior bug when decoding failed below).
+        from starlette.responses import Response
         try:
             text = body.decode("utf-8")
         except UnicodeDecodeError:
-            return response
+            return Response(content=body, status_code=response.status_code,
+                             headers=dict(response.headers), media_type=response.media_type)
         async with announcement_lock:
             msg = announcement_text
         if msg and "</body>" in text:
@@ -51,7 +58,6 @@ class AnnouncementHTMLMiddleware(BaseHTTPMiddleware):
                 '<script>(()=>{const e=document.getElementById("dn-site-announcement");if(!e)return;const k="dn-announcement-dismissed:"+e.dataset.id;if(localStorage.getItem(k)==="1"){e.remove();return}document.getElementById("dn-ann-close").onclick=()=>{e.classList.add("dn-hide");localStorage.setItem(k,"1");setTimeout(()=>e.remove(),240)}})();</script>'
             )
             text = text.replace("</body>", widget + "</body>", 1)
-        from starlette.responses import Response
         headers = dict(response.headers)
         headers.pop("content-length", None)
         return Response(content=text.encode("utf-8"), status_code=response.status_code, headers=headers, media_type=response.media_type)
@@ -232,6 +238,11 @@ body:has(.stats-grid) h1{font-size:clamp(28px,4vw,42px)!important}
 
 
 DEX_FAVICON_URL = "https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"
+DEX_FAVICON_HTML = (
+    f'<link rel="icon" type="image/webp" href="{DEX_FAVICON_URL}">'
+    f'<link rel="shortcut icon" type="image/webp" href="{DEX_FAVICON_URL}">'
+    f'<link rel="apple-touch-icon" href="{DEX_FAVICON_URL}">'
+)
 
 GLOBAL_UI_JS = r"""
 <script>
@@ -349,29 +360,50 @@ async def dexnotifier_ui_middleware(request: Request, call_next):
     response = await call_next(request)
     content_type = response.headers.get("content-type", "")
     if "text/html" in content_type:
+        original_body = None
         try:
             chunks = []
             async for chunk in response.body_iterator:
                 chunks.append(chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8"))
-            body = b"".join(chunks)
-            text = body.decode("utf-8", errors="replace")
+            original_body = b"".join(chunks)
+            body = original_body
 
-            if "</head>" in text:
-                if DEX_FAVICON_URL not in text and "rel=\"icon\"" not in text.lower() and "rel='icon'" not in text.lower():
-                    text = text.replace("</head>", DEX_FAVICON_HTML + "</head>", 1)
-                if "--dn-bg:" not in text:
-                    text = text.replace("</head>", "<style>" + GLOBAL_UI_CSS + "</style></head>", 1)
+            # Anything below this point is a "nice to have" cosmetic
+            # transform. If it throws for any reason, we still fall back to
+            # re-serving original_body untouched below - we must NEVER end up
+            # re-yielding an already-drained/empty iterator, since that was a
+            # real prior bug that silently sent empty pages to the browser.
+            try:
+                text = original_body.decode("utf-8", errors="replace")
 
-            if "</body>" in text and "document.documentElement.classList.add('dn-ready')" not in text:
-                text = text.replace("</body>", GLOBAL_UI_JS + "</body>", 1)
+                if "</head>" in text:
+                    if DEX_FAVICON_URL not in text and "rel=\"icon\"" not in text.lower() and "rel='icon'" not in text.lower():
+                        text = text.replace("</head>", DEX_FAVICON_HTML + "</head>", 1)
+                    if "--dn-bg:" not in text:
+                        text = text.replace("</head>", "<style>" + GLOBAL_UI_CSS + "</style></head>", 1)
 
-            body = text.encode("utf-8")
-            async def _single_body():
-                yield body
+                if "</body>" in text and "document.documentElement.classList.add('dn-ready')" not in text:
+                    text = text.replace("</body>", GLOBAL_UI_JS + "</body>", 1)
+
+                body = text.encode("utf-8")
+            except Exception as transform_exc:
+                print(f"[UI] middleware transform error (serving untouched body): {transform_exc}")
+                body = original_body
+
+            async def _single_body(b=body):
+                yield b
             response.body_iterator = _single_body()
             response.headers["content-length"] = str(len(body))
         except Exception as exc:
             print(f"[UI] middleware error: {exc}")
+            if original_body is not None:
+                # We already drained the real body_iterator above, so if we
+                # don't re-attach something here the response comes back
+                # empty. Serve back exactly what the route handler produced.
+                async def _fallback_body(b=original_body):
+                    yield b
+                response.body_iterator = _fallback_body()
+                response.headers["content-length"] = str(len(original_body))
     return response
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1217,6 +1249,15 @@ GITHUB_SCRIPT_PATHS: Dict[str, str] = {
 _github_cache: Dict[str, Dict[str, Any]] = {}
 _github_cache_lock = asyncio.Lock()
 
+# name -> {"ok": bool, "checked_at": float, "error": str, "via": "raw"|"api"}
+# Diagnostic-only, surfaced on /admin so a bad token / wrong repo / wrong
+# branch / renamed file shows up immediately instead of silently falling
+# back to the local/default copy forever.
+_github_last_status: Dict[str, Dict[str, Any]] = {}
+_github_status_lock = asyncio.Lock()
+
+GITHUB_USER_AGENT = "DexNotifier-API/1.0 (+github-script-sync)"
+
 
 def github_configured() -> bool:
     return bool(GITHUB_OWNER and GITHUB_REPO)
@@ -1232,20 +1273,76 @@ def _github_raw_url(path: str) -> str:
     return f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{path}"
 
 
-def _fetch_github_raw_sync(path: str) -> Optional[str]:
-    """Blocking fetch, run via asyncio.to_thread. Returns None on any failure."""
+def _github_api_contents_url(path: str) -> str:
+    return f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{path}?ref={GITHUB_BRANCH}"
+
+
+def _fetch_github_raw_sync(path: str) -> "tuple[Optional[str], str]":
+    """Blocking fetch, run via asyncio.to_thread.
+
+    Tries the public raw.githubusercontent.com CDN first (fast, works for
+    any public repo with zero auth). If that fails - private repo, branch
+    protection weirdness, CDN hiccup, wrong path, etc - and a token is
+    configured, falls back to the GitHub Contents API, which always reflects
+    the live repo and works for private repos too.
+
+    Returns (content_or_None, error_message). error_message is "" on success.
+    """
     url = _github_raw_url(path)
     req = urllib.request.Request(url)
     req.add_header("Cache-Control", "no-cache")
+    req.add_header("User-Agent", GITHUB_USER_AGENT)
     if GITHUB_TOKEN:
         req.add_header("Authorization", f"token {GITHUB_TOKEN}")
     try:
         with urllib.request.urlopen(req, timeout=8) as resp:
+            if resp.status != 200:
+                raise urllib.error.HTTPError(url, resp.status, "unexpected status", resp.headers, None)
             data = resp.read()
-            return data.decode("utf-8")
-    except Exception as e:
-        print(f"[GITHUB] Failed to fetch {path}: {e}")
-        return None
+            return data.decode("utf-8"), ""
+    except Exception as raw_err:
+        raw_err_msg = f"raw fetch failed ({raw_err})"
+        print(f"[GITHUB] {raw_err_msg} for {path}")
+
+        if not GITHUB_TOKEN:
+            return None, raw_err_msg
+
+        # Fallback: GitHub Contents API (works for private repos, and isn't
+        # subject to the raw CDN's own caching layer).
+        api_url = _github_api_contents_url(path)
+        api_req = urllib.request.Request(api_url)
+        api_req.add_header("Accept", "application/vnd.github.raw+json")
+        api_req.add_header("User-Agent", GITHUB_USER_AGENT)
+        api_req.add_header("Authorization", f"Bearer {GITHUB_TOKEN}")
+        api_req.add_header("X-GitHub-Api-Version", "2022-11-28")
+        try:
+            with urllib.request.urlopen(api_req, timeout=8) as resp:
+                if resp.status != 200:
+                    raise urllib.error.HTTPError(api_url, resp.status, "unexpected status", resp.headers, None)
+                raw_bytes = resp.read()
+                ctype = resp.headers.get("Content-Type", "")
+                if "application/json" in ctype:
+                    # Older API behavior / Accept header ignored - the
+                    # response is the JSON metadata object with a base64
+                    # "content" field instead of raw bytes.
+                    import base64
+                    payload = json.loads(raw_bytes.decode("utf-8"))
+                    encoded = payload.get("content", "")
+                    return base64.b64decode(encoded).decode("utf-8"), ""
+                return raw_bytes.decode("utf-8"), ""
+        except Exception as api_err:
+            api_err_msg = f"{raw_err_msg}; contents API fallback also failed ({api_err})"
+            print(f"[GITHUB] {api_err_msg} for {path}")
+            return None, api_err_msg
+
+
+async def _record_github_status(name: str, ok: bool, error: str = "") -> None:
+    async with _github_status_lock:
+        _github_last_status[name] = {"ok": ok, "checked_at": time.time(), "error": error}
+
+
+def get_github_status(name: str) -> Optional[Dict[str, Any]]:
+    return _github_last_status.get(name)
 
 
 async def get_github_script(name: str, local_fallback_file: str, default: str) -> str:
@@ -1261,18 +1358,24 @@ async def get_github_script(name: str, local_fallback_file: str, default: str) -
             return cached["content"]
 
     path = GITHUB_SCRIPT_PATHS.get(name)
-    content = None
+    content, err = None, ""
     if path and github_configured():
-        content = await asyncio.to_thread(_fetch_github_raw_sync, path)
+        content, err = await asyncio.to_thread(_fetch_github_raw_sync, path)
+    elif path and not github_configured():
+        err = "GitHub repo not configured (DEX_GITHUB_OWNER / DEX_GITHUB_REPO unset)"
 
     if content is not None:
         async with _github_cache_lock:
             _github_cache[name] = {"content": content, "fetched_at": now, "source": "github"}
+        await _record_github_status(name, True)
         try:
             save_file(local_fallback_file, content)
         except Exception:
             pass
         return content
+
+    if err:
+        await _record_github_status(name, False, err)
 
     # GitHub fetch failed (or not configured) - fall back to whatever we have.
     async with _github_cache_lock:
@@ -1289,6 +1392,26 @@ async def get_github_script(name: str, local_fallback_file: str, default: str) -
 async def force_refresh_github_cache():
     async with _github_cache_lock:
         _github_cache.clear()
+
+
+async def refresh_all_github_scripts() -> Dict[str, Dict[str, Any]]:
+    """Eagerly re-fetch every configured script right now (bypassing the
+    cache) and return a per-script result. Used by the admin "Refresh from
+    GitHub" button so failures show up immediately instead of only being
+    discoverable by re-visiting the loader endpoint later."""
+    await force_refresh_github_cache()
+    results: Dict[str, Dict[str, Any]] = {}
+    for name, meta in FIXED_SCRIPTS.items():
+        content = await get_github_script(name, meta["file"], meta["default"])
+        status = get_github_status(name)
+        cache_meta = get_cache_meta(name)
+        results[name] = {
+            "source": cache_meta.get("source") if cache_meta else "unknown",
+            "ok": bool(status.get("ok")) if status else (cache_meta or {}).get("source") == "github",
+            "error": status.get("error", "") if status else "",
+            "bytes": len(content or ""),
+        }
+    return results
 
 
 def get_cache_meta(name: str) -> Optional[Dict[str, Any]]:
@@ -2844,6 +2967,27 @@ async def refresh_github(request: Request):
     await force_refresh_github_cache()
     return JSONResponse({"ok": True, "message": "GitHub script cache cleared - next request re-fetches."})
 
+
+@app.post("/admin/github/refresh")
+async def admin_refresh_github(request: Request):
+    """Admin-dashboard version of /github/refresh: authenticated with the
+    admin session cookie (which the dashboard already has) instead of the
+    separate X-Api-Key, and it eagerly re-fetches every script right away so
+    the button can show real success/failure per script instead of just
+    clearing the cache and hoping."""
+    ip = _client_ip(request)
+    if not require_admin_session(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if rate_limited(ip, "admin_github_refresh_post", max_requests=GITHUB_REFRESH_RATE_LIMIT, window_seconds=GITHUB_REFRESH_RATE_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    if not github_configured():
+        return JSONResponse({"error": "GitHub repo not configured (set DEX_GITHUB_OWNER / DEX_GITHUB_REPO)"}, status_code=400)
+
+    results = await refresh_all_github_scripts()
+    all_ok = all(r.get("ok") for r in results.values())
+    return JSONResponse({"ok": all_ok, "results": results})
+
 # -----------------------------
 # HOME PAGE (ROOT)
 # -----------------------------
@@ -4182,6 +4326,39 @@ ADMIN_BASE_HTML = """
                 refreshStats();
             }});
         }}
+        function wireGithubRefresh() {{
+            const btn = document.getElementById('github-refresh-btn');
+            const status = document.getElementById('github-refresh-status');
+            if (!btn) return;
+            btn.addEventListener('click', async () => {{
+                btn.disabled = true;
+                const original = btn.textContent;
+                btn.textContent = 'Refreshing…';
+                if (status) {{ status.textContent = ''; status.style.color = ''; }}
+                try {{
+                    const r = await fetch('/admin/github/refresh', {{ method: 'POST', credentials: 'same-origin' }});
+                    const d = await r.json().catch(() => ({{}}));
+                    if (!r.ok) {{
+                        if (status) {{ status.textContent = d.error || ('Failed (' + r.status + ')'); status.style.color = '#ffb3b3'; }}
+                    }} else {{
+                        const names = Object.keys(d.results || {{}});
+                        const failed = names.filter(n => !d.results[n].ok);
+                        if (status) {{
+                            status.textContent = failed.length
+                                ? (failed.length + ' of ' + names.length + ' failed - check the cards below')
+                                : ('All ' + names.length + ' scripts refreshed from GitHub');
+                            status.style.color = failed.length ? '#ffb3b3' : '#a8f3cb';
+                        }}
+                        setTimeout(() => location.reload(), 900);
+                    }}
+                }} catch (e) {{
+                    if (status) {{ status.textContent = 'Network error - see console.'; status.style.color = '#ffb3b3'; }}
+                }} finally {{
+                    btn.disabled = false;
+                    btn.textContent = original;
+                }}
+            }});
+        }}
         document.addEventListener('DOMContentLoaded', () => {{
             document.querySelectorAll('#dn-nav button[data-tab]').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
             let savedTab = 'overview';
@@ -4195,6 +4372,7 @@ ADMIN_BASE_HTML = """
             wireChatClear('chat-clear-me','me','ME-Chat');
             wireChatClear('chat-clear-both','both','Chat AND ME-Chat');
             wireChatClear('danger-clear-all','both','Chat AND ME-Chat');
+            wireGithubRefresh();
             refreshStats();
             setInterval(refreshStats, 3000);
         }});
@@ -4208,26 +4386,63 @@ ADMIN_BASE_HTML = """
 
 
 def admin_login_form(error: str = "") -> str:
-    err_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
+    err_html = f'<div class="error" id="dn-login-error">{html.escape(error)}</div>' if error else ""
+    shake_class = " dn-login-shake" if error else ""
     return f"""
-    <main class="dn-main" style="max-width:480px;margin:0 auto;padding-top:9vh;">
-    <div class="card accent-amber">
-        <h1 style="font-size:24px;letter-spacing:-.02em;">Dex Admin</h1>
-        <p class="label" style="margin-top:10px;">
-            <span class="pill">Private System</span>
-            <span class="pill red">Key Protected</span>
-            <span class="pill green">Loader Scripts</span>
-            <span class="pill purple">Control Center</span>
-        </p>
-        <p class="label" style="margin-top:12px;">Use the admin password configured in Railway for this service. You must authenticate before any admin changes can be made.</p>
-        <form method="post" style="margin-top:14px;">
-            <label class="label">Railway Admin Password</label>
-            <input type="password" name="key" placeholder="Enter your Railway admin password" autocomplete="current-password">
-            <button type="submit" style="margin-top:14px;width:100%;">Open Control Center</button>
-        </form>
-        {err_html}
+    <style>
+        .dn-login-wrap{{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;
+            background:radial-gradient(760px 460px at 12% 6%,rgba(240,169,78,.11),transparent 60%),
+                       radial-gradient(680px 480px at 92% 94%,rgba(51,209,192,.09),transparent 62%),
+                       var(--bg);overflow:hidden;z-index:1;}}
+        .dn-login-wrap:before{{content:"";position:absolute;inset:0;pointer-events:none;z-index:0;
+            background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);
+            background-size:54px 54px;mask-image:radial-gradient(circle at 50% 28%,#000 0%,transparent 72%);}}
+        .dn-login-card{{position:relative;z-index:1;width:100%;max-width:400px;
+            background:linear-gradient(160deg,var(--panel-2),var(--panel));
+            border:1px solid var(--line);border-radius:20px;padding:38px 32px 28px;
+            box-shadow:0 30px 90px rgba(0,0,0,.55);animation:dnLoginIn .5s cubic-bezier(.2,.8,.2,1) both;}}
+        @keyframes dnLoginIn{{from{{opacity:0;transform:translateY(14px) scale(.98)}}to{{opacity:1;transform:none}}}}
+        .dn-login-shake{{animation:dnLoginIn .5s cubic-bezier(.2,.8,.2,1) both,dnShakeCard .4s ease .48s both;}}
+        @keyframes dnShakeCard{{0%,100%{{transform:translateX(0)}}20%{{transform:translateX(-8px)}}40%{{transform:translateX(7px)}}60%{{transform:translateX(-5px)}}80%{{transform:translateX(3px)}}}}
+        .dn-login-logo{{width:54px;height:54px;border-radius:16px;margin:0 auto 18px;display:grid;place-items:center;
+            background:linear-gradient(135deg,var(--accent),var(--teal));box-shadow:0 16px 36px rgba(240,169,78,.3);
+            font-weight:1000;font-size:19px;color:var(--accent-ink);position:relative;overflow:hidden;}}
+        .dn-login-logo:after{{content:"";position:absolute;inset:-80%;
+            background:linear-gradient(120deg,transparent 35%,rgba(255,255,255,.4),transparent 65%);
+            animation:dnLoginShine 4.5s ease-in-out infinite;}}
+        @keyframes dnLoginShine{{0%,55%{{transform:translateX(-20%) rotate(20deg)}}75%,100%{{transform:translateX(120%) rotate(20deg)}}}}
+        .dn-login-card h1{{text-align:center;font-size:22px;margin:0 0 4px;letter-spacing:-.02em;}}
+        .dn-login-sub{{text-align:center;color:var(--muted);font-size:12.5px;margin:0 0 20px;line-height:1.5;}}
+        .dn-login-pills{{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-bottom:24px;}}
+        .dn-login-field{{position:relative;margin-top:6px;}}
+        .dn-login-field svg{{position:absolute;left:13px;top:50%;transform:translateY(-50%);opacity:.5;pointer-events:none;color:var(--muted);}}
+        .dn-login-field input{{padding-left:38px !important;}}
+        .dn-login-card button[type=submit]{{width:100%;margin-top:18px;padding:12px;font-size:13.5px;}}
+        .dn-login-foot{{text-align:center;margin-top:20px;font-size:11px;color:var(--dim);}}
+        @media(max-width:480px){{.dn-login-card{{padding:30px 22px 24px;border-radius:16px;}}}}
+    </style>
+    <div class="dn-login-wrap">
+        <div class="dn-login-card{shake_class}">
+            <div class="dn-login-logo">DX</div>
+            <h1>Dex Admin</h1>
+            <p class="dn-login-sub">Control Center for DexNotifier's loaders, chat, and scripts.</p>
+            <div class="dn-login-pills">
+                <span class="pill">Private System</span>
+                <span class="pill red">Key Protected</span>
+                <span class="pill green">Loader Scripts</span>
+            </div>
+            <form method="post" autocomplete="off">
+                <label class="label" for="dn-admin-key">Admin Password</label>
+                <div class="dn-login-field">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+                    <input id="dn-admin-key" type="password" name="key" placeholder="Enter the admin password" autocomplete="current-password" autofocus>
+                </div>
+                <button type="submit">Open Control Center &rarr;</button>
+                {err_html}
+            </form>
+            <p class="dn-login-foot">Access is logged. Repeated failed attempts are rate-limited.</p>
+        </div>
     </div>
-    </main>
     """
 
 
@@ -4266,6 +4481,7 @@ async def build_fixed_script_card(name: str) -> str:
     source = cache_meta.get("source") if cache_meta else "unknown"
     fetched_at = cache_meta.get("fetched_at") if cache_meta else None
     repo_path = GITHUB_SCRIPT_PATHS.get(name, "")
+    status = get_github_status(name)
 
     if github_configured():
         repo_link = f"{github_repo_url()}/{repo_path}"
@@ -4279,15 +4495,30 @@ async def build_fixed_script_card(name: str) -> str:
             "Serving local fallback file / default text."
         )
 
+    if source == "github":
+        source_pill = '<span class="pill green">live from GitHub</span>'
+    elif source == "local_fallback":
+        source_pill = '<span class="pill red">fallback (GitHub fetch failed)</span>'
+    else:
+        source_pill = f'<span class="pill">{html.escape(source or "unknown")}</span>'
+
+    error_html = ""
+    if status and not status.get("ok") and status.get("error"):
+        error_html = (
+            f'<div class="locked-note" style="border-color:rgba(239,91,91,.35);background:rgba(239,91,91,.08);color:#ffd0d0;">'
+            f'Last GitHub fetch failed: {html.escape(status["error"])}</div>'
+        )
+
     return f"""
-    <div class="card">
+    <div class="card" data-script-card="{html.escape(name)}">
         <h2>{html.escape(meta['label'])}</h2>
         <p class="label">
             <span class="pill purple">Read-only</span>
-            <span class="pill">{html.escape(source or 'unknown')}</span>
+            {source_pill}
             <span class="pill">fetched {html.escape(_format_age(fetched_at))}</span>
         </p>
         <p class="small-text">{source_line}</p>
+        {error_html}
         <div class="locked-note">
             This script is hard-locked to the GitHub repo. To change it, edit
             <code>{html.escape(repo_path)}</code> in the repo and push - then use
@@ -4508,6 +4739,16 @@ async def build_admin_dashboard_body() -> str:
 
     tab_scripts = f"""
     <section class="tab-panel" id="tab-scripts">
+        <div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;">
+            <div>
+                <h2 style="margin-bottom:4px;">GitHub-Managed Loaders</h2>
+                <p class="small-text">{github_status}</p>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <span id="github-refresh-status" class="small-text"></span>
+                <button type="button" id="github-refresh-btn">Refresh from GitHub</button>
+            </div>
+        </div>
         <div class="grid">
             {fixed_cards_html}
         </div>
@@ -4822,10 +5063,53 @@ async def admin_stats(request: Request):
 # SIMPLE EXECUTOR CHECK
 # -----------------------------
 
+EXECUTOR_UA_SIGNATURES = (
+    "roblox",       # official Roblox client / most executors identify as this
+    "wininet",      # Windows WinINet HTTP stack used by many executors
+    "winhttp",      # Windows WinHTTP stack used by a handful of executors
+    "roblox/winhttp",
+    "robloxapp",
+    "robloxstudio",
+)
+
+
 def is_executor(request: Request) -> bool:
+    """Best-effort check for "this request came from a Roblox game/executor,
+    not a person's web browser". Not perfect (a browser can spoof its
+    User-Agent), but it's enough to stop the raw script source from being
+    casually opened, indexed, or scraped as a plain webpage."""
     ua = request.headers.get("User-Agent", "")
     ua_lower = ua.lower()
-    return ("roblox" in ua_lower) or ("wininet" in ua_lower)
+    return any(sig in ua_lower for sig in EXECUTOR_UA_SIGNATURES)
+
+
+def _protected_script_page_html() -> str:
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
+        '<title>Protected Script — DexNotifier</title></head><body>'
+        '<main class="wrap" style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:28px;">'
+        '<div class="card" style="max-width:480px;width:100%;text-align:center;padding:38px 32px;">'
+        '<div style="width:62px;height:62px;margin:0 auto 20px;border-radius:18px;display:grid;place-items:center;'
+        'background:linear-gradient(135deg,#8b5cf6,#22d3ee);box-shadow:0 14px 40px rgba(139,92,246,.35);">'
+        '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/>'
+        '<path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></div>'
+        '<span class="pill red" style="margin-bottom:12px;display:inline-block;">Protected Script</span>'
+        '<h1 style="font-size:21px;margin:6px 0 10px;">This Script Is Owned And Protected By Dex Notifier</h1>'
+        '<p style="margin:0 0 6px;">This link only serves script source to a Roblox executor request '
+        '- it can\'t be viewed in a regular web browser.</p>'
+        '<p class="small-text" style="margin-top:14px;">If you were given this link, load it from inside a '
+        'Roblox executor instead. Viewing, copying, or scraping this page will not reveal the script.</p>'
+        '</div></main></body></html>'
+    )
+
+
+def protected_script_response(status_code: int = 403) -> HTMLResponse:
+    """What a browser (or anything else that doesn't look like a Roblox
+    executor) gets back from a script-loader endpoint, instead of the raw
+    Lua source or a bare 'Private Script' string."""
+    return HTMLResponse(_protected_script_page_html(), status_code=status_code)
 
 # -----------------------------
 # FIXED LOADER ENDPOINTS (GITHUB-MANAGED) - rate-limited per IP so the
@@ -4844,7 +5128,7 @@ async def dexfree(request: Request):
     if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
         return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
     if not is_executor(request):
-        return PlainTextResponse("Private Script")
+        return protected_script_response()
     return PlainTextResponse(await get_github_script("dexfree", DEXFREE_FILE, DEFAULT_DEXFREE))
 
 
@@ -4854,7 +5138,7 @@ async def dexchilli(request: Request):
     if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
         return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
     if not is_executor(request):
-        return PlainTextResponse("Private Script")
+        return protected_script_response()
     return PlainTextResponse(await get_github_script("dexchilli", DEXCHILLI_FILE, DEFAULT_DEXCHILLI))
 
 
@@ -4864,7 +5148,7 @@ async def dexserverhop(request: Request):
     if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
         return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
     if not is_executor(request):
-        return PlainTextResponse("Private Script")
+        return protected_script_response()
     return PlainTextResponse(await get_github_script("dexserverhop", DEXSERVERHOP_FILE, DEFAULT_DEXSERVERHOP))
 
 
@@ -4874,7 +5158,7 @@ async def dexhub(request: Request):
     if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
         return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
     if not is_executor(request):
-        return PlainTextResponse("Private Script")
+        return protected_script_response()
     return PlainTextResponse(await get_github_script("dexhub", DEXHUB_FILE, DEFAULT_DEXHUB))
 
 
@@ -4884,7 +5168,7 @@ async def dexautoroll(request: Request):
     if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
         return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
     if not is_executor(request):
-        return PlainTextResponse("Private Script")
+        return protected_script_response()
     return PlainTextResponse(await get_github_script("dexautoroll", DEXAUTOROLL_FILE, DEFAULT_DEXAUTOROLL))
 
 
@@ -4894,7 +5178,7 @@ async def dexcodesniper(request: Request):
     if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
         return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
     if not is_executor(request):
-        return PlainTextResponse("Private Script")
+        return protected_script_response()
     return PlainTextResponse(await get_github_script("dexcodesniper", DEXCODESNIPER_FILE, DEFAULT_DEXCODESNIPER))
 
 
@@ -4913,7 +5197,7 @@ async def dexpaid(request: Request):
         return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
 
     if not is_executor(request):
-        return PlainTextResponse("Private Script")
+        return protected_script_response()
 
     if await is_rate_limited("dexpaid_key_guess", ip):
         return PlainTextResponse("-- Too many invalid key attempts. Try again later.", status_code=429)
@@ -7374,10 +7658,12 @@ async def dynamic_loader(slug: str, request: Request):
         return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
 
     if slug.lower() in RESERVED_PATHS_LOWER:
-        return PlainTextResponse("Private Script")
+        if not is_executor(request):
+            return protected_script_response()
+        return PlainTextResponse("-- Reserved.")
 
     if not is_executor(request):
-        return PlainTextResponse("Private Script")
+        return protected_script_response()
 
     async with scripts_lock:
         s = scripts.get(slug)
@@ -7387,7 +7673,10 @@ async def dynamic_loader(slug: str, request: Request):
                     s = v
                     break
         if not s:
-            return PlainTextResponse("Private Script")
+            # Confirmed executor request, just for a slug that doesn't
+            # exist - plain text so it fails cleanly inside loadstring()
+            # instead of dumping an HTML page into their script.
+            return PlainTextResponse("-- Script not found.")
 
         code = s.get("code", "")
         is_paid = s.get("is_paid", False)
