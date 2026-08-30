@@ -1223,546 +1223,157 @@ def is_valid_key(k: str) -> bool:
 
 
 # -----------------------------
-# GITHUB-MANAGED SCRIPT SOURCE
+# HARD-LOCKED RAW SCRIPT SOURCE
 # -----------------------------
-# See SECURITY NOTES item 5 above. These scripts can ONLY be changed by
-# editing the file in the configured GitHub repo - there is no code path
-# left (admin panel or API) that writes to them from within this app.
+# Each loader is fetched directly as plain text from its fixed raw URL.
+# No GitHub Contents API is used here, so a missing/expired GitHub token can
+# never turn a successful raw fetch into a 401 fallback error.
 
-GITHUB_OWNER = os.environ.get("DEX_GITHUB_OWNER", "").strip()
-GITHUB_REPO = os.environ.get("DEX_GITHUB_REPO", "").strip()
-GITHUB_BRANCH = os.environ.get("DEX_GITHUB_BRANCH", "main").strip() or "main"
-GITHUB_TOKEN = os.environ.get("DEX_GITHUB_TOKEN", "").strip()
-GITHUB_CACHE_TTL = int(os.environ.get("DEX_GITHUB_CACHE_TTL", "60"))
+RAW_SCRIPT_REFRESH_SECONDS = 60
+RAW_SCRIPT_TIMEOUT_SECONDS = 12
+RAW_SCRIPT_USER_AGENT = "DexNotifier-API/1.0 (direct-raw-script-sync)"
 
-GITHUB_SCRIPT_PATHS: Dict[str, str] = {
-    "dexchilli": os.environ.get("DEX_GITHUB_PATH_DEXCHILLI", "scripts/dexchilli.lua").strip(),
-    "dexfree": os.environ.get("DEX_GITHUB_PATH_DEXFREE", "scripts/dexfree.lua").strip(),
-    "dexserverhop": os.environ.get("DEX_GITHUB_PATH_DEXSERVERHOP", "scripts/dexserverhop.lua").strip(),
-    "dexhub": os.environ.get("DEX_GITHUB_PATH_DEXHUB", "scripts/dexhub.lua").strip(),
-    "dexpaid": os.environ.get("DEX_GITHUB_PATH_DEXPAID", "scripts/dexpaid.lua").strip(),
-    "dexautoroll": os.environ.get("DEX_GITHUB_PATH_DEXAUTOROLL", "scripts/dexautoroll.lua").strip(),
-    "dexcodesniper": os.environ.get("DEX_GITHUB_PATH_DEXCODESNIPER", "scripts/dexcodesniper.lua").strip(),
+HARDLOCKED_SCRIPT_URLS: Dict[str, str] = {
+    "dexchilli": "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/scripts/dexchilli.lua",
+    "dexfree": "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/scripts/dexfree.lua",
+    "dexserverhop": "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/scripts/dexserverhop.lua",
+    "dexhub": "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/scripts/dexhub.lua",
+    "dexpaid": "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/scripts/dexpaid.lua",
+    "dexautoroll": "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/scripts/dexautoroll.lua",
+    "dexcodesniper": "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/scripts/dexcodesniper.lua",
 }
 
-# name -> {"content": str, "fetched_at": float, "source": "github"|"local_fallback"|"default"}
+
+# Compatibility mapping for existing admin/source display code.
+GITHUB_SCRIPT_PATHS: Dict[str, str] = {
+    "dexchilli": "scripts/dexchilli.lua",
+    "dexfree": "scripts/dexfree.lua",
+    "dexserverhop": "scripts/dexserverhop.lua",
+    "dexhub": "scripts/dexhub.lua",
+    "dexpaid": "scripts/dexpaid.lua",
+    "dexautoroll": "scripts/dexautoroll.lua",
+    "dexcodesniper": "scripts/dexcodesniper.lua",
+}
+
+# Backwards-compatible names used by existing status/admin code.
+GITHUB_OWNER = "lyubomyrivanytskyy24-ops"
+GITHUB_REPO = "DexFreeWSS"
+GITHUB_BRANCH = "main"
+GITHUB_TOKEN = ""
+GITHUB_CACHE_TTL = RAW_SCRIPT_REFRESH_SECONDS
+
+# name -> {"content": str, "fetched_at": float, "source": "hardlocked_raw"}
 _github_cache: Dict[str, Dict[str, Any]] = {}
 _github_cache_lock = asyncio.Lock()
 
-# name -> {"ok": bool, "checked_at": float, "error": str, "via": "raw"|"api"}
-# Diagnostic-only, surfaced on /admin so a bad token / wrong repo / wrong
-# branch / renamed file shows up immediately instead of silently falling
-# back to the local/default copy forever.
+# name -> {"ok": bool, "checked_at": float, "error": str, "via": "hardlocked_raw"}
 _github_last_status: Dict[str, Dict[str, Any]] = {}
 _github_status_lock = asyncio.Lock()
 
-GITHUB_USER_AGENT = "DexNotifier-API/1.0 (+github-script-sync)"
-
-
 def github_configured() -> bool:
-    return bool(GITHUB_OWNER and GITHUB_REPO)
-
+    return True
 
 def github_repo_url() -> str:
-    if not github_configured():
-        return ""
-    return f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/blob/{GITHUB_BRANCH}"
-
+    return "https://github.com/lyubomyrivanytskyy24-ops/DexFreeWSS"
 
 def _github_raw_url(path: str) -> str:
-    return f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/{GITHUB_BRANCH}/{path}"
+    # Compatibility helper. Runtime fetching uses HARDLOCKED_SCRIPT_URLS.
+    return f"https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/{path.lstrip('/')}"
 
+def _fetch_hardlocked_raw_sync(name: str) -> "tuple[Optional[str], str]":
+    url = HARDLOCKED_SCRIPT_URLS.get(name, "")
+    if not url:
+        return None, f"no hard-locked raw URL configured for {name}"
 
-def _github_api_contents_url(path: str) -> str:
-    return f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{path}?ref={GITHUB_BRANCH}"
-
-
-def _fetch_github_raw_sync(path: str) -> "tuple[Optional[str], str]":
-    """Blocking fetch, run via asyncio.to_thread.
-
-    Tries the public raw.githubusercontent.com CDN first (fast, works for
-    any public repo with zero auth). If that fails - private repo, branch
-    protection weirdness, CDN hiccup, wrong path, etc - and a token is
-    configured, falls back to the GitHub Contents API, which always reflects
-    the live repo and works for private repos too.
-
-    Returns (content_or_None, error_message). error_message is "" on success.
-    """
-    url = _github_raw_url(path)
     req = urllib.request.Request(url)
-    req.add_header("Cache-Control", "no-cache")
-    req.add_header("User-Agent", GITHUB_USER_AGENT)
-    if GITHUB_TOKEN:
-        req.add_header("Authorization", f"token {GITHUB_TOKEN}")
+    req.add_header("User-Agent", RAW_SCRIPT_USER_AGENT)
+    req.add_header("Accept", "text/plain, text/*;q=0.9, */*;q=0.1")
+    req.add_header("Cache-Control", "no-cache, no-store, max-age=0")
+    req.add_header("Pragma", "no-cache")
+
     try:
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            if resp.status != 200:
-                raise urllib.error.HTTPError(url, resp.status, "unexpected status", resp.headers, None)
-            data = resp.read()
-            return data.decode("utf-8"), ""
-    except Exception as raw_err:
-        raw_err_msg = f"raw fetch failed ({raw_err})"
-        print(f"[GITHUB] {raw_err_msg} for {path}")
-
-        if not GITHUB_TOKEN:
-            return None, raw_err_msg
-
-        # Fallback: GitHub Contents API (works for private repos, and isn't
-        # subject to the raw CDN's own caching layer).
-        api_url = _github_api_contents_url(path)
-        api_req = urllib.request.Request(api_url)
-        api_req.add_header("Accept", "application/vnd.github.raw+json")
-        api_req.add_header("User-Agent", GITHUB_USER_AGENT)
-        api_req.add_header("Authorization", f"Bearer {GITHUB_TOKEN}")
-        api_req.add_header("X-GitHub-Api-Version", "2022-11-28")
-        try:
-            with urllib.request.urlopen(api_req, timeout=8) as resp:
-                if resp.status != 200:
-                    raise urllib.error.HTTPError(api_url, resp.status, "unexpected status", resp.headers, None)
-                raw_bytes = resp.read()
-                ctype = resp.headers.get("Content-Type", "")
-                if "application/json" in ctype:
-                    # Older API behavior / Accept header ignored - the
-                    # response is the JSON metadata object with a base64
-                    # "content" field instead of raw bytes.
-                    import base64
-                    payload = json.loads(raw_bytes.decode("utf-8"))
-                    encoded = payload.get("content", "")
-                    return base64.b64decode(encoded).decode("utf-8"), ""
-                return raw_bytes.decode("utf-8"), ""
-        except Exception as api_err:
-            api_err_msg = f"{raw_err_msg}; contents API fallback also failed ({api_err})"
-            print(f"[GITHUB] {api_err_msg} for {path}")
-            return None, api_err_msg
-
+        with urllib.request.urlopen(req, timeout=RAW_SCRIPT_TIMEOUT_SECONDS) as resp:
+            status = getattr(resp, "status", 200)
+            if status != 200:
+                raise urllib.error.HTTPError(url, status, "unexpected status", resp.headers, None)
+            raw = resp.read()
+            # utf-8-sig handles a UTF-8 BOM without leaving it in the Lua text.
+            content = raw.decode("utf-8-sig")
+            return content, ""
+    except Exception as exc:
+        return None, f"hard-locked raw fetch failed ({exc})"
 
 async def _record_github_status(name: str, ok: bool, error: str = "") -> None:
     async with _github_status_lock:
-        _github_last_status[name] = {"ok": ok, "checked_at": time.time(), "error": error}
-
+        _github_last_status[name] = {
+            "ok": ok,
+            "checked_at": time.time(),
+            "error": error,
+            "via": "hardlocked_raw",
+            "url": HARDLOCKED_SCRIPT_URLS.get(name, ""),
+        }
 
 def get_github_status(name: str) -> Optional[Dict[str, Any]]:
     return _github_last_status.get(name)
 
-
-async def get_github_script(name: str, local_fallback_file: str, default: str) -> str:
-    """Return this script's current content: fresh cache -> GitHub fetch (also
-    refreshes the on-disk fallback copy) -> in-memory cache (stale) ->
-    on-disk fallback file -> hardcoded default. This is a read path only;
-    nothing in this app writes new content for these scripts."""
+async def _refresh_hardlocked_script(name: str, local_fallback_file: str, default: str) -> Optional[str]:
+    content, err = await asyncio.to_thread(_fetch_hardlocked_raw_sync, name)
     now = time.time()
-
-    async with _github_cache_lock:
-        cached = _github_cache.get(name)
-        if cached and (now - cached["fetched_at"]) < GITHUB_CACHE_TTL:
-            return cached["content"]
-
-    path = GITHUB_SCRIPT_PATHS.get(name)
-    content, err = None, ""
-    if path and github_configured():
-        content, err = await asyncio.to_thread(_fetch_github_raw_sync, path)
-    elif path and not github_configured():
-        err = "GitHub repo not configured (DEX_GITHUB_OWNER / DEX_GITHUB_REPO unset)"
 
     if content is not None:
         async with _github_cache_lock:
-            _github_cache[name] = {"content": content, "fetched_at": now, "source": "github"}
+            _github_cache[name] = {
+                "content": content,
+                "fetched_at": now,
+                "source": "hardlocked_raw",
+            }
         await _record_github_status(name, True)
         try:
             save_file(local_fallback_file, content)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[RAW] fetched {name} but could not mirror fallback file: {exc}")
         return content
 
-    if err:
-        await _record_github_status(name, False, err)
+    await _record_github_status(name, False, err)
+    print(f"[RAW] {name}: {err}")
+    return None
 
-    # GitHub fetch failed (or not configured) - fall back to whatever we have.
+async def get_github_script(name: str, local_fallback_file: str, default: str) -> str:
+    """Return the exact plain text currently served by the hard-locked raw URL.
+
+    The normal request path never uses the GitHub Contents API and never
+    requires a token. Fresh content is fetched when the 60-second cache is
+    stale; if the remote is temporarily unavailable, the last known good
+    in-memory/local copy is served instead of breaking the endpoint.
+    """
+    now = time.time()
+    async with _github_cache_lock:
+        cached = _github_cache.get(name)
+        if cached and (now - cached["fetched_at"]) < RAW_SCRIPT_REFRESH_SECONDS:
+            return cached["content"]
+
+    fresh = await _refresh_hardlocked_script(name, local_fallback_file, default)
+    if fresh is not None:
+        return fresh
+
     async with _github_cache_lock:
         cached = _github_cache.get(name)
         if cached:
             return cached["content"]
 
-    fallback = load_file(local_fallback_file, default)
-    async with _github_cache_lock:
-        _github_cache[name] = {"content": fallback, "fetched_at": now, "source": "local_fallback"}
-    return fallback
+    return load_file(local_fallback_file, default)
 
-
-async def force_refresh_github_cache():
-    async with _github_cache_lock:
-        _github_cache.clear()
-
-
-async def refresh_all_github_scripts() -> Dict[str, Dict[str, Any]]:
-    """Eagerly re-fetch every configured script right now (bypassing the
-    cache) and return a per-script result. Used by the admin "Refresh from
-    GitHub" button so failures show up immediately instead of only being
-    discoverable by re-visiting the loader endpoint later."""
-    await force_refresh_github_cache()
-    results: Dict[str, Dict[str, Any]] = {}
-    for name, meta in FIXED_SCRIPTS.items():
-        content = await get_github_script(name, meta["file"], meta["default"])
-        status = get_github_status(name)
-        cache_meta = get_cache_meta(name)
-        results[name] = {
-            "source": cache_meta.get("source") if cache_meta else "unknown",
-            "ok": bool(status.get("ok")) if status else (cache_meta or {}).get("source") == "github",
-            "error": status.get("error", "") if status else "",
-            "bytes": len(content or ""),
-        }
-    return results
-
-
-def get_cache_meta(name: str) -> Optional[Dict[str, Any]]:
-    return _github_cache.get(name)
-
-
-# -----------------------------
-# SIGNED SESSION TOKENS (stdlib only, no extra dependency)
-# -----------------------------
-
-SESSION_MAX_AGE = 7 * 24 * 3600  # 7 days
-ADMIN_SESSION_MAX_AGE = 2 * 3600  # 2 hours - shorter privilege window
-
-
-def _sign(payload: str) -> str:
-    return hmac.new(SECRET_KEY.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
-
-
-def create_session_token(subject: str) -> str:
-    ts = str(int(time.time()))
-    payload = f"{subject}|{ts}"
-    sig = _sign(payload)
-    raw = f"{payload}|{sig}"
-    return raw.replace("|", ".")
-
-
-def verify_session_token(token: Optional[str], max_age: int) -> Optional[str]:
-    if not token:
-        return None
-    parts = token.split(".")
-    if len(parts) != 3:
-        return None
-    subject, ts, sig = parts
-    payload = f"{subject}|{ts}"
-    expected_sig = _sign(payload)
-    if not constant_time_eq(sig, expected_sig):
-        return None
-    try:
-        ts_int = int(ts)
-    except ValueError:
-        return None
-    if time.time() - ts_int > max_age:
-        return None
-    return subject
-
-
-# -----------------------------
-# LOCKOUT-STYLE RATE LIMITING (failed-attempt based, for auth/brute-force)
-# -----------------------------
-# This is the original mechanism: N failures within a window trips a
-# lockout for a further window. Used for login/admin-key/paid-key guessing,
-# where what matters is repeated *failures*, not raw request volume.
-
-RATE_LIMIT_MAX_ATTEMPTS = 5
-RATE_LIMIT_WINDOW = 15 * 60      # 15 minutes to accumulate failures
-RATE_LIMIT_LOCKOUT = 15 * 60     # 15 minute lockout once tripped
-
-_rate_state: Dict[str, Dict[str, Any]] = {}
-_rate_lock = asyncio.Lock()
-
-
-# Rough shape check for a single IPv4/IPv6 address/token, used to sanity-check
-# whatever shows up in X-Forwarded-For before we trust it as "the" client IP.
-_IP_TOKEN_PATTERN = re.compile(r"^[0-9a-fA-F:.]{2,45}$")
-
-
-def _client_ip(request: Request) -> str:
-    # If this app sits behind a reverse proxy (Railway, nginx, etc.), the
-    # real client IP arrives via X-Forwarded-For - request.client.host would
-    # otherwise just be the proxy's IP for every single visitor, which would
-    # make all per-IP rate limiting useless. We take the left-most entry,
-    # but only if it actually looks like an IP; a malformed/spoofed header
-    # falls back to the direct connection IP rather than being trusted blindly.
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        candidate = xff.split(",")[0].strip()
-        if _IP_TOKEN_PATTERN.match(candidate):
-            return candidate
-    if request.client:
-        return request.client.host
-    return "unknown"
-
-
-def _ws_client_ip(websocket: WebSocket) -> str:
-    xff = websocket.headers.get("x-forwarded-for")
-    if xff:
-        candidate = xff.split(",")[0].strip()
-        if _IP_TOKEN_PATTERN.match(candidate):
-            return candidate
-    if websocket.client:
-        return websocket.client.host
-    return "unknown"
-
-
-async def is_rate_limited(bucket: str, ip: str) -> bool:
-    key = f"{bucket}:{ip}"
-    async with _rate_lock:
-        state = _rate_state.get(key)
-        if not state:
-            return False
-        now = time.time()
-        if state.get("locked_until", 0) > now:
-            return True
-        # expire old failure windows
-        if now - state.get("window_start", 0) > RATE_LIMIT_WINDOW:
-            _rate_state.pop(key, None)
-            return False
-        return False
-
-
-async def record_failed_attempt(bucket: str, ip: str):
-    key = f"{bucket}:{ip}"
-    async with _rate_lock:
-        now = time.time()
-        state = _rate_state.get(key)
-        if not state or now - state.get("window_start", 0) > RATE_LIMIT_WINDOW:
-            state = {"count": 0, "window_start": now, "locked_until": 0}
-        state["count"] += 1
-        if state["count"] >= RATE_LIMIT_MAX_ATTEMPTS:
-            state["locked_until"] = now + RATE_LIMIT_LOCKOUT
-        _rate_state[key] = state
-
-
-async def clear_attempts(bucket: str, ip: str):
-    key = f"{bucket}:{ip}"
-    async with _rate_lock:
-        _rate_state.pop(key, None)
-
-
-# -----------------------------
-# SLIDING-WINDOW RATE LIMITING (raw request volume, for every endpoint)
-# -----------------------------
-# Complements the lockout system above: this caps how many requests of any
-# kind (successful or not) a single IP can send to a given bucket in a
-# rolling window. In-memory and per-process - fine for a single Railway
-# instance; move to a shared store (Redis) if you ever scale to multiple
-# replicas, since each process would otherwise track its own counters.
-
-_volume_buckets: Dict[str, deque] = defaultdict(deque)
-
-
-def rate_limited(ip: str, bucket: str, max_requests: int, window_seconds: float) -> bool:
-    """Returns True if this ip/bucket combo has exceeded the allowed rate."""
-    key = f"{bucket}:{ip}"
-    now = time.monotonic()
-    q = _volume_buckets[key]
-    while q and now - q[0] > window_seconds:
-        q.popleft()
-    if len(q) >= max_requests:
-        return True
-    q.append(now)
-    return False
-
-
-async def rate_bucket_janitor():
-    """Periodically clears out stale sliding-window buckets so memory
-    doesn't grow forever from one-off visitors."""
+async def hardlocked_script_refresh_loop():
+    """Refresh every fixed raw URL every 60 seconds in the background."""
     while True:
-        await asyncio.sleep(600)
-        now = time.monotonic()
-        stale_keys = [k for k, q in _volume_buckets.items() if not q or now - q[-1] > 3600]
-        for k in stale_keys:
-            _volume_buckets.pop(k, None)
-
-
-def reject_if_oversized(request: Request, max_bytes: int) -> bool:
-    """Cheap pre-check using the declared Content-Length so we can bail
-    before buffering a huge/garbage body into memory. This is a courtesy
-    check, not a hard guarantee - a client can lie about Content-Length or
-    stream via chunked encoding, so the actual byte-length is still
-    re-checked after the body is read (as this app already does). For real
-    protection against giant bodies, also set a max request size at the
-    reverse proxy / platform level in front of this service.
-    """
-    cl = request.headers.get("content-length")
-    if cl is not None:
         try:
-            if int(cl) > max_bytes:
-                return True
-        except ValueError:
-            return True
-    return False
-
-
-# -----------------------------
-# CONTENT FILTERING (links, Discord invites, profanity/slurs - including
-# spaced-out / leetspeak / accented evasion attempts)
-# -----------------------------
-# Applied to the open /logs endpoint and to /usernames, since both accept
-# free text from untrusted, unauthenticated clients.
-
-BLOCKED_SUBSTRINGS = {
-    "discord", "discordgg", "discordcom", "discordappcom", "dscgg",
-    "fuck", "shit", "bitch", "asshole", "cunt", "dick", "cock", "pussy",
-    "nigger", "nigga", "faggot", "fag", "retard", "whore", "slut",
-    "porn", "rape", "nazi", "kike", "chink", "spic",
-}
-
-_LEET_TRANSLATION = str.maketrans({
-    "0": "o", "1": "i", "3": "e", "4": "a", "5": "s", "7": "t",
-    "@": "a", "$": "s",
-})
-
-_URL_PATTERN = re.compile(r"(https?://|www\.)", re.IGNORECASE)
-
-# Control characters (other than the ones we intentionally strip via
-# .strip()) have no legitimate reason to be in a username or a log line -
-# reject outright rather than silently stripping them. This permissive
-# version still allows tab/newline/CR through, so it's only appropriate for
-# genuinely multi-line fields (script code, announcements).
-_CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-
-# Strict version for single-line fields (log lines, usernames, WSS URLs,
-# blacklist entries) - blocks EVERY control character including tab,
-# newline, and carriage return. A newline embedded in a "single value" is
-# itself a format violation: it could forge extra /logs entries, corrupt
-# the one-line-per-username storage files, or otherwise smuggle structure
-# into a field that's supposed to be a single atomic value.
-_STRICT_SINGLE_LINE_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
-
-# A field consisting entirely of NUL bytes has no legitimate use anywhere,
-# including inside multi-line script code (Lua source is text, never
-# embeds NULs) - checked separately from _CONTROL_CHAR_PATTERN since script
-# code legitimately contains tabs/newlines that the permissive pattern
-# already allows.
-_NUL_BYTE_PATTERN = re.compile(r"\x00")
-
-# Any whitespace at all (regular space, tabs, newlines, unicode spaces,
-# etc). Usernames must be a single unbroken token - anything containing
-# whitespace is silently ignored rather than stored.
-_ANY_WHITESPACE_PATTERN = re.compile(r"\s")
-
-# ws:// or wss:// URL, plain hostname (letters/digits/dots/hyphens), an
-# optional port, and an optional path - anything outside this shape for
-# the /secure endpoint is rejected rather than stored verbatim.
-WSS_URL_PATTERN = re.compile(
-    r"^wss?://[A-Za-z0-9.\-]{1,253}(:\d{1,5})?(/[A-Za-z0-9._~\-/%]*)?$"
-)
-
-# Shared shape check for usernames submitted to /usernames, /blacklisted,
-# and /unblacklisted: must start and end with a letter/digit, 3-32 chars
-# total, and allows single (non-repeated) underscores/periods in between -
-# covers both classic Roblox usernames and newer period-containing display
-# names, while still rejecting garbage.
-USERNAME_FORMAT_PATTERN = re.compile(r"^(?!.*[_.]{2})[A-Za-z0-9][A-Za-z0-9_.]{1,30}[A-Za-z0-9]$")
-
-# Paid keys are secrets.token_urlsafe() output (URL-safe base64 alphabet);
-# HWIDs are opaque client-generated identifiers. Neither has any legitimate
-# reason to be huge or to contain arbitrary characters - bound both before
-# they're used in any comparison or dict lookup.
-KEY_PARAM_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
-HWID_PARAM_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,128}$")
-
-
-def normalize_field(text: str) -> str:
-    """Unicode-normalize a raw field (NFKC) so visually-similar characters
-    (full-width forms, combining marks, etc.) collapse to their plain ASCII
-    equivalent before we validate shape or scan for blocked content."""
-    return unicodedata.normalize("NFKC", text)
-
-
-def _normalize_for_matching(text: str) -> str:
-    """Aggressively collapse a field down to bare lowercase letters/digits
-    (stripping accents, translating common leetspeak, removing spaces and
-    punctuation) purely for blocklist substring matching - NOT used for
-    display or storage."""
-    stripped = unicodedata.normalize("NFKD", text)
-    stripped = "".join(c for c in stripped if not unicodedata.combining(c))
-    stripped = stripped.lower().translate(_LEET_TRANSLATION)
-    return re.sub(r"[^a-z0-9]+", "", stripped)
-
-
-def contains_blocked_content(*fields: str) -> bool:
-    """True if any field contains a link or a blocked word, including
-    common spaced-out / leetspeak / punctuation-obfuscated variants."""
-    for field in fields:
-        if _URL_PATTERN.search(field.lower()):
-            return True
-        normalized = _normalize_for_matching(field)
-        for bad in BLOCKED_SUBSTRINGS:
-            if bad in normalized:
-                return True
-    return False
-
-
-def has_excessive_repetition(text: str, max_repeat: int = 6) -> bool:
-    """Flags obvious spam like 'aaaaaaaaaa' or '!!!!!!!!!!' - a single
-    character repeated more than max_repeat times in a row."""
-    return bool(re.search(r"(.)\1{" + str(max_repeat) + r",}", text))
-
-
-# -----------------------------
-# INPUT VALIDATION HELPERS
-# -----------------------------
-
-USERNAME_RE = re.compile(r"^[A-Za-z0-9_\-]{3,32}$")
-SLUG_SOURCE_RE = re.compile(r"^[A-Za-z0-9 _\-]{1,48}$")
-RESERVED_USERNAMES = {"system", "admin", "administrator", "root", "sender", "owner", "sys"}
-
-# --- Body size limits (raised to accommodate larger scripts, ~2MB) ---
-MAX_GENERIC_BODY = 8 * 1024          # small text endpoints (logs/usernames/blacklist entries)
-MAX_SCRIPT_BODY = 16 * 1024 * 1024    # allow nested/protected Lua payloads up to 16MB
-MAX_FORM_BODY = 2 * 1024 * 1024 + (100 * 1024)  # form posts (script code + other fields), 2MB + 100KB overhead buffer
-MAX_PASSWORD_LEN = 128
-MAX_LOG_LEN = 4096                   # a single /logs line - generous but bounded
-MAX_USERNAME_LEN = 32
-MAX_BANNER_LEN = 500                 # /banner text shown on the /scripts page
-
-
-def is_valid_username(username: str) -> bool:
-    if not USERNAME_RE.match(username):
-        return False
-    if username.lower() in RESERVED_USERNAMES:
-        return False
-    if contains_blocked_content(username):
-        return False
-    return True
-
-
-def make_slug(name: str) -> Optional[str]:
-    if not SLUG_SOURCE_RE.match(name):
-        return None
-    slug = name.strip().replace(" ", "-")
-    if not slug:
-        return None
-    return slug
-
-
-# -----------------------------
-# PASSWORD HASHING (PBKDF2-HMAC-SHA256, stdlib only)
-# -----------------------------
-
-PBKDF2_ITERATIONS = 200_000
-
-
-def hash_password(password: str, salt: Optional[bytes] = None) -> str:
-    if salt is None:
-        salt = secrets.token_bytes(16)
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS)
-    return f"{salt.hex()}${dk.hex()}"
-
-
-def verify_password(password: str, stored: str) -> bool:
-    try:
-        salt_hex, hash_hex = stored.split("$", 1)
-        salt = bytes.fromhex(salt_hex)
-        expected = bytes.fromhex(hash_hex)
-    except Exception:
-        return False
-    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS)
-    return hmac.compare_digest(dk, expected)
+            for name, meta in FIXED_SCRIPTS.items():
+                await _refresh_hardlocked_script(name, meta["file"], meta["default"])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[RAW] background refresh cycle error: {exc}")
+        await asyncio.sleep(RAW_SCRIPT_REFRESH_SECONDS)
 
 
 # -----------------------------
@@ -2328,6 +1939,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
 async def startup_event():
     asyncio.create_task(rate_bucket_janitor())
     asyncio.create_task(username_cleanup_janitor())
+    asyncio.create_task(hardlocked_script_refresh_loop())
 
 # -----------------------------
 # /secure ENDPOINT (now key-protected - previously open to anyone)
