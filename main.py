@@ -1851,6 +1851,112 @@ def ensure_builtin_scripts():
 
 ensure_builtin_scripts()
 
+
+# -----------------------------
+# RATE LIMIT / FAILED-ATTEMPT HELPERS
+# -----------------------------
+# These helpers must exist before the startup handler and HTTP middleware.
+# They were referenced by the reconstructed routes but were missing, which
+# caused Railway to fail at startup with NameError.
+
+_rate_bucket_lock = asyncio.Lock()
+_rate_buckets = defaultdict(deque)
+
+_failed_attempt_lock = asyncio.Lock()
+_failed_attempts = defaultdict(deque)
+
+# Rejected-auth throttling is intentionally separate from normal endpoint
+# rate limiting so successful traffic does not poison a user's auth bucket.
+FAILED_ATTEMPT_LIMIT = 12
+FAILED_ATTEMPT_WINDOW = 60.0
+
+
+def _client_ip(request: Request) -> str:
+    """Return a stable client address without blindly trusting forwarded headers."""
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _prune_bucket(bucket, now: float, window_seconds: float) -> None:
+    cutoff = now - max(float(window_seconds), 0.001)
+    while bucket and bucket[0] <= cutoff:
+        bucket.popleft()
+
+
+def rate_limited(ip: str, scope: str, max_requests: int, window_seconds: float) -> bool:
+    """Synchronous sliding-window limiter for normal HTTP routes."""
+    now = time.monotonic()
+    key = (str(scope), str(ip))
+    bucket = _rate_buckets[key]
+    _prune_bucket(bucket, now, window_seconds)
+
+    limit = max(1, int(max_requests))
+    if len(bucket) >= limit:
+        return True
+
+    bucket.append(now)
+    return False
+
+
+async def record_failed_attempt(scope: str, ip: str) -> None:
+    """Record a failed authentication/validation attempt."""
+    now = time.monotonic()
+    key = (str(scope), str(ip))
+    async with _failed_attempt_lock:
+        bucket = _failed_attempts[key]
+        _prune_bucket(bucket, now, FAILED_ATTEMPT_WINDOW)
+        bucket.append(now)
+
+
+async def is_rate_limited(scope: str, ip: str) -> bool:
+    """Check rejected-attempt throttling for sensitive operations."""
+    now = time.monotonic()
+    key = (str(scope), str(ip))
+    async with _failed_attempt_lock:
+        bucket = _failed_attempts.get(key)
+        if not bucket:
+            return False
+        _prune_bucket(bucket, now, FAILED_ATTEMPT_WINDOW)
+        if not bucket:
+            _failed_attempts.pop(key, None)
+            return False
+        return len(bucket) >= FAILED_ATTEMPT_LIMIT
+
+
+async def rate_bucket_janitor() -> None:
+    """Periodically remove expired rate-limit buckets so memory cannot grow forever."""
+    try:
+        while True:
+            await asyncio.sleep(60)
+            now = time.monotonic()
+            # Normal route buckets can have different windows. Keeping only
+            # recent timestamps for the longest configured windows is enough;
+            # endpoint calls still prune against their exact own window.
+            max_age = max(
+                GLOBAL_HTTP_RATE_WINDOW if "GLOBAL_HTTP_RATE_WINDOW" in globals() else 10.0,
+                120.0,
+            )
+            async with _rate_bucket_lock:
+                stale = []
+                for key, bucket in list(_rate_buckets.items()):
+                    _prune_bucket(bucket, now, max_age)
+                    if not bucket:
+                        stale.append(key)
+                for key in stale:
+                    _rate_buckets.pop(key, None)
+
+            async with _failed_attempt_lock:
+                stale = []
+                for key, bucket in list(_failed_attempts.items()):
+                    _prune_bucket(bucket, now, FAILED_ATTEMPT_WINDOW)
+                    if not bucket:
+                        stale.append(key)
+                for key in stale:
+                    _failed_attempts.pop(key, None)
+    except asyncio.CancelledError:
+        raise
+
 # -----------------------------
 # GLOBAL HTTP MIDDLEWARE — applies to every plain HTTP request (not the
 # WebSocket upgrade, which is handled separately below): an overall per-IP
@@ -1937,9 +2043,9 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(rate_bucket_janitor())
-    asyncio.create_task(username_cleanup_janitor())
-    asyncio.create_task(hardlocked_script_refresh_loop())
+    asyncio.create_task(rate_bucket_janitor(), name="dex-rate-bucket-janitor")
+    asyncio.create_task(username_cleanup_janitor(), name="dex-username-cleanup")
+    asyncio.create_task(hardlocked_script_refresh_loop(), name="dex-hardlocked-raw-refresh")
 
 # -----------------------------
 # /secure ENDPOINT (now key-protected - previously open to anyone)
