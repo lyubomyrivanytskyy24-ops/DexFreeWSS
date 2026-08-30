@@ -1210,6 +1210,7 @@ GITHUB_SCRIPT_PATHS: Dict[str, str] = {
     "dexhub": os.environ.get("DEX_GITHUB_PATH_DEXHUB", "scripts/dexhub.lua").strip(),
     "dexpaid": os.environ.get("DEX_GITHUB_PATH_DEXPAID", "scripts/dexpaid.lua").strip(),
     "dexautoroll": os.environ.get("DEX_GITHUB_PATH_DEXAUTOROLL", "scripts/dexautoroll.lua").strip(),
+    "dexcodesniper": os.environ.get("DEX_GITHUB_PATH_DEXCODESNIPER", "scripts/dexcodesniper.lua").strip(),
 }
 
 # name -> {"content": str, "fetched_at": float, "source": "github"|"local_fallback"|"default"}
@@ -1689,6 +1690,7 @@ DEXSERVERHOP_FILE = "dexserverhop.lua"
 DEXHUB_FILE = "dexhub.lua"
 DEXPAID_FILE = "dexpaid.lua"
 DEXAUTOROLL_FILE = "dexautoroll.lua"
+DEXCODESNIPER_FILE = "dexcodesniper.lua"
 
 DEFAULT_DEXCHILLI = "-- DexChilli loader script not set yet. Add scripts/dexchilli.lua to the GitHub repo."
 DEFAULT_DEXFREE = "-- DexFree loader script not set yet. Add scripts/dexfree.lua to the GitHub repo."
@@ -1696,6 +1698,7 @@ DEFAULT_DEXSERVERHOP = "-- DexServerHop loader script not set yet. Add scripts/d
 DEFAULT_DEXHUB = "-- DexHub loader script not set yet. Add scripts/dexhub.lua to the GitHub repo."
 DEFAULT_DEXPAID = "-- DexPaid loader script not set yet. Add scripts/dexpaid.lua to the GitHub repo."
 DEFAULT_DEXAUTOROLL = "-- DexAutoRoll loader script not set yet. Add scripts/dexautoroll.lua to the GitHub repo."
+DEFAULT_DEXCODESNIPER = "-- DexCodeSniper loader script not set yet. Add scripts/dexcodesniper.lua to the GitHub repo."
 
 # Central place mapping each fixed script name to its local fallback file + default.
 FIXED_SCRIPTS: Dict[str, Dict[str, str]] = {
@@ -1705,6 +1708,7 @@ FIXED_SCRIPTS: Dict[str, Dict[str, str]] = {
     "dexhub": {"file": DEXHUB_FILE, "default": DEFAULT_DEXHUB, "label": "DexHub"},
     "dexpaid": {"file": DEXPAID_FILE, "default": DEFAULT_DEXPAID, "label": "DexPaid"},
     "dexautoroll": {"file": DEXAUTOROLL_FILE, "default": DEFAULT_DEXAUTOROLL, "label": "DexAutoRoll"},
+    "dexcodesniper": {"file": DEXCODESNIPER_FILE, "default": DEFAULT_DEXCODESNIPER, "label": "DexCodeSniper"},
 }
 
 # Short taglines shown on the public /scripts page - purely cosmetic, no
@@ -1715,6 +1719,7 @@ SCRIPT_TAGLINES: Dict[str, str] = {
     "dexserverhop": "Automatic server hopping on demand.",
     "dexhub": "The full hub experience, free tier.",
     "dexautoroll": "Set it and forget it automation.",
+    "dexcodesniper": "GitHub-managed DexCodeSniper loader.",
 }
 
 viewers: Set[WebSocket] = set()
@@ -2070,7 +2075,7 @@ _save_me_group_file()
 RESERVED_PATHS = {
     "", "home", "admin", "logs", "usernames", "blacklisted", "announcements",
     "ws", "secure", "dexfree", "dexchilli", "dexserverhop", "dexhub", "dexpaid",
-    "dexautoroll", "admin/stats", "admin/update", "favicon.ico", "robots.txt",
+    "dexautoroll", "dexcodesniper", "admin/stats", "admin/update", "favicon.ico", "robots.txt",
     "scripts", "banner", "github/refresh", "dexpaid/keys", "chat", "me-chat", "ws/chat", "ws/me-chat", "chat/media", "admin/me-group",
     "login", "logout", "auth", "auth/discord/callback", "admin/logout",
 }
@@ -2087,6 +2092,7 @@ def ensure_builtin_scripts():
         ("DexServerHop", "dexserverhop", DEXSERVERHOP_FILE, DEFAULT_DEXSERVERHOP),
         ("DexHub", "dexhub", DEXHUB_FILE, DEFAULT_DEXHUB),
         ("DexAutoRoll", "dexautoroll", DEXAUTOROLL_FILE, DEFAULT_DEXAUTOROLL),
+        ("DexCodeSniper", "dexcodesniper", DEXCODESNIPER_FILE, DEFAULT_DEXCODESNIPER),
     ]
     for name, slug, path, default in builtin:
         if slug not in scripts:
@@ -4362,7 +4368,7 @@ async def admin_set_banner(request: Request):
 
 async def build_admin_dashboard_body() -> str:
     fixed_cards_html = ""
-    for name in ("dexchilli", "dexfree", "dexserverhop", "dexhub", "dexpaid", "dexautoroll"):
+    for name in ("dexchilli", "dexfree", "dexserverhop", "dexhub", "dexpaid", "dexautoroll", "dexcodesniper"):
         fixed_cards_html += await build_fixed_script_card(name)
 
     keys_preview_lines = []
@@ -4880,6 +4886,16 @@ async def dexautoroll(request: Request):
     if not is_executor(request):
         return PlainTextResponse("Private Script")
     return PlainTextResponse(await get_github_script("dexautoroll", DEXAUTOROLL_FILE, DEFAULT_DEXAUTOROLL))
+
+
+@app.get("/dexcodesniper")
+async def dexcodesniper(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+    if not is_executor(request):
+        return PlainTextResponse("Private Script")
+    return PlainTextResponse(await get_github_script("dexcodesniper", DEXCODESNIPER_FILE, DEFAULT_DEXCODESNIPER))
 
 
 # Paid-key guessing gets its own failed-attempt lockout (separate from the
