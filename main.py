@@ -1232,6 +1232,12 @@ def is_valid_key(k: str) -> bool:
 # Three public scripts are hardlocked to exact raw URLs. Their responses are
 # fetched as normal plain text; no GitHub Contents API and no GitHub token are
 # involved for these sources.
+#
+# IMPORTANT ADMIN POLICY:
+# /admin may mutate administrative state (announcements, banner, blacklist,
+# paid-key generation, chat controls, ME-Group membership, etc.), but it must
+# NEVER mutate these source URLs or replace their loader content directly.
+# The hardlocked source mapping below is intentionally not admin-editable.
 FIXED_RAW_SCRIPT_URLS: Dict[str, str] = {
     "dexfree": "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/scripts/dexfree.lua",
     "dexserverhop": "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/scripts/dexserverhop.lua",
@@ -2185,7 +2191,7 @@ _save_me_group_file()
 RESERVED_PATHS = {
     "", "home", "admin", "logs", "usernames", "blacklisted", "announcements",
     "ws", "secure", "dexfree", "dexchilli", "dexserverhop", "dexhub", "dexpaid",
-    "dexautoroll", "dexcodesniper", "admin/stats", "admin/update", "favicon.ico", "robots.txt",
+    "dexautoroll", "dexcodesniper", "admin/stats", "admin/update", "admin/announcement", "admin/banner", "admin/chat/toggle", "admin/chat/clear", "admin/github/refresh", "admin/me-group", "admin/datadir", "favicon.ico", "robots.txt",
     "scripts", "banner", "github/refresh", "dexpaid/keys", "chat", "me-chat", "ws/chat", "ws/me-chat", "chat/media", "admin/me-group",
     "login", "logout", "auth", "auth/discord/callback", "admin/logout",
 }
@@ -4364,6 +4370,82 @@ ADMIN_BASE_HTML = """
                 }}
             }});
         }}
+        async function adminMutation(formData, statusEl) {{
+            const response = await fetch('/admin/update', {{
+                method: 'POST',
+                headers: {{'Content-Type':'application/x-www-form-urlencoded'}},
+                body: formData,
+                credentials: 'same-origin',
+                cache: 'no-store'
+            }});
+            const data = await response.json().catch(() => ({{}}));
+            if (!response.ok) throw new Error(data.error || 'Admin action failed.');
+            return data;
+        }}
+
+        function wireAdminExtendedControls() {{
+            const blacklistForm = document.getElementById('admin-blacklist-form');
+            const blacklistInput = document.getElementById('admin-blacklist-username');
+            const blacklistStatus = document.getElementById('admin-blacklist-status');
+            const unblacklistBtn = document.getElementById('admin-unblacklist-btn');
+
+            if (blacklistForm && blacklistInput && blacklistStatus) {{
+                blacklistForm.addEventListener('submit', async (e) => {{
+                    e.preventDefault();
+                    const username = blacklistInput.value.trim();
+                    if (!username) {{ blacklistStatus.textContent = 'Enter a username.'; return; }}
+                    blacklistStatus.textContent = 'Updating…';
+                    try {{
+                        await adminMutation(new URLSearchParams({{action:'blacklist', username}}), blacklistStatus);
+                        blacklistStatus.textContent = 'User blacklisted.';
+                        blacklistInput.value = '';
+                        refreshStats();
+                    }} catch (err) {{
+                        blacklistStatus.textContent = err.message;
+                    }}
+                }});
+            }}
+
+            if (unblacklistBtn && blacklistInput && blacklistStatus) {{
+                unblacklistBtn.addEventListener('click', async () => {{
+                    const username = blacklistInput.value.trim();
+                    if (!username) {{ blacklistStatus.textContent = 'Enter a username.'; return; }}
+                    blacklistStatus.textContent = 'Updating…';
+                    try {{
+                        await adminMutation(new URLSearchParams({{action:'unblacklist', username}}), blacklistStatus);
+                        blacklistStatus.textContent = 'User unblacklisted.';
+                        blacklistInput.value = '';
+                        refreshStats();
+                    }} catch (err) {{
+                        blacklistStatus.textContent = err.message;
+                    }}
+                }});
+            }}
+
+            const paidForm = document.getElementById('admin-paid-key-form');
+            const paidHours = document.getElementById('admin-paid-key-hours');
+            const paidStatus = document.getElementById('admin-paid-key-status');
+            if (paidForm && paidHours && paidStatus) {{
+                paidForm.addEventListener('submit', async (e) => {{
+                    e.preventDefault();
+                    const hours = paidHours.value.trim();
+                    if (!hours || Number(hours) <= 0) {{ paidStatus.textContent = 'Enter a valid duration.'; return; }}
+                    paidStatus.textContent = 'Generating…';
+                    try {{
+                        const data = await adminMutation(new URLSearchParams({{action:'generate_paid_key', hours}}), paidStatus);
+                        paidStatus.textContent = 'Key generated successfully.';
+                        const keyBox = document.getElementById('dexpaid-last-key-box');
+                        const loadBox = document.getElementById('dexpaid-last-loadstring-box');
+                        if (keyBox) keyBox.textContent = data.key || 'No key generated.';
+                        if (loadBox) loadBox.textContent = data.loadstring || 'No loadstring generated.';
+                        refreshStats();
+                    }} catch (err) {{
+                        paidStatus.textContent = err.message;
+                    }}
+                }});
+            }}
+        }}
+
         document.addEventListener('DOMContentLoaded', () => {{
             document.querySelectorAll('#dn-nav button[data-tab]').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
             let savedTab = 'overview';
@@ -4371,6 +4453,7 @@ ADMIN_BASE_HTML = """
             showTab(savedTab);
             wireAdminControl('admin-announcement-form','/admin/announcement','admin-announcement-text','admin-announcement-status','admin-clear-announcement');
             wireAdminControl('admin-banner-form','/admin/banner','admin-banner-text','admin-banner-status','admin-clear-banner');
+            wireAdminExtendedControls();
             wireChatToggle('chat-toggle-chat','chat');
             wireChatToggle('chat-toggle-me','me');
             wireChatClear('chat-clear-chat','chat','Chat');
@@ -4730,8 +4813,16 @@ async def build_admin_dashboard_body() -> str:
             </div>
             <div class="card">
                 <h2>Blacklisted Users</h2>
-                <p class="small-text">Read-only. Manage via POST /blacklisted or /unblacklisted with X-Api-Key.</p>
-                <div class="logs-box" id="blacklist-preview-box"></div>
+                <p class="small-text">Full admin access. Add or remove usernames directly from this panel.</p>
+                <form id="admin-blacklist-form" class="admin-control-form">
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <input id="admin-blacklist-username" name="username" maxlength="128" placeholder="Roblox username" autocomplete="off" style="flex:1;min-width:190px;">
+                        <button type="submit">Blacklist</button>
+                        <button type="button" class="ghost-btn" id="admin-unblacklist-btn">Unblacklist</button>
+                    </div>
+                    <div id="admin-blacklist-status" class="small-text" style="margin-top:9px;">Ready.</div>
+                </form>
+                <div class="logs-box" id="blacklist-preview-box" style="margin-top:12px;"></div>
             </div>
         </div>
     </section>
@@ -4741,8 +4832,8 @@ async def build_admin_dashboard_body() -> str:
     <section class="tab-panel" id="tab-scripts">
         <div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;">
             <div>
-                <h2 style="margin-bottom:4px;">GitHub-Managed Loaders</h2>
-                <p class="small-text">{github_status}</p>
+                <h2 style="margin-bottom:4px;">GitHub-Managed Loaders (Hardlocked)</h2>
+                <p class="small-text">{github_status} · Sources cannot be edited or redirected from /admin.</p>
             </div>
             <div style="display:flex;align-items:center;gap:10px;">
                 <span id="github-refresh-status" class="small-text"></span>
@@ -4769,7 +4860,14 @@ async def build_admin_dashboard_body() -> str:
             </div>
             <div class="card">
                 <h2>DexPaid Keys</h2>
-                <p class="small-text">Read-only. Generate via POST /dexpaid/keys with X-Api-Key.</p>
+                <p class="small-text">Full admin access. Generate paid keys here; the loader endpoint itself remains hardlocked.</p>
+                <form id="admin-paid-key-form" class="admin-control-form">
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                        <input id="admin-paid-key-hours" name="hours" type="number" min="0.01" step="0.01" value="24" placeholder="Hours" style="width:150px;">
+                        <button type="submit">Generate Key</button>
+                    </div>
+                    <div id="admin-paid-key-status" class="small-text" style="margin-top:9px;">Ready.</div>
+                </form>
                 <p class="small-text" style="margin-top:10px;">Last generated key:</p>
                 <div class="logs-box" id="dexpaid-last-key-box">No key generated yet.</div>
                 <p class="small-text" style="margin-top:10px;">Last generated loadstring:</p>
@@ -4925,21 +5023,92 @@ async def admin_datadir_status(request: Request):
 
 @app.post("/admin/update")
 async def admin_update(request: Request):
-    # /admin is permanently view-only now. This route intentionally performs
-    # NO mutation of any kind, regardless of what's posted to it - it exists
-    # only so old bookmarks/requests get a clear explanation instead of a
-    # confusing 404. Use the dedicated API endpoints (with X-Api-Key) instead:
-    #   POST /announcements, /banner, /blacklisted, /unblacklisted,
-    #   /dexpaid/keys, /github/refresh
-    if not require_admin_session(request):
-        return PlainTextResponse("Unauthorized - please log in at /admin again.", status_code=401)
+    """Authenticated admin mutation gateway.
 
-    return PlainTextResponse(
-        "The admin panel is view-only. Nothing can be changed from /admin or /admin/update. "
-        "Use the API directly with header X-Api-Key: POST /announcements, /banner, /blacklisted, "
-        "/unblacklisted, /dexpaid/keys, or /github/refresh.",
-        status_code=403,
-    )
+    /admin is fully writable for administrative data and controls. The only
+    intentionally immutable resources are the GitHub-managed scripts/loaders;
+    those continue to come only from their existing hardlocked source URLs.
+    """
+    if not require_admin_session(request):
+        return JSONResponse({"error": "admin login required"}, status_code=401)
+
+    if reject_if_oversized(request, MAX_GENERIC_BODY):
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
+    raw = await request.body()
+    if len(raw) > MAX_GENERIC_BODY:
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
+    data = parse_qs(raw.decode("utf-8", errors="ignore"))
+    action = data.get("action", [""])[0].strip().lower()
+
+    if action == "announcement":
+        return await _admin_form_action(request, "announcement")
+
+    if action == "banner":
+        return await _admin_form_action(request, "banner")
+
+    if action == "blacklist":
+        username = normalize_field(data.get("username", [""])[0].strip())
+        if not username or len(username) > 128:
+            return JSONResponse({"error": "invalid username"}, status_code=400)
+        if _STRICT_SINGLE_LINE_PATTERN.search(username):
+            return JSONResponse({"error": "invalid username"}, status_code=400)
+        async with blacklist_lock:
+            blacklisted_usernames.add(username)
+            save_blacklist_to_file(blacklisted_usernames)
+        return JSONResponse({"ok": True, "action": "blacklist", "username": username})
+
+    if action == "unblacklist":
+        username = normalize_field(data.get("username", [""])[0].strip())
+        if not username or len(username) > 128:
+            return JSONResponse({"error": "invalid username"}, status_code=400)
+        if _STRICT_SINGLE_LINE_PATTERN.search(username):
+            return JSONResponse({"error": "invalid username"}, status_code=400)
+        async with blacklist_lock:
+            blacklisted_usernames.discard(username)
+            save_blacklist_to_file(blacklisted_usernames)
+        return JSONResponse({"ok": True, "action": "unblacklist", "username": username})
+
+    if action == "generate_paid_key":
+        global last_generated_paid_key, last_generated_paid_loadstring
+        hours = parse_duration_hours(data.get("hours", [""])[0].strip())
+        if hours is None:
+            return JSONResponse(
+                {"error": f"invalid duration (0 < hours <= {MAX_KEY_DURATION_HOURS})"},
+                status_code=400,
+            )
+        async with dexpaid_keys_lock:
+            cleanup_expired_paid_keys()
+            new_key = generate_paid_key(20)
+            expiry = time.time() + hours * 3600.0
+            dexpaid_keys[new_key] = expiry
+            save_dexpaid_keys_to_file(dexpaid_keys)
+            last_generated_paid_key = new_key
+            last_generated_paid_loadstring = (
+                f'loadstring(game:HttpGet("{BASE_URL}/dexpaid?key={new_key}"))()'
+            )
+        return JSONResponse({
+            "ok": True,
+            "action": "generate_paid_key",
+            "key": new_key,
+            "expires_at": expiry,
+            "loadstring": last_generated_paid_loadstring,
+        })
+
+    if action == "refresh_scripts":
+        # This only refreshes the existing hardlocked sources; it cannot
+        # change, create, delete, or redirect a script/loader source.
+        if not github_configured() and not FIXED_RAW_SCRIPT_URLS:
+            return JSONResponse({"error": "No remote script sources configured"}, status_code=400)
+        results = await refresh_all_github_scripts()
+        return JSONResponse({
+            "ok": all(r.get("ok") for r in results.values()),
+            "results": results,
+            "hardlocked_sources": dict(FIXED_RAW_SCRIPT_URLS),
+        })
+
+    return JSONResponse({"error": "unknown admin action"}, status_code=400)
 
 # -----------------------------
 # ADMIN LIVE STATS API - requires an admin session, and is now rate-limited
