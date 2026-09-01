@@ -3367,19 +3367,25 @@ HOME_BASE_HTML = """
             font-family:monospace; font-size:12px; max-height:240px; overflow:auto; white-space:pre-wrap;
         }}
         .obf-history-card{{margin-top:24px}}
-        .obf-history-list{{display:grid;gap:10px;margin-top:16px}}
-        .obf-history-item{{padding:14px 16px;border:1px solid rgba(255,255,255,.08);border-radius:14px;background:rgba(3,5,9,.62);transition:transform .2s ease,border-color .2s ease}}
-        .obf-history-item:hover{{transform:translateY(-2px);border-color:rgba(139,92,246,.3)}}
-        .obf-history-top{{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}}
-        .obf-history-top strong{{display:block;color:#fff;font-size:13px}}
-        .obf-history-top .small-text{{display:block;margin-top:3px}}
-        .obf-history-meta{{margin-top:9px;color:#7f899c;font-size:11px}}
-        .obf-history-meta code{{color:#c4b5fd}}
-        .obf-raw-link{{display:inline-flex!important;align-items:center;padding:8px 10px;border-radius:10px;background:rgba(139,92,246,.09)!important;border:1px solid rgba(139,92,246,.18)!important;color:#c4b5fd!important;font-size:11px!important;font-weight:850!important}}
-        .obf-raw-link:hover{{background:rgba(139,92,246,.15)!important;color:#fff!important}}
-        .obf-source-details{{margin-top:12px;border-top:1px solid rgba(255,255,255,.06);padding-top:10px}}
-        .obf-source-details summary{{cursor:pointer;color:#a5b4fc;font-size:11px;font-weight:850;user-select:none}}
-        .obf-source-preview{{margin:10px 0 0;padding:12px;border-radius:12px;background:#020409;border:1px solid rgba(255,255,255,.06);color:#cbd5e1;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow:auto;max-height:420px}}
+        .obf-history-head{{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap}}
+        .obf-history-list{{display:grid;gap:12px;margin-top:18px}}
+        .obf-history-item{{padding:16px;border:1px solid rgba(255,255,255,.08);border-radius:16px;background:linear-gradient(145deg,rgba(20,23,31,.86),rgba(7,9,13,.9));transition:transform .2s ease,border-color .2s ease,box-shadow .2s ease}}
+        .obf-history-item:hover{{transform:translateY(-2px);border-color:rgba(139,92,246,.32);box-shadow:0 16px 40px rgba(0,0,0,.25)}}
+        .obf-history-top{{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap}}
+        .obf-history-title{{min-width:0;flex:1}}
+        .obf-history-title strong{{display:block;color:#fff;font-size:13px;word-break:break-all}}
+        .obf-history-title .small-text{{display:block;margin-top:4px}}
+        .obf-history-meta{{margin-top:12px;color:#7f899c;font-size:11px}}
+        .obf-history-meta code{{color:#c4b5fd;word-break:break-all}}
+        .obf-url-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:13px}}
+        .obf-url-box{{min-width:0;padding:11px 12px;border:1px solid rgba(255,255,255,.07);border-radius:12px;background:rgba(0,0,0,.18)}}
+        .obf-url-label{{display:flex;align-items:center;gap:7px;color:#8f98a9;font-size:10px;font-weight:900;letter-spacing:.07em;text-transform:uppercase;margin-bottom:6px}}
+        .obf-url-label i{{width:6px;height:6px;border-radius:50%;display:inline-block;background:#8b5cf6;box-shadow:0 0 12px rgba(139,92,246,.65)}}
+        .obf-url-label.output i{{background:#22d3ee;box-shadow:0 0 12px rgba(34,211,238,.55)}}
+        .obf-plain-url{{display:block;max-width:100%;overflow-x:auto;white-space:nowrap;font:11px/1.5 Consolas,'SFMono-Regular',Menlo,monospace;color:#c4b5fd!important;text-decoration:underline!important;text-decoration-color:rgba(196,181,253,.3)!important;text-underline-offset:3px}}
+        .obf-plain-url:hover{{color:#fff!important;text-decoration-color:rgba(255,255,255,.65)!important}}
+        .obf-history-empty{{padding:22px;border:1px dashed rgba(255,255,255,.09);border-radius:14px;text-align:center;color:#687489;font-size:12px}}
+        @media(max-width:720px){{.obf-url-grid{{grid-template-columns:1fr}}}}
         .error {{ margin-top:10px; color:#ff5252; font-size:13px; }}
         .success {{ margin-top:10px; color:#00e676; font-size:13px; }}
     </style>
@@ -4263,39 +4269,59 @@ ADMIN_BASE_HTML = """
                 if (clearAllBtn) clearAllBtn.disabled = !(totalMsgs > 0);
 
                 const history = Array.isArray(data.obfuscation_history) ? data.obfuscation_history : [];
+                const historySig = JSON.stringify(data.obfuscation_history_signature || {});
                 const countEl = document.getElementById('obf-history-count');
                 if (countEl) countEl.textContent = `${{data.obfuscation_history_count || 0}} submissions`;
                 const historyEl = document.getElementById('obf-history-box');
                 if (historyEl) {{
+                    const previousSig = historyEl.dataset.historySignature || '';
+                    if (previousSig === historySig) {{
+                        // History has not changed; avoid rebuilding every card
+                        // on every 3-second dashboard poll.
+                    }} else {{
+                        historyEl.dataset.historySignature = historySig;
+                    const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({{
+                        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+                    }})[c]);
                     if (!history.length) {{
-                        historyEl.innerHTML = '<div class="small-text">No Obfustucate submissions yet.</div>';
+                        historyEl.innerHTML = '<div class="obf-history-empty">No Obfustucate submissions yet.</div>';
                     }} else {{
                         historyEl.innerHTML = history.map((item) => {{
                             const when = new Date((Number(item.created_at) || 0) * 1000).toLocaleString();
                             const bytes = Number(item.source_bytes) || 0;
-                            const raw = String(item.raw_url || '#');
+                            const raw = String(item.raw_url || '');
                             const id = String(item.id || '');
-                            const sha = String(item.source_sha256 || '').slice(0, 16);
-                            return `<div class="obf-history-item" data-obf-id="${{id}}"><div class="obf-history-top"><div><strong>${{id}}</strong><span class="small-text">${{when}} · ${{bytes.toLocaleString()}} bytes</span></div><a class="obf-raw-link" href="${{raw}}" target="_blank" rel="noopener">Open /raw payload ↗</a></div><div class="obf-history-meta">SHA-256: <code>${{sha}}…</code></div><details class="obf-source-details"><summary>Show raw source code</summary><pre class="obf-source-preview">Click to load source…</pre></details></div>`;
+                            const sha = String(item.source_sha256 || '');
+                            const inputUrl = id ? `${{location.origin}}/admin/obfuscate/${{encodeURIComponent(id)}}/input` : '';
+                            const safeInput = esc(inputUrl);
+                            const safeRaw = esc(raw);
+                            const safeId = esc(id);
+                            const safeWhen = esc(when);
+                            const safeSha = esc(sha);
+                            const inputHref = inputUrl ? esc(inputUrl) : '#';
+                            const rawHref = raw ? safeRaw : '#';
+                            return `<article class="obf-history-item">
+                                <div class="obf-history-top">
+                                    <div class="obf-history-title">
+                                        <strong>Submission ${{safeId || 'unknown'}}</strong>
+                                        <span class="small-text">${{safeWhen}} · ${{bytes.toLocaleString()}} bytes</span>
+                                    </div>
+                                </div>
+                                <div class="obf-url-grid">
+                                    <div class="obf-url-box">
+                                        <div class="obf-url-label"><i></i>Raw input · plaintext</div>
+                                        <a class="obf-plain-url" href="${{inputHref}}" target="_blank" rel="noopener noreferrer" title="Open original input as plaintext">${{safeInput}}</a>
+                                    </div>
+                                    <div class="obf-url-box">
+                                        <div class="obf-url-label output"><i></i>Raw output · protected</div>
+                                        <a class="obf-plain-url" href="${{rawHref}}" target="_blank" rel="noopener noreferrer" title="Open generated protected payload">${{safeRaw || 'Unavailable'}}</a>
+                                    </div>
+                                </div>
+                                <div class="obf-history-meta">SHA-256: <code>${{safeSha || 'unavailable'}}</code></div>
+                            </article>`;
                         }}).join('');
                     }}
-                    historyEl.querySelectorAll('.obf-source-details').forEach((details) => {{
-                        details.addEventListener('toggle', async () => {{
-                            if (!details.open || details.dataset.loaded === '1') return;
-                            const item = details.closest('.obf-history-item');
-                            const id = item ? item.getAttribute('data-obf-id') : '';
-                            const pre = details.querySelector('.obf-source-preview');
-                            if (!id || !pre) return;
-                            try {{
-                                const response = await fetch(`/admin/obfuscate/${{encodeURIComponent(id)}}/source`, {{credentials:'same-origin', cache:'no-store'}});
-                                if (!response.ok) throw new Error('Could not load source');
-                                pre.textContent = await response.text();
-                                details.dataset.loaded = '1';
-                            }} catch (err) {{
-                                pre.textContent = 'Unable to load source.';
-                            }}
-                        }});
-                    }});
+                    }}
                 }}
             }} catch (e) {{
                 console.error(e);
@@ -4304,8 +4330,8 @@ ADMIN_BASE_HTML = """
         function wireAdminControl(formId, endpoint, textareaId, statusId, clearId) {{
             const form=document.getElementById(formId), area=document.getElementById(textareaId), status=document.getElementById(statusId), clear=document.getElementById(clearId);
             if(!form) return;
-            form.addEventListener('submit', async (e)=>{{e.preventDefault();status.textContent='Saving…';const r=await fetch(endpoint,{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams({{text:area.value}}),credentials:'same-origin'}});const d=await r.json().catch(()=>({{}}));if(!r.ok){{status.textContent=d.error||'Could not save.';return}}status.textContent='Saved';area.value=d.text||'';refreshStats();}});
-            clear.addEventListener('click',()=>{{area.value='';form.requestSubmit();}});
+            form.addEventListener('submit', async (e)=>{{e.preventDefault();status.textContent='Saving…';try{{const r=await fetch(endpoint,{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams({{text:area.value}}),credentials:'same-origin'}});const d=await r.json().catch(()=>({{}}));if(!r.ok){{status.textContent=d.error||'Could not save.';return}}status.textContent='Saved';area.value=d.text||'';refreshStats();}}catch(err){{status.textContent='Network error - could not save.';}}}});
+            if (clear) clear.addEventListener('click',()=>{{area.value='';form.requestSubmit();}});
         }}
         function wireChatToggle(id, room) {{
             const el = document.getElementById(id);
@@ -4461,6 +4487,13 @@ ADMIN_BASE_HTML = """
             wireChatClear('chat-clear-both','both','Chat AND ME-Chat');
             wireChatClear('danger-clear-all','both','Chat AND ME-Chat');
             wireGithubRefresh();
+            const obfRefresh = document.getElementById('obf-history-refresh');
+            if (obfRefresh) obfRefresh.addEventListener('click', async () => {
+                const oldText = obfRefresh.textContent;
+                obfRefresh.disabled = true;
+                obfRefresh.textContent = 'Refreshing…';
+                try { await refreshStats(); } finally { obfRefresh.disabled = false; obfRefresh.textContent = oldText; }
+            });
             refreshStats();
             setInterval(refreshStats, 3000);
         }});
@@ -4884,8 +4917,8 @@ async def build_admin_dashboard_body() -> str:
     <section class="tab-panel" id="tab-obf">
         <div class="card obf-history-card">
             <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:14px;flex-wrap:wrap;">
-                <div><h2 style="margin-bottom:6px;">Obfustucate History</h2><p class="small-text">Every submission made through <code>/obfuscate</code>. The public page does not display this history.</p></div>
-                <span class="pill purple" id="obf-history-count">0 submissions</span>
+                <div><h2 style="margin-bottom:6px;">Obfustucate History</h2><p class="small-text">Every retained successful submission. Raw input is available as an authenticated plaintext link; generated output keeps its public <code>/raw</code> URL.</p></div>
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><button type="button" class="secondary" id="obf-history-refresh">Refresh</button><span class="pill purple" id="obf-history-count">0 submissions</span></div>
             </div>
             <div id="obf-history-box" class="obf-history-list">No Obfustucate submissions yet.</div>
         </div>
@@ -5191,12 +5224,28 @@ async def admin_stats(request: Request):
 
     async with obf_history_lock:
         history = _load_obf_history()
-    obf_preview = [{k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url")} for item in reversed(history[-OBF_HISTORY_META_PREVIEW:])]
+    # The admin tab is private, so return the complete retained history rather
+    # than an arbitrary 100-item preview. Source text itself is never embedded
+    # in this response; it is available only through the authenticated raw
+    # input link rendered by the dashboard.
+    obf_preview = [
+        {
+            k: item.get(k)
+            for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url")
+        }
+        for item in reversed(history)
+    ]
 
     async with chat_lock:
         chat_message_count = len(chat_history_cache)
     async with me_chat_lock:
         me_chat_message_count = len(me_chat_history_cache)
+
+    obf_history_signature = {
+        "count": len(history),
+        "latest_id": history[-1].get("id", "") if history else "",
+        "latest_created_at": history[-1].get("created_at", 0) if history else 0,
+    }
 
     return JSONResponse(
         {
@@ -5224,6 +5273,7 @@ async def admin_stats(request: Request):
             "scripts_preview": scripts_preview,
             "obfuscation_history": obf_preview,
             "obfuscation_history_count": len(history),
+            "obfuscation_history_signature": obf_history_signature,
         },
         headers={"Cache-Control": "no-store"},
     )
@@ -5415,8 +5465,7 @@ RAW_LOADER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 
 OBF_HISTORY_DIR = os.environ.get("DEX_OBF_HISTORY_DIR", "").strip() or os.path.join(DATA_DIR, "obf_history")
 OBF_HISTORY_FILE = os.path.join(OBF_HISTORY_DIR, "index.json")
-OBF_HISTORY_MAX = 5000
-OBF_HISTORY_META_PREVIEW = 100
+OBF_HISTORY_MAX = max(1, int(os.environ.get("DEX_OBF_HISTORY_MAX", "5000")))
 obf_history_lock = asyncio.Lock()
 
 def _load_obf_history() -> list:
@@ -5438,17 +5487,39 @@ def _obf_source_path(submission_id: str) -> str:
     return os.path.join(OBF_HISTORY_DIR, submission_id + ".lua")
 
 def _record_obfustucate_submission(source: str, loader_id: str, raw_url: str) -> dict:
+    """Persist one successful obfuscation and its original user input.
+
+    The admin dashboard exposes the original input only through an authenticated
+    plaintext endpoint. The public /raw URL remains the generated protected
+    payload, so the two links are deliberately kept separate.
+    """
     source_path = _obf_source_path(loader_id)
     _atomic_write(source_path, source, mode=0o600)
-    entry = {"id": loader_id, "created_at": time.time(), "source_bytes": len(source.encode("utf-8")), "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(), "raw_url": raw_url, "source_path": source_path}
+
+    encoded_source = source.encode("utf-8")
+    entry = {
+        "id": loader_id,
+        "created_at": time.time(),
+        "source_bytes": len(encoded_source),
+        "source_sha256": hashlib.sha256(encoded_source).hexdigest(),
+        "raw_url": raw_url,
+        "source_path": source_path,
+    }
+
     history = _load_obf_history()
     history.append(entry)
+
     if len(history) > OBF_HISTORY_MAX:
         stale = history[:-OBF_HISTORY_MAX]
         history = history[-OBF_HISTORY_MAX:]
         for old in stale:
-            try: os.remove(old.get("source_path", ""))
-            except Exception: pass
+            try:
+                old_path = old.get("source_path", "")
+                if old_path:
+                    os.remove(old_path)
+            except Exception:
+                pass
+
     _save_obf_history(history)
     return entry
 
@@ -7188,6 +7259,9 @@ def obfuscate_lua_bundle(source, publish=True, level="hard"):
             minimum_size=False,
         )
         raw_url, _loader_id = _publish_local_payload(backend_payload)
+        # Record the exact source the user supplied, not the generated protected
+        # payload. This gives /admin a plaintext link to the original input.
+        _record_obfustucate_submission(source, _loader_id, raw_url)
         loader_text = _build_loadstring(raw_url)
     else:
         # A deterministic local placeholder is useful for tests. No fake
@@ -7243,12 +7317,12 @@ OBF_PAGE = r"""<!doctype html>
 <section class="hero"><div class="eyebrow"><i class="live"></i> Lua protection tool</div><h1><span>Obfustucate</span></h1><p>Paste your raw Lua source below. DexNotifier generates the protected payload and the exact raw loadstring you can copy.</p></section>
 <section class="workspace"><div class="toolbar"><div class="traffic"><i></i><i></i><i></i></div><div class="toolbar-title">Protected Lua workspace</div><div style="width:39px"></div></div>
 <div class="editor-card"><div class="label"><span>Source</span><span class="hint">Lua · UTF-8</span></div><textarea id="source" class="editor" spellcheck="false" placeholder="-- paste your Lua source here"></textarea><div class="actionbar"><button id="go" class="go">Obfustucate Lua</button><span id="status" class="status">Ready</span></div></div>
-<div id="results" class="results" style="display:none"><div class="result"><div class="result-head"><strong>Protected payload</strong><span>complete Lua file</span></div><div class="copyrow"><div id="payload" class="out"></div><button class="copy" data-copy="payload">Copy</button></div></div></div>
+<div id="results" class="results" style="display:none"><div class="result"><div class="result-head"><strong>Protected payload</strong><span>complete Lua file</span></div><div class="copyrow"><div id="payload" class="out"></div><button class="copy" data-copy="payload">Copy</button></div><div id="raw-result" style="display:none;margin-top:10px;padding:11px 12px;border:1px solid rgba(148,163,184,.10);border-radius:12px;background:rgba(3,7,16,.55)"><div style="font-size:10px;color:#64748b;font-weight:900;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px">Raw URL</div><a id="raw-result-link" href="#" target="_blank" rel="noopener noreferrer" style="font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;word-break:break-all;color:#c4b5fd"></a></div></div></div>
 </section><div class="footer">DexNotifier · Obfustucate · Protected workspace</div></div></main>
 <script>
 const $=id=>document.getElementById(id),status=$('status');
 async function copyText(text,button){try{if(navigator.clipboard)await navigator.clipboard.writeText(text);else{const t=document.createElement('textarea');t.value=text;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove()}const old=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=old,1000)}catch(e){button.textContent='Copy failed';setTimeout(()=>button.textContent='Copy',1000)}}
-$('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return}$('go').disabled=true;status.textContent='Protecting…';status.className='status';try{const r=await fetch('/obfuscate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfustucation failed');$('payload').textContent=d.payload||'';$('results').style.display='grid';status.textContent='Complete';status.className='status ok';$('results').scrollIntoView({behavior:'smooth',block:'nearest'})}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
+$('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return}$('go').disabled=true;status.textContent='Protecting…';status.className='status';try{const r=await fetch('/obfuscate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfustucation failed');$('payload').textContent=d.payload||'';const rawBox=$('raw-result'),rawLink=$('raw-result-link');if(rawBox&&rawLink&&d.raw_url){rawLink.href=d.raw_url;rawLink.textContent=d.raw_url;rawBox.style.display='block'}else if(rawBox){rawBox.style.display='none'}$('results').style.display='grid';status.textContent='Complete';status.className='status ok';$('results').scrollIntoView({behavior:'smooth',block:'nearest'})}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
 document.querySelectorAll('.copy').forEach(b=>b.addEventListener('click',()=>copyText($(b.dataset.copy).textContent,b)));
 </script></body></html>"""
 
@@ -7432,6 +7506,12 @@ async def obfuscate_api(request: Request):
                         status_code=413,
                     )
 
+                # Publish the completed protected payload so every successful
+                # web obfuscation has a stable /raw URL. Store the ORIGINAL
+                # source separately for the private admin plaintext link.
+                raw_url, submission_id = _publish_local_payload(final_payload)
+                _record_obfustucate_submission(source, submission_id, raw_url)
+
                 # The completed result is now consumed by /obfuscate.
                 # Removing the bridge job is the acknowledgement mechanism
                 # used by the puller: its wait loop observes 404 and exits.
@@ -7442,6 +7522,8 @@ async def obfuscate_api(request: Request):
                     {
                         "ok": True,
                         "payload": final_payload,
+                        "raw_url": raw_url,
+                        "submission_id": submission_id,
                     }
                 )
             if state == "error":
@@ -7457,6 +7539,31 @@ async def obfuscate_api(request: Request):
 # -----------------------------
 # ADMIN-ONLY OBFUSTUCATE SOURCE VIEW
 # -----------------------------
+@app.get("/admin/obfuscate/{submission_id}/input")
+async def admin_obfustucate_input(submission_id: str, request: Request):
+    """Authenticated plaintext view of the exact source submitted to /obfuscate."""
+    if not require_admin_session(request):
+        return PlainTextResponse("Unauthorized", status_code=401)
+    if not RAW_LOADER_ID_PATTERN.fullmatch(submission_id):
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+    try:
+        with open(_obf_source_path(submission_id), "r", encoding="utf-8") as f:
+            source = f.read()
+        return PlainTextResponse(
+            source,
+            media_type="text/plain; charset=utf-8",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": "inline",
+            },
+        )
+    except FileNotFoundError:
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+    except Exception:
+        return PlainTextResponse("Could not read source", status_code=500)
+
+
 @app.get("/admin/obfuscate/{submission_id}/source")
 async def admin_obfustucate_source(submission_id: str, request: Request):
     if not require_admin_session(request):
@@ -7465,7 +7572,15 @@ async def admin_obfustucate_source(submission_id: str, request: Request):
         return PlainTextResponse("NOT_FOUND", status_code=404)
     try:
         with open(_obf_source_path(submission_id), "r", encoding="utf-8") as f:
-            return PlainTextResponse(f.read(), media_type="text/plain; charset=utf-8")
+            return PlainTextResponse(
+                f.read(),
+                media_type="text/plain; charset=utf-8",
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
+                    "Content-Disposition": "inline",
+                },
+            )
     except FileNotFoundError:
         return PlainTextResponse("NOT_FOUND", status_code=404)
     except Exception:
