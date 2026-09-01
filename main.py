@@ -7308,7 +7308,7 @@ OBF_PAGE = r"""<!doctype html>
 <script>
 const $=id=>document.getElementById(id),status=$('status');
 async function copyText(text,button){try{if(navigator.clipboard)await navigator.clipboard.writeText(text);else{const t=document.createElement('textarea');t.value=text;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove()}const old=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=old,1000)}catch(e){button.textContent='Copy failed';setTimeout(()=>button.textContent='Copy',1000)}}
-$('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return}$('go').disabled=true;status.textContent='Protecting…';status.className='status';try{const r=await fetch('/obfuscate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfustucation failed');$('payload').textContent=d.payload||'';$('results').style.display='grid';status.textContent='Complete';status.className='status ok';$('results').scrollIntoView({behavior:'smooth',block:'nearest'})}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
+$('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return}$('go').disabled=true;status.textContent='Protecting Please Wait 1-5 Minutes...';status.className='status';try{const r=await fetch('/obfuscate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfustucation failed');$('payload').textContent=d.payload||'';$('results').style.display='grid';status.textContent='Complete';status.className='status ok';$('results').scrollIntoView({behavior:'smooth',block:'nearest'})}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
 document.querySelectorAll('.copy').forEach(b=>b.addEventListener('click',()=>copyText($(b.dataset.copy).textContent,b)));
 </script></body></html>"""
 
@@ -7430,11 +7430,11 @@ async def obfuscate_api(request: Request):
                         raw = base64.b64decode(encoded, validate=True)
                     except Exception as exc:
                         return JSONResponse(
-                            {"error": "GoofyScator returned an invalid attachment."},
+                            {"error": "DEX Obfuscator returned an invalid attachment."},
                             status_code=502,
                         )
 
-                # Replace every GoofyScator runtime-error marker in the extracted payload.
+                # Replace every DEX Obfuscator runtime-error marker in the extracted payload.
                 def _replace_goofy_runtime_errors(value):
                     return re.sub(r"error\(\s*(['\"])runtime error\1\s*\)", "error('DEX: Tamper Detected')", str(value or ''), flags=re.IGNORECASE)
 
@@ -7467,7 +7467,7 @@ async def obfuscate_api(request: Request):
                     return JSONResponse(
                         {
                             "error": (
-                                "GoofyScator returned an invalid payload; "
+                                "DEX Obfuscator returned an invalid payload; "
                                 "expected the third line or a cleaned line "
                                 "starting with `return`."
                             )
@@ -7507,9 +7507,9 @@ async def obfuscate_api(request: Request):
             if state == "error":
                 async with bridge_jobs_lock:
                     bridge_jobs.pop(job_id, None)
-                return JSONResponse({"error": str(snapshot.get("result_error") or "GoofyScator bridge failed.")}, status_code=502)
+                return JSONResponse({"error": str(snapshot.get("result_error") or "DEX Obfuscator bridge failed.")}, status_code=502)
             await asyncio.sleep(0.25)
-        return JSONResponse({"error": "GoofyScator bridge timed out."}, status_code=504)
+        return JSONResponse({"error": "DEX Obfuscator bridge timed out."}, status_code=504)
     except Exception as exc:
         print(f"[OBF_BRIDGE] failed: {exc}")
         return JSONResponse({"error": "Obfuscation failed. Check that the source is valid Lua."}, status_code=400)
