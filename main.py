@@ -5180,7 +5180,7 @@ ADMIN_STATS_RATE_WINDOW = 10.0
 
 
 async def fetch_remote_info() -> dict:
-    url = f"{BASE_URL}/info"
+    url = f"{BASE_URL}/check"
 
     def _do_request():
         try:
@@ -7542,7 +7542,7 @@ PRIVATE_STATS_RATE_WINDOW = 30.0
 def _private_key_ok(request: Request) -> bool:
     return is_valid_key(request.headers.get("X-Api-Key", ""))
 
-@app.get("/info")
+@app.get("/check")
 async def private_info(request: Request):
     ip = _client_ip(request)
     if rate_limited(ip, "private_info", PRIVATE_STATS_RATE_LIMIT, PRIVATE_STATS_RATE_WINDOW):
@@ -7584,7 +7584,7 @@ async def internal_status(request: Request):
 @app.get("/internal/routes")
 async def internal_routes(request: Request):
     if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"},status_code=401)
-    hidden_prefixes = ("/internal", "/info", "/metrics", "/admin/stats", "/admin/obfuscate/", "/admin/me-group")
+    hidden_prefixes = ("/internal", "/check", "/metrics", "/admin/stats", "/admin/obfuscate/", "/admin/me-group")
     routes = []
     for r in app.routes:
         path = getattr(r, "path", None)
