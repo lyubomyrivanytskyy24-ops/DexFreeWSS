@@ -8256,6 +8256,242 @@ async def bridge_ack_job(job_id: str, request: Request):
     return JSONResponse({"ok": True, "job_id": job_id, "state": "acknowledged"})
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# GAME CHAT — paste this entire block into your main.py
+# BEFORE the final  `if __name__ == "__main__":` line at the very bottom.
+#
+# New endpoints:
+#   POST /game-chat/send      { username, display_name, role, message }
+#   GET  /game-chat/messages  ?since=<last_id>   → { messages:[…], online:N }
+#   GET  /game-chat/status    → { online:N, total_messages:N }
+# ═══════════════════════════════════════════════════════════════════════════
+
+import collections as _collections
+
+GAME_CHAT_MAX_MESSAGES  = 300      # keep at most this many in memory
+GAME_CHAT_MAX_MSG_LEN   = 200      # character limit per message
+GAME_CHAT_RATE_WINDOW   = 5.0      # seconds between accepted messages per IP
+GAME_CHAT_POST_LIMIT    = 12       # raw request volume cap (any status)
+GAME_CHAT_POST_WINDOW   = 10.0
+GAME_CHAT_GET_LIMIT     = 60
+GAME_CHAT_GET_WINDOW    = 10.0
+GAME_CHAT_SPAM_LOOKBACK = 3        # identical-message spam window
+GAME_CHAT_ONLINE_TTL    = 15.0     # seconds before a client is "offline"
+
+_game_chat_lock                          = asyncio.Lock()
+_game_chat_messages: list                = []
+_game_chat_id_counter: int               = 0
+_game_chat_online: Dict[str, float]      = {}   # ip -> last_seen
+_game_chat_last_sent: Dict[str, float]   = {}   # ip -> last accepted send time
+_game_chat_recent: Dict[str, "_collections.deque"] = {}  # ip -> deque of norm msgs
+
+_GC_BLOCKED_WORDS = {
+    "nigger","nigga","faggot","fag","retard","kike","chink","spic","cunt",
+    "fuck","shit","bitch","asshole","dick","cock","pussy","whore","slut",
+    "porn","rape","nazi","discord","discordgg",
+}
+
+
+def _gc_normalize(text: str) -> str:
+    import unicodedata as _ud
+    s = _ud.normalize("NFKD", text)
+    s = "".join(c for c in s if not _ud.combining(c))
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def _gc_contains_blocked(text: str) -> bool:
+    n = _gc_normalize(text)
+    for w in _GC_BLOCKED_WORDS:
+        if w in n:
+            return True
+    if re.search(r"https?://|www\.", text, re.IGNORECASE):
+        return True
+    return False
+
+
+def _gc_is_spam(ip: str, norm: str) -> bool:
+    dq = _game_chat_recent.get(ip)
+    if not dq or len(dq) < GAME_CHAT_SPAM_LOOKBACK:
+        return False
+    return sum(1 for m in dq if m == norm) >= GAME_CHAT_SPAM_LOOKBACK
+
+
+def _gc_record_sent(ip: str, norm: str) -> None:
+    if ip not in _game_chat_recent:
+        _game_chat_recent[ip] = _collections.deque(maxlen=GAME_CHAT_SPAM_LOOKBACK + 1)
+    _game_chat_recent[ip].append(norm)
+
+
+def _gc_online_count() -> int:
+    cutoff = time.time() - GAME_CHAT_ONLINE_TTL
+    return sum(1 for ts in _game_chat_online.values() if ts >= cutoff)
+
+
+def _gc_trim_online() -> None:
+    cutoff = time.time() - GAME_CHAT_ONLINE_TTL
+    stale = [ip for ip, ts in _game_chat_online.items() if ts < cutoff]
+    for ip in stale:
+        _game_chat_online.pop(ip, None)
+
+
+@app.post("/game-chat/send")
+async def game_chat_send(request: Request):
+    """Accept a chat message from a Roblox executor client."""
+    global _game_chat_id_counter
+
+    ip = _client_ip(request)
+
+    # Volume cap (raw requests)
+    if rate_limited(ip, "game_chat_post", GAME_CHAT_POST_LIMIT, GAME_CHAT_POST_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    # Per-message cooldown — 5 seconds between accepted sends
+    now = time.time()
+    async with _game_chat_lock:
+        last = _game_chat_last_sent.get(ip, 0)
+        if now - last < GAME_CHAT_RATE_WINDOW:
+            remaining = int(GAME_CHAT_RATE_WINDOW - (now - last)) + 1
+            return JSONResponse(
+                {"error": f"slow down — wait {remaining}s", "wait": remaining},
+                status_code=429,
+            )
+
+    if reject_if_oversized(request, 4096):
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "expected JSON"}, status_code=400)
+
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid body"}, status_code=400)
+
+    username     = str(body.get("username") or "").strip()[:20]
+    display_name = str(body.get("display_name") or username).strip()[:40]
+    role         = str(body.get("role") or "Dex User").strip()[:32]
+    message      = str(body.get("message") or "").strip()[:GAME_CHAT_MAX_MSG_LEN]
+
+    if not username or not message:
+        return JSONResponse({"error": "username and message are required"}, status_code=400)
+
+    # Username must be a plausible Roblox username
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,20}", username):
+        return JSONResponse({"error": "invalid username format"}, status_code=400)
+
+    # Role whitelist
+    if role not in {"Owner", "Co-Owner", "Dex Finder Designer", "Dex User"}:
+        role = "Dex User"
+
+    # Content filter (username + message)
+    if _gc_contains_blocked(message) or _gc_contains_blocked(username):
+        return JSONResponse({"error": "blocked content"}, status_code=400)
+
+    # Control-character check
+    if re.search(r"[\x00-\x1f\x7f]", message):
+        return JSONResponse({"error": "invalid characters"}, status_code=400)
+
+    # Server-side spam detection
+    norm = re.sub(r"\s+", " ", message.lower()).strip()
+    async with _game_chat_lock:
+        if _gc_is_spam(ip, norm):
+            return JSONResponse(
+                {"error": "spam detected — vary your messages"},
+                status_code=429,
+            )
+        _gc_record_sent(ip, norm)
+        _game_chat_last_sent[ip] = time.time()
+        _game_chat_online[ip]    = time.time()
+
+        _game_chat_id_counter += 1
+        entry: Dict[str, Any] = {
+            "id":           _game_chat_id_counter,
+            "username":     username,
+            "display_name": display_name,
+            "role":         role,
+            "message":      message,
+            "timestamp":    time.strftime("%H:%M", time.gmtime()),
+            "sent_at":      time.time(),
+        }
+        _game_chat_messages.append(entry)
+        if len(_game_chat_messages) > GAME_CHAT_MAX_MESSAGES:
+            del _game_chat_messages[:-GAME_CHAT_MAX_MESSAGES]
+
+    return JSONResponse({"ok": True, "id": entry["id"]})
+
+
+@app.get("/game-chat/messages")
+async def game_chat_messages(request: Request):
+    """
+    Return messages newer than `since` (a message id).
+    Also updates the caller's online timestamp.
+    """
+    ip = _client_ip(request)
+
+    if rate_limited(ip, "game_chat_get", GAME_CHAT_GET_LIMIT, GAME_CHAT_GET_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    since_raw = request.query_params.get("since", "0")
+    try:
+        since = int(since_raw)
+    except ValueError:
+        since = 0
+
+    async with _game_chat_lock:
+        _game_chat_online[ip] = time.time()
+        _gc_trim_online()
+        online_count = _gc_online_count()
+        new_msgs = [m for m in _game_chat_messages if m["id"] > since]
+
+    return JSONResponse(
+        {"ok": True, "messages": new_msgs, "online": online_count},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/game-chat/status")
+async def game_chat_status(request: Request):
+    """Lightweight public endpoint — just online count and total messages."""
+    ip = _client_ip(request)
+    if rate_limited(ip, "game_chat_status", 30, 10.0):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+    async with _game_chat_lock:
+        _gc_trim_online()
+        cnt   = _gc_online_count()
+        total = len(_game_chat_messages)
+    return JSONResponse({"ok": True, "online": cnt, "total_messages": total})
+
+
+# ─── Admin: view/clear game chat ────────────────────────────────────────────
+
+@app.get("/admin/game-chat")
+async def admin_game_chat_view(request: Request):
+    """Admin-only: see full in-memory game-chat log."""
+    if not require_admin_session(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    async with _game_chat_lock:
+        _gc_trim_online()
+        return JSONResponse({
+            "ok": True,
+            "online": _gc_online_count(),
+            "total": len(_game_chat_messages),
+            "messages": list(reversed(_game_chat_messages[-50:])),
+        })
+
+
+@app.post("/admin/game-chat/clear")
+async def admin_game_chat_clear(request: Request):
+    """Admin-only: wipe all in-memory game-chat messages."""
+    global _game_chat_id_counter
+    if not require_admin_session(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    async with _game_chat_lock:
+        removed = len(_game_chat_messages)
+        _game_chat_messages.clear()
+        _game_chat_id_counter = 0
+    return JSONResponse({"ok": True, "removed": removed})
+
+
 # -----------------------------
 # RUN
 # -----------------------------
