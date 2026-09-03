@@ -34,6 +34,11 @@ class AnnouncementHTMLMiddleware(BaseHTTPMiddleware):
         body = b""
         async for chunk in response.body_iterator:
             body += chunk
+        # NOTE: body_iterator is now fully drained. From this point on we
+        # must always return a fresh Response built from `body` (or the
+        # transformed text) - never the original `response` object, since
+        # re-streaming its now-empty iterator would silently serve a blank
+        # page (this was a real prior bug when decoding failed below).
         from starlette.responses import Response
         try:
             text = body.decode("utf-8")
@@ -61,6 +66,12 @@ app.add_middleware(AnnouncementHTMLMiddleware)
 START_TIME = time.time()
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# GLOBAL DEXNOTIFIER UI SYSTEM
+# Keeps all backend logic/routes intact while giving every HTML endpoint the
+# same modern responsive visual language.
+# ═════════════════════════════════════════════════════════════════════════════
+
 GLOBAL_UI_CSS = r"""
 :root{
   --dn-bg:#050608;--dn-bg-soft:#090b10;--dn-surface:rgba(14,16,22,.86);--dn-surface-2:rgba(18,21,29,.78);
@@ -80,6 +91,7 @@ body:before{content:"";position:fixed;inset:0;pointer-events:none;z-index:-2;bac
 body:after{content:"";position:fixed;left:var(--dn-mx,50%);top:var(--dn-my,20%);width:520px;height:520px;transform:translate(-50%,-50%);border-radius:50%;pointer-events:none;z-index:-1;background:radial-gradient(circle,rgba(139,92,246,.09),transparent 67%);filter:blur(22px);transition:left .22s ease,top .22s ease}
 body.dn-base-home,html:has(body.dn-base-home){background:#000!important}
 body.dn-base-home:before,body.dn-base-home:after{display:none!important}
+/* Shared chrome */
 .dn-chrome{position:relative;z-index:50;width:min(1220px,calc(100% - 34px));margin:18px auto 28px;padding:10px 12px;border:1px solid rgba(255,255,255,.075);border-radius:18px;background:rgba(9,11,16,.72);box-shadow:0 18px 55px rgba(0,0,0,.34),inset 0 1px 0 rgba(255,255,255,.035);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);display:flex;align-items:center;justify-content:space-between;gap:16px;animation:dnSlide .55s cubic-bezier(.2,.8,.2,1) both}
 .dn-chrome-brand{display:flex;align-items:center;gap:10px;color:#fff!important;font-weight:950!important;letter-spacing:-.03em;font-size:14px}
 .dn-chrome-logo{width:34px;height:34px;border-radius:11px;display:grid;place-items:center;background:linear-gradient(135deg,#8b5cf6,#4f8cff);box-shadow:0 9px 28px rgba(99,102,241,.24);font-size:13px;font-weight:1000;color:#fff;position:relative;overflow:hidden}
@@ -90,6 +102,7 @@ body.dn-base-home:before,body.dn-base-home:after{display:none!important}
 .dn-chrome-links a.active{color:#fff!important;background:rgba(139,92,246,.12)!important;border-color:rgba(139,92,246,.22)!important}
 .dn-chrome-status{display:inline-flex;align-items:center;gap:7px;color:#9ee8c7;font-size:11px;font-weight:850;padding:7px 10px;border-radius:999px;border:1px solid rgba(52,211,153,.15);background:rgba(52,211,153,.055)}
 .dn-chrome-status i{width:6px;height:6px;border-radius:50%;background:#34d399;box-shadow:0 0 14px rgba(52,211,153,.9);animation:dnPulse 1.8s ease-in-out infinite}
+/* Universal surfaces */
 .wrap,.container,.page,.shell{position:relative;z-index:1}
 .wrap{animation:dnPageIn .62s cubic-bezier(.2,.8,.2,1) both}
 .card,.panel,.stat-box,.script-card,.resultbox,.logs-box,.locked-note,.code-box{background:linear-gradient(145deg,rgba(17,20,27,.88),rgba(8,10,14,.9))!important;border:1px solid var(--dn-line)!important;box-shadow:0 20px 65px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.035)!important;backdrop-filter:blur(18px)!important;-webkit-backdrop-filter:blur(18px)!important}
@@ -115,10 +128,12 @@ button:hover:before,.btn:hover:before,.copy:hover:before,.copy-btn:hover:before{
 .logs-box{border-radius:15px!important;color:#cbd5e1!important}
 .banner{border-radius:17px!important;border:1px solid rgba(139,92,246,.18)!important;background:linear-gradient(90deg,rgba(139,92,246,.075),rgba(34,211,238,.045))!important;box-shadow:0 14px 45px rgba(0,0,0,.2)!important}
 footer{color:#586274!important}
+/* Legacy page cleanup */
 body:not(.dn-base-home) .hero h1{letter-spacing:-.055em!important}
 body:not(.dn-base-home) .wrap{padding-top:0}
 body:not(.dn-base-home) .grid{gap:16px!important}
 body:not(.dn-base-home) .script-card::before{opacity:.55}
+/* Root */
 .dn-home{min-height:100vh!important}
 .dn-home-inner{width:min(1180px,100%)!important}
 .dn-nav{margin-bottom:84px!important}
@@ -127,14 +142,17 @@ body:not(.dn-base-home) .script-card::before{opacity:.55}
 .dn-side{box-shadow:0 30px 90px rgba(0,0,0,.5)!important}
 .dn-mini{transition:transform .25s ease,border-color .25s ease,background .25s ease!important}
 .dn-mini:hover{transform:translateY(-4px);border-color:rgba(139,92,246,.22)!important;background:rgba(15,17,22,.92)!important}
+/* Obfustucate */
 body:has(.workspace){background:#050608!important}
 body:has(.workspace) .page{max-width:1180px!important}
 body:has(.workspace) .nav{border-bottom-color:rgba(255,255,255,.065)!important}
 body:has(.workspace) .workspace{box-shadow:0 35px 110px rgba(0,0,0,.45)!important;border-color:rgba(255,255,255,.09)!important}
 body:has(.workspace) .editor-card{box-shadow:inset 0 1px 0 rgba(255,255,255,.035)!important}
 body:has(.workspace) .go{background:linear-gradient(135deg,#8b5cf6,#6366f1 60%,#22d3ee)!important}
+/* Admin/home/scripts typography and layout */
 body:has(.stats-grid) .wrap,body:has(form[action="/home"]) .wrap{max-width:1220px!important}
 body:has(.stats-grid) h1{font-size:clamp(28px,4vw,42px)!important}
+/* Mobile */
 .me-admin-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}.me-admin-form,.me-members{padding:15px;border:1px solid rgba(255,255,255,.065);border-radius:16px;background:rgba(255,255,255,.025)}.me-admin-form label{display:block;color:#cbd5e1;font-size:12px;font-weight:850;margin-bottom:8px}.me-add-row{display:flex;gap:8px}.me-add-row select{flex:1;min-width:0}.me-member{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.055)}.me-member:last-child{border-bottom:0}.me-member strong{display:block;color:#fff;font-size:12px}.me-member span{display:block;color:#687489;font-size:10px;margin-top:3px}.me-remove{background:rgba(251,113,133,.08)!important;color:#fecdd3!important;border-color:rgba(251,113,133,.18)!important;box-shadow:none!important;padding:8px 10px!important;font-size:11px}.me-empty{color:#667286;font-size:12px}@media(max-width:760px){.me-admin-grid{grid-template-columns:1fr}.me-add-row{flex-direction:column}.me-add-row button{width:100%;min-height:44px}}
 @media(max-width:760px){
   .dn-chrome{width:calc(100% - 20px);margin:10px auto 18px;padding:9px;border-radius:15px}
@@ -145,6 +163,9 @@ body:has(.stats-grid) h1{font-size:clamp(28px,4vw,42px)!important}
 }
 @media(max-width:460px){.stats-grid{grid-template-columns:1fr!important}.dn-chrome-brand span{display:none}.dn-chrome-logo{width:32px;height:32px}}
 
+/* ---------------------------------------------------------------------
+   GLOBAL NAV: bottom tab bar (phones + tablets) / icon rail (desktop)
+   --------------------------------------------------------------------- */
 .dn-tabbar,.dn-sidebar{display:none}
 
 @media(max-width:1024px){
@@ -264,6 +285,10 @@ GLOBAL_UI_JS = r"""
     el.addEventListener('pointerleave', () => el.style.removeProperty('will-change'));
   });
 
+  // -----------------------------------------------------------------
+  // Global nav: bottom tab bar (phone/tablet) + icon rail (desktop).
+  // Same link set everywhere so the site feels identical on every size.
+  // -----------------------------------------------------------------
   const ICONS = {
     home: '<path d="M3 11l9-8 9 8"/><path d="M5 10v11h14V10"/><path d="M9 21v-6h6v6"/>',
     scripts: '<path d="M8 6 3 12l5 6"/><path d="M16 6l5 6-5 6"/>',
@@ -290,6 +315,7 @@ GLOBAL_UI_JS = r"""
   const skipNav = path === '/login' || path.startsWith('/auth/discord');
 
   if (!skipNav && document.body && !document.querySelector('.dn-sidebar')) {
+    // Desktop icon rail - every link, always visible, no overflow needed.
     const rail = document.createElement('nav');
     rail.className = 'dn-sidebar';
     rail.innerHTML = ALL_LINKS.map(([href, label, icon]) =>
@@ -297,6 +323,8 @@ GLOBAL_UI_JS = r"""
     ).join('');
     document.body.appendChild(rail);
 
+    // Mobile/tablet bottom tab bar - a few primary tabs plus a More sheet
+    // for the rest, so it never gets cramped on a narrow screen.
     const moreLinks = ALL_LINKS.filter(([href]) => !TAB_PRIMARY.includes(href));
     const tabbar = document.createElement('nav');
     tabbar.className = 'dn-tabbar';
@@ -340,6 +368,11 @@ async def dexnotifier_ui_middleware(request: Request, call_next):
             original_body = b"".join(chunks)
             body = original_body
 
+            # Anything below this point is a "nice to have" cosmetic
+            # transform. If it throws for any reason, we still fall back to
+            # re-serving original_body untouched below - we must NEVER end up
+            # re-yielding an already-drained/empty iterator, since that was a
+            # real prior bug that silently sent empty pages to the browser.
             try:
                 text = original_body.decode("utf-8", errors="replace")
 
@@ -364,6 +397,9 @@ async def dexnotifier_ui_middleware(request: Request, call_next):
         except Exception as exc:
             print(f"[UI] middleware error: {exc}")
             if original_body is not None:
+                # We already drained the real body_iterator above, so if we
+                # don't re-attach something here the response comes back
+                # empty. Serve back exactly what the route handler produced.
                 async def _fallback_body(b=original_body):
                     yield b
                 response.body_iterator = _fallback_body()
@@ -1030,34 +1066,23 @@ def _make_noise_expression():
     )
 
 
-def _resolve_data_dir() -> str:
-    candidate = (os.environ.get("DEX_DATA_DIR", "/data").strip() or "/data")
-    fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+# ═════════════════════════════════════════════════════════════════════════════
+# RAW PUBLISHING IS OVERRIDDEN BELOW TO USE THIS SERVICE'S OWN /raw STORE.
+# ═════════════════════════════════════════════════════════════════════════════
 
-    def _write_test(path: str) -> None:
-        os.makedirs(path, exist_ok=True)
-        probe = os.path.join(path, ".dn_write_test")
-        with open(probe, "w") as f:
-            f.write("ok")
-        os.remove(probe)
 
-    try:
-        _write_test(candidate)
-        return candidate
-    except PermissionError as e:
-        try:
-            os.chmod(candidate, 0o777)
-            _write_test(candidate)
-            return candidate
-        except Exception:
-            os.makedirs(fallback, exist_ok=True)
-            print(f"[DATA_DIR] PERMISSION DENIED writing to '{candidate}' ({e}). Falling back to '{fallback}'.")
-            return fallback
-    except Exception as e:
-        os.makedirs(fallback, exist_ok=True)
-        print(f"[DATA_DIR] Could not use '{candidate}' ({e}). Falling back to '{fallback}'.")
-        return fallback
 
+# ═════════════════════════════════════════════════════════════════════════════
+# PERSISTENT DATA DIRECTORY
+# On Railway the container filesystem is wiped on every redeploy UNLESS a
+# Volume is attached and mounted at this path. Set DEX_DATA_DIR to the mount
+# path of your Railway Volume (Railway's own default mount path is /data) and
+# every file this app writes - users, scripts, chat history/media, the admin
+# secret key, blacklist, banner/announcement text, etc - will survive
+# redeploys. If the directory can't be created/written (e.g. running locally
+# with no volume), this falls back to a "./data" folder next to the script so
+# local development still works without crashing.
+# ═════════════════════════════════════════════════════════════════════════════
 
 def _write_test(path: str) -> None:
     os.makedirs(path, exist_ok=True)
@@ -1067,28 +1092,72 @@ def _write_test(path: str) -> None:
     os.remove(probe)
 
 
+def _resolve_data_dir() -> str:
+    candidate = (os.environ.get("DEX_DATA_DIR", "/data").strip() or "/data")
+    fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+    try:
+        _write_test(candidate)
+        return candidate
+    except PermissionError as e:
+        # By far the most common cause of "the volume is attached but data
+        # still disappears on redeploy": the container process does not own
+        # (or can't write to) the mounted directory - e.g. the Dockerfile
+        # runs as a non-root USER, or the volume was previously initialized
+        # by root and the app now runs as someone else. Try once to fix the
+        # permissions ourselves (works if we're root or already own it),
+        # then retest before giving up.
+        try:
+            os.chmod(candidate, 0o777)
+            _write_test(candidate)
+            return candidate
+        except Exception:
+            os.makedirs(fallback, exist_ok=True)
+            print(f"[DATA_DIR] PERMISSION DENIED writing to '{candidate}' ({e}). The Volume "
+                  f"is attached and mounted, but this process can't write to it - almost "
+                  f"always a Dockerfile USER/UID mismatch. Falling back to '{fallback}', "
+                  f"which is WIPED on every redeploy. Fix: run the container as root, or "
+                  f"add 'RUN chown -R <app-user> /data' (or chmod 777) in the Dockerfile "
+                  f"AFTER the volume mount path exists, then redeploy.")
+            return fallback
+    except Exception as e:
+        os.makedirs(fallback, exist_ok=True)
+        print(f"[DATA_DIR] Could not use '{candidate}' ({e}). Falling back to '{fallback}', "
+              f"which is WIPED on every redeploy. On Railway: make sure a Volume is "
+              f"attached to THIS service (not a different one) and its Mount Path is "
+              f"exactly '{candidate}', then redeploy.")
+        return fallback
+
+
 DATA_DIR = _resolve_data_dir()
 _USING_FALLBACK_DATA_DIR = DATA_DIR != (os.environ.get("DEX_DATA_DIR", "/data").strip() or "/data")
 if _USING_FALLBACK_DATA_DIR:
-    print(f"[DATA_DIR] *** WARNING: running WITHOUT persistent storage. Using ephemeral '{DATA_DIR}' ***")
+    print(f"[DATA_DIR] *** WARNING: running WITHOUT persistent storage. Using ephemeral "
+          f"'{DATA_DIR}' - everything written here is lost on the next redeploy/restart. "
+          f"Check the Volume's Mount Path on this service and container write "
+          f"permissions, then redeploy. ***")
 else:
     try:
         import shutil as _shutil
         _total, _used, _free = _shutil.disk_usage(DATA_DIR)
-        print(f"[DATA_DIR] Persistent data directory in use: {DATA_DIR} ({_free // (1024**2)} MB free of {_total // (1024**2)} MB)")
+        print(f"[DATA_DIR] Persistent data directory in use: {DATA_DIR} "
+              f"({_free // (1024**2)} MB free of {_total // (1024**2)} MB)")
     except Exception:
         print(f"[DATA_DIR] Persistent data directory in use: {DATA_DIR}")
 
 
 def _get_or_create_secret(env_name: str, file_name: str) -> str:
+    """Load a secret from env, else from a local file, else generate+persist one."""
     val = os.environ.get(env_name)
     if val:
         return val.strip()
+
     if os.path.exists(file_name):
         with open(file_name, "r", encoding="utf-8") as f:
             existing = f.read().strip()
             if existing:
                 return existing
+
     generated = secrets.token_urlsafe(32)
     try:
         with open(file_name, "w", encoding="utf-8") as f:
@@ -1096,19 +1165,42 @@ def _get_or_create_secret(env_name: str, file_name: str) -> str:
         os.chmod(file_name, 0o600)
     except Exception as e:
         print(f"WARNING: could not persist generated secret for {env_name}: {e}")
-    print(f"[SECURITY] {env_name} was not set. Generated a new one and saved it to {file_name}.")
+
+    print(f"[SECURITY] {env_name} was not set. Generated a new one and saved it to "
+          f"{file_name} (mode 600). Set the {env_name} env var to control this explicitly.")
     return generated
 
 
+# API key for the public/private API endpoints.
 API_KEY = (os.environ.get("DEX_API_KEY", "").strip() or "")
+# Admin access is controlled ONLY by the Railway environment variable DEX_ADMIN_KEY.
+# No fallback to DEX_API_KEY is used, so /admin cannot be opened accidentally.
 ADMIN_PASSWORD = os.environ.get("DEX_ADMIN_KEY", "").strip()
 SECRET_KEY = _get_or_create_secret("DEX_SECRET_KEY", os.path.join(DATA_DIR, ".dex_secret_key"))
 BASE_URL = os.environ.get("DEX_BASE_URL", "https://dexapi1.up.railway.app").rstrip("/")
 
+# DEX Obfuscator V8 upstream API.
+# Set DEX_OBFUSCATOR_API_URL to the public POST /obfuscate endpoint for the
+# DEX Obfuscator V8 service. The local /obfuscate route sends JSON directly to
+# that API and consumes its {"status":"success","result":"..."} response.
+DEX_OBFUSCATOR_API_URL = os.environ.get("DEX_OBFUSCATOR_API_URL", "").strip().rstrip("/")
+DEX_OBFUSCATOR_API_TIMEOUT = max(
+    10,
+    int(os.environ.get("DEX_OBFUSCATOR_API_TIMEOUT", "120")),
+)
+
+# -----------------------------
+# DISCORD OAUTH LOGIN (Dex Bot)
+# Set these three as Railway variables. DISCORD_REDIRECT_URI must exactly
+# match a redirect configured on the Discord application (OAuth2 tab),
+# e.g. https://<your-app>.up.railway.app/auth/discord/callback
+# -----------------------------
 DISCORD_CLIENT_ID = os.environ.get("DISCORD_CLIENT_ID", "").strip()
 DISCORD_CLIENT_SECRET = os.environ.get("DISCORD_CLIENT_SECRET", "").strip()
 DISCORD_REDIRECT_URI = os.environ.get("DISCORD_REDIRECT_URI", "").strip()
 DISCORD_OAUTH_SCOPE = "identify"
+# The account that gets the yellow (OWNER) tag in chat - matched against the
+# person's Discord username (case-insensitive).
 DISCORD_OWNER_USERNAME = os.environ.get("DEX_OWNER_DISCORD_USERNAME", "lyubomyr2012_official").strip().lower()
 
 
@@ -1125,6 +1217,8 @@ DISCORD_ERROR_MESSAGES = {
 
 
 def discord_error_message(code: str) -> str:
+    """Map a discord_error=<code> query param to a message a person can
+    actually read. Returns "" for no code / unknown code left unmapped."""
     if not code:
         return ""
     return DISCORD_ERROR_MESSAGES.get(code, "Discord sign-in failed - please try again.")
@@ -1138,16 +1232,35 @@ def is_valid_key(k: str) -> bool:
     return bool(k) and constant_time_eq(k, API_KEY)
 
 
+# -----------------------------
+# GITHUB-MANAGED SCRIPT SOURCE
+# -----------------------------
+# See SECURITY NOTES item 5 above. These scripts can ONLY be changed by
+# editing the file in the configured GitHub repo - there is no code path
+# left (admin panel or API) that writes to them from within this app.
+
+# Three public scripts are hardlocked to exact raw URLs. Their responses are
+# fetched as normal plain text; no GitHub Contents API and no GitHub token are
+# involved for these sources.
+#
+# IMPORTANT ADMIN POLICY:
+# /admin may mutate administrative state (announcements, banner, blacklist,
+# paid-key generation, chat controls, ME-Group membership, etc.), but it must
+# NEVER mutate these source URLs or replace their loader content directly.
+# The hardlocked source mapping below is intentionally not admin-editable.
 FIXED_RAW_SCRIPT_URLS: Dict[str, str] = {
     "dexfree": "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/scripts/dexfree.lua",
     "dexserverhop": "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/scripts/dexserverhop.lua",
     "dexcodesniper": "https://raw.githubusercontent.com/lyubomyrivanytskyy24-ops/DexFreeWSS/refs/heads/main/scripts/dexcodesniper.lua",
 }
 
+# Optional legacy repo settings remain available for the other scripts.
 GITHUB_OWNER = os.environ.get("DEX_GITHUB_OWNER", "").strip()
 GITHUB_REPO = os.environ.get("DEX_GITHUB_REPO", "").strip()
 GITHUB_BRANCH = os.environ.get("DEX_GITHUB_BRANCH", "main").strip() or "main"
 GITHUB_TOKEN = os.environ.get("DEX_GITHUB_TOKEN", "").strip()
+# Keep refresh cadence at 60 seconds minimum so the fixed sources are polled
+# once per minute even if an old deployment environment sets a lower value.
 GITHUB_CACHE_TTL = max(60, int(os.environ.get("DEX_GITHUB_CACHE_TTL", "60")))
 
 GITHUB_SCRIPT_PATHS: Dict[str, str] = {
@@ -1243,6 +1356,12 @@ def get_github_status(name: str) -> Optional[Dict[str, Any]]:
 
 
 async def get_github_script(name: str, local_fallback_file: str, default: str) -> str:
+    """Return the latest source text and preserve last-known-good content.
+
+    Hardlocked entries are fetched directly from their exact raw URLs and the
+    returned plain text is used verbatim. Failed refreshes never overwrite a
+    good cached/local copy.
+    """
     now = time.time()
     async with _github_cache_lock:
         cached = _github_cache.get(name)
@@ -1279,6 +1398,10 @@ async def force_refresh_github_cache():
 
 
 async def refresh_all_github_scripts() -> Dict[str, Dict[str, Any]]:
+    """Eagerly re-fetch every configured script right now (bypassing the
+    cache) and return a per-script result. Used by the admin "Refresh from
+    GitHub" button so failures show up immediately instead of only being
+    discoverable by re-visiting the loader endpoint later."""
     await force_refresh_github_cache()
     results: Dict[str, Dict[str, Any]] = {}
     for name, meta in FIXED_SCRIPTS.items():
@@ -1298,8 +1421,12 @@ def get_cache_meta(name: str) -> Optional[Dict[str, Any]]:
     return _github_cache.get(name)
 
 
-SESSION_MAX_AGE = 7 * 24 * 3600
-ADMIN_SESSION_MAX_AGE = 2 * 3600
+# -----------------------------
+# SIGNED SESSION TOKENS (stdlib only, no extra dependency)
+# -----------------------------
+
+SESSION_MAX_AGE = 7 * 24 * 3600  # 7 days
+ADMIN_SESSION_MAX_AGE = 2 * 3600  # 2 hours - shorter privilege window
 
 
 def _sign(payload: str) -> str:
@@ -1334,17 +1461,33 @@ def verify_session_token(token: Optional[str], max_age: int) -> Optional[str]:
     return subject
 
 
+# -----------------------------
+# LOCKOUT-STYLE RATE LIMITING (failed-attempt based, for auth/brute-force)
+# -----------------------------
+# This is the original mechanism: N failures within a window trips a
+# lockout for a further window. Used for login/admin-key/paid-key guessing,
+# where what matters is repeated *failures*, not raw request volume.
+
 RATE_LIMIT_MAX_ATTEMPTS = 5
-RATE_LIMIT_WINDOW = 15 * 60
-RATE_LIMIT_LOCKOUT = 15 * 60
+RATE_LIMIT_WINDOW = 15 * 60      # 15 minutes to accumulate failures
+RATE_LIMIT_LOCKOUT = 15 * 60     # 15 minute lockout once tripped
 
 _rate_state: Dict[str, Dict[str, Any]] = {}
 _rate_lock = asyncio.Lock()
 
+
+# Rough shape check for a single IPv4/IPv6 address/token, used to sanity-check
+# whatever shows up in X-Forwarded-For before we trust it as "the" client IP.
 _IP_TOKEN_PATTERN = re.compile(r"^[0-9a-fA-F:.]{2,45}$")
 
 
 def _client_ip(request: Request) -> str:
+    # If this app sits behind a reverse proxy (Railway, nginx, etc.), the
+    # real client IP arrives via X-Forwarded-For - request.client.host would
+    # otherwise just be the proxy's IP for every single visitor, which would
+    # make all per-IP rate limiting useless. We take the left-most entry,
+    # but only if it actually looks like an IP; a malformed/spoofed header
+    # falls back to the direct connection IP rather than being trusted blindly.
     xff = request.headers.get("x-forwarded-for")
     if xff:
         candidate = xff.split(",")[0].strip()
@@ -1375,6 +1518,7 @@ async def is_rate_limited(bucket: str, ip: str) -> bool:
         now = time.time()
         if state.get("locked_until", 0) > now:
             return True
+        # expire old failure windows
         if now - state.get("window_start", 0) > RATE_LIMIT_WINDOW:
             _rate_state.pop(key, None)
             return False
@@ -1400,10 +1544,20 @@ async def clear_attempts(bucket: str, ip: str):
         _rate_state.pop(key, None)
 
 
+# -----------------------------
+# SLIDING-WINDOW RATE LIMITING (raw request volume, for every endpoint)
+# -----------------------------
+# Complements the lockout system above: this caps how many requests of any
+# kind (successful or not) a single IP can send to a given bucket in a
+# rolling window. In-memory and per-process - fine for a single Railway
+# instance; move to a shared store (Redis) if you ever scale to multiple
+# replicas, since each process would otherwise track its own counters.
+
 _volume_buckets: Dict[str, deque] = defaultdict(deque)
 
 
 def rate_limited(ip: str, bucket: str, max_requests: int, window_seconds: float) -> bool:
+    """Returns True if this ip/bucket combo has exceeded the allowed rate."""
     key = f"{bucket}:{ip}"
     now = time.monotonic()
     q = _volume_buckets[key]
@@ -1416,6 +1570,8 @@ def rate_limited(ip: str, bucket: str, max_requests: int, window_seconds: float)
 
 
 async def rate_bucket_janitor():
+    """Periodically clears out stale sliding-window buckets so memory
+    doesn't grow forever from one-off visitors."""
     while True:
         await asyncio.sleep(600)
         now = time.monotonic()
@@ -1425,6 +1581,14 @@ async def rate_bucket_janitor():
 
 
 def reject_if_oversized(request: Request, max_bytes: int) -> bool:
+    """Cheap pre-check using the declared Content-Length so we can bail
+    before buffering a huge/garbage body into memory. This is a courtesy
+    check, not a hard guarantee - a client can lie about Content-Length or
+    stream via chunked encoding, so the actual byte-length is still
+    re-checked after the body is read (as this app already does). For real
+    protection against giant bodies, also set a max request size at the
+    reverse proxy / platform level in front of this service.
+    """
     cl = request.headers.get("content-length")
     if cl is not None:
         try:
@@ -1434,6 +1598,13 @@ def reject_if_oversized(request: Request, max_bytes: int) -> bool:
             return True
     return False
 
+
+# -----------------------------
+# CONTENT FILTERING (links, Discord invites, profanity/slurs - including
+# spaced-out / leetspeak / accented evasion attempts)
+# -----------------------------
+# Applied to the open /logs endpoint and to /usernames, since both accept
+# free text from untrusted, unauthenticated clients.
 
 BLOCKED_SUBSTRINGS = {
     "discord", "discordgg", "discordcom", "discordappcom", "dscgg",
@@ -1448,25 +1619,68 @@ _LEET_TRANSLATION = str.maketrans({
 })
 
 _URL_PATTERN = re.compile(r"(https?://|www\.)", re.IGNORECASE)
+
+# Control characters (other than the ones we intentionally strip via
+# .strip()) have no legitimate reason to be in a username or a log line -
+# reject outright rather than silently stripping them. This permissive
+# version still allows tab/newline/CR through, so it's only appropriate for
+# genuinely multi-line fields (script code, announcements).
 _CONTROL_CHAR_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+# Strict version for single-line fields (log lines, usernames, WSS URLs,
+# blacklist entries) - blocks EVERY control character including tab,
+# newline, and carriage return. A newline embedded in a "single value" is
+# itself a format violation: it could forge extra /logs entries, corrupt
+# the one-line-per-username storage files, or otherwise smuggle structure
+# into a field that's supposed to be a single atomic value.
 _STRICT_SINGLE_LINE_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
+
+# A field consisting entirely of NUL bytes has no legitimate use anywhere,
+# including inside multi-line script code (Lua source is text, never
+# embeds NULs) - checked separately from _CONTROL_CHAR_PATTERN since script
+# code legitimately contains tabs/newlines that the permissive pattern
+# already allows.
 _NUL_BYTE_PATTERN = re.compile(r"\x00")
+
+# Any whitespace at all (regular space, tabs, newlines, unicode spaces,
+# etc). Usernames must be a single unbroken token - anything containing
+# whitespace is silently ignored rather than stored.
 _ANY_WHITESPACE_PATTERN = re.compile(r"\s")
 
+# ws:// or wss:// URL, plain hostname (letters/digits/dots/hyphens), an
+# optional port, and an optional path - anything outside this shape for
+# the /secure endpoint is rejected rather than stored verbatim.
 WSS_URL_PATTERN = re.compile(
     r"^wss?://[A-Za-z0-9.\-]{1,253}(:\d{1,5})?(/[A-Za-z0-9._~\-/%]*)?$"
 )
 
+# Shared shape check for usernames submitted to /usernames, /blacklisted,
+# and /unblacklisted: must start and end with a letter/digit, 3-32 chars
+# total, and allows single (non-repeated) underscores/periods in between -
+# covers both classic Roblox usernames and newer period-containing display
+# names, while still rejecting garbage.
 USERNAME_FORMAT_PATTERN = re.compile(r"^(?!.*[_.]{2})[A-Za-z0-9][A-Za-z0-9_.]{1,30}[A-Za-z0-9]$")
+
+# Paid keys are secrets.token_urlsafe() output (URL-safe base64 alphabet);
+# HWIDs are opaque client-generated identifiers. Neither has any legitimate
+# reason to be huge or to contain arbitrary characters - bound both before
+# they're used in any comparison or dict lookup.
 KEY_PARAM_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
 HWID_PARAM_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]{1,128}$")
 
 
 def normalize_field(text: str) -> str:
+    """Unicode-normalize a raw field (NFKC) so visually-similar characters
+    (full-width forms, combining marks, etc.) collapse to their plain ASCII
+    equivalent before we validate shape or scan for blocked content."""
     return unicodedata.normalize("NFKC", text)
 
 
 def _normalize_for_matching(text: str) -> str:
+    """Aggressively collapse a field down to bare lowercase letters/digits
+    (stripping accents, translating common leetspeak, removing spaces and
+    punctuation) purely for blocklist substring matching - NOT used for
+    display or storage."""
     stripped = unicodedata.normalize("NFKD", text)
     stripped = "".join(c for c in stripped if not unicodedata.combining(c))
     stripped = stripped.lower().translate(_LEET_TRANSLATION)
@@ -1474,6 +1688,8 @@ def _normalize_for_matching(text: str) -> str:
 
 
 def contains_blocked_content(*fields: str) -> bool:
+    """True if any field contains a link or a blocked word, including
+    common spaced-out / leetspeak / punctuation-obfuscated variants."""
     for field in fields:
         if _URL_PATTERN.search(field.lower()):
             return True
@@ -1485,20 +1701,27 @@ def contains_blocked_content(*fields: str) -> bool:
 
 
 def has_excessive_repetition(text: str, max_repeat: int = 6) -> bool:
+    """Flags obvious spam like 'aaaaaaaaaa' or '!!!!!!!!!!' - a single
+    character repeated more than max_repeat times in a row."""
     return bool(re.search(r"(.)\1{" + str(max_repeat) + r",}", text))
 
+
+# -----------------------------
+# INPUT VALIDATION HELPERS
+# -----------------------------
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9_\-]{3,32}$")
 SLUG_SOURCE_RE = re.compile(r"^[A-Za-z0-9 _\-]{1,48}$")
 RESERVED_USERNAMES = {"system", "admin", "administrator", "root", "sender", "owner", "sys"}
 
-MAX_GENERIC_BODY = 8 * 1024
-MAX_SCRIPT_BODY = 16 * 1024 * 1024
-MAX_FORM_BODY = 2 * 1024 * 1024 + (100 * 1024)
+# --- Body size limits (raised to accommodate larger scripts, ~2MB) ---
+MAX_GENERIC_BODY = 8 * 1024          # small text endpoints (logs/usernames/blacklist entries)
+MAX_SCRIPT_BODY = 16 * 1024 * 1024    # allow nested/protected Lua payloads up to 16MB
+MAX_FORM_BODY = 2 * 1024 * 1024 + (100 * 1024)  # form posts (script code + other fields), 2MB + 100KB overhead buffer
 MAX_PASSWORD_LEN = 128
-MAX_LOG_LEN = 4096
+MAX_LOG_LEN = 4096                   # a single /logs line - generous but bounded
 MAX_USERNAME_LEN = 32
-MAX_BANNER_LEN = 500
+MAX_BANNER_LEN = 500                 # /banner text shown on the /scripts page
 
 
 def is_valid_username(username: str) -> bool:
@@ -1520,6 +1743,10 @@ def make_slug(name: str) -> Optional[str]:
     return slug
 
 
+# -----------------------------
+# PASSWORD HASHING (PBKDF2-HMAC-SHA256, stdlib only)
+# -----------------------------
+
 PBKDF2_ITERATIONS = 200_000
 
 
@@ -1540,6 +1767,10 @@ def verify_password(password: str, stored: str) -> bool:
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS)
     return hmac.compare_digest(dk, expected)
 
+
+# -----------------------------
+# CORE CONFIG / FILES
+# -----------------------------
 
 USERNAME_FILE = os.path.join(DATA_DIR, "usernames.txt")
 BLACKLIST_FILE = os.path.join(DATA_DIR, "blacklisted.txt")
@@ -1576,6 +1807,9 @@ scripts_lock = asyncio.Lock()
 ws_count_lock = asyncio.Lock()
 banner_lock = asyncio.Lock()
 
+# These local files are now ONLY a read fallback (last-known-good mirror of
+# GitHub) - nothing in this app writes to them except get_github_script()
+# syncing down a fresh GitHub copy.
 DEXCHILLI_FILE = "dexchilli.lua"
 DEXFREE_FILE = "dexfree.lua"
 DEXSERVERHOP_FILE = "dexserverhop.lua"
@@ -1592,6 +1826,7 @@ DEFAULT_DEXPAID = "-- DexPaid loader script not set yet. Add scripts/dexpaid.lua
 DEFAULT_DEXAUTOROLL = "-- DexAutoRoll loader script not set yet. Add scripts/dexautoroll.lua to the GitHub repo."
 DEFAULT_DEXCODESNIPER = "-- DexCodeSniper loader script not set yet. Add scripts/dexcodesniper.lua to the GitHub repo."
 
+# Central place mapping each fixed script name to its local fallback file + default.
 FIXED_SCRIPTS: Dict[str, Dict[str, str]] = {
     "dexchilli": {"file": DEXCHILLI_FILE, "default": DEFAULT_DEXCHILLI, "label": "DexChilli"},
     "dexfree": {"file": DEXFREE_FILE, "default": DEFAULT_DEXFREE, "label": "DexFree"},
@@ -1602,6 +1837,8 @@ FIXED_SCRIPTS: Dict[str, Dict[str, str]] = {
     "dexcodesniper": {"file": DEXCODESNIPER_FILE, "default": DEFAULT_DEXCODESNIPER, "label": "DexCodeSniper"},
 }
 
+# Short taglines shown on the public /scripts page - purely cosmetic, no
+# behavior depends on this.
 SCRIPT_TAGLINES: Dict[str, str] = {
     "dexchilli": "Smooth, reliable, and free to run.",
     "dexfree": "The classic free loader - no key required.",
@@ -1636,6 +1873,10 @@ users: Dict[str, Dict[str, Any]] = {}
 scripts: Dict[str, Dict[str, Any]] = {}
 
 
+# -----------------------------
+# ATOMIC FILE HELPERS
+# -----------------------------
+
 def _atomic_write(path: str, content: str, mode: int = 0o600):
     tmp_path = f"{path}.tmp.{secrets.token_hex(4)}"
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -1647,6 +1888,14 @@ def _atomic_write(path: str, content: str, mode: int = 0o600):
         pass
 
 
+# -----------------------------
+# USERNAME FILE HELPERS
+# -----------------------------
+
+# Hard cap on how many usernames can be stored at once. Once a POST would
+# bring the list to (or past) this size, the app cleans out anything that
+# shouldn't be there and, if still at capacity, restarts the process (see
+# schedule_restart() / restart_process() below) so it comes back up clean.
 MAX_STORED_USERNAMES = 5000
 
 
@@ -1662,10 +1911,17 @@ def save_usernames_to_file(names: set):
 
 
 stored_usernames: set = load_usernames_from_file()
+# Lowercased mirror purely for case-insensitive dedup, so "Foo", "foo", and
+# "FOO" don't each get stored as separate entries.
 stored_usernames_lower: set = {u.lower() for u in stored_usernames}
 
 
 def _purge_bad_usernames_locked() -> bool:
+    """Defense-in-depth sweep of the in-memory username set: removes any
+    entry that is empty, contains whitespace, fails the username shape
+    check, or matches the blocklist (including obfuscated variants). Must
+    be called while already holding `lock`. Returns True if anything was
+    removed (i.e. the on-disk file needs rewriting)."""
     bad = set()
     for name in stored_usernames:
         if not name:
@@ -1686,6 +1942,10 @@ def _purge_bad_usernames_locked() -> bool:
 
 
 async def username_cleanup_janitor():
+    """Periodically sweeps the stored username list for anything that
+    shouldn't be there (bad words, whitespace, bad shape) and rewrites the
+    file if it had to remove something. Belt-and-suspenders on top of the
+    checks already done at write time in /usernames."""
     while True:
         await asyncio.sleep(300)
         async with lock:
@@ -1695,6 +1955,9 @@ async def username_cleanup_janitor():
 
 
 def restart_process():
+    """Re-exec this process in place. Used when the username list hits its
+    cap so the app comes back up with a clean, freshly-loaded state instead
+    of just silently refusing new entries forever."""
     print("[USERNAMES] Reached MAX_STORED_USERNAMES - restarting process.")
     try:
         sys.stdout.flush()
@@ -1704,9 +1967,14 @@ def restart_process():
 
 
 async def schedule_restart(delay: float = 1.0):
+    """Give the current HTTP response a moment to actually get flushed to
+    the client before we tear down and re-exec the process."""
     await asyncio.sleep(delay)
     restart_process()
 
+# -----------------------------
+# BLACKLIST FILE HELPERS
+# -----------------------------
 
 def load_blacklist_from_file() -> set:
     if not os.path.exists(BLACKLIST_FILE):
@@ -1721,6 +1989,13 @@ def save_blacklist_to_file(names: set):
 
 blacklisted_usernames: set = load_blacklist_from_file()
 
+# -----------------------------
+# BANNER FILE HELPERS
+# -----------------------------
+# The banner is a short, admin-controlled line of text shown at the top of
+# the public /scripts page. It's persisted to disk (unlike the ephemeral
+# /announcements popup) so it survives restarts. Only POST /banner (with a
+# valid X-Api-Key) can change it - there is no unauthenticated write path.
 
 def load_banner_from_file() -> str:
     if not os.path.exists(BANNER_FILE):
@@ -1733,11 +2008,23 @@ def save_banner_to_file(text: str):
     _atomic_write(BANNER_FILE, text, mode=0o644)
 
 
+def load_announcement_from_file() -> str:
+    if not os.path.exists(ANNOUNCEMENT_FILE):
+        return ""
+    try:
+        with open(ANNOUNCEMENT_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
 def save_announcement_to_file(text: str):
     _atomic_write(ANNOUNCEMENT_FILE, text, mode=0o644)
 
 banner_text: str = load_banner_from_file()
 
+# -----------------------------
+# CHAT ADMIN SETTINGS (enable/disable Chat + ME-Chat independently)
+# -----------------------------
 CHAT_SETTINGS_FILE = os.path.join(CHAT_DATA_DIR, "chat_settings.json")
 chat_settings_lock = asyncio.Lock()
 
@@ -1762,6 +2049,9 @@ _chat_settings_initial = _load_chat_settings()
 chat_enabled: bool = _chat_settings_initial["chat_enabled"]
 me_chat_enabled: bool = _chat_settings_initial["me_chat_enabled"]
 
+# -----------------------------
+# GENERIC FILE HELPERS
+# -----------------------------
 
 def load_file(path: str, default: str) -> str:
     if not os.path.exists(path):
@@ -1774,8 +2064,11 @@ def load_file(path: str, default: str) -> str:
 def save_file(path: str, content: str):
     _atomic_write(path, content, mode=0o644)
 
+# -----------------------------
+# LOGS FILE HELPERS
+# -----------------------------
 
-MAX_STORED_LOGS = 5000
+MAX_STORED_LOGS = 5000  # cap memory/disk growth
 
 
 def load_logs_from_file() -> list:
@@ -1792,6 +2085,9 @@ def append_log_to_file(entry: str):
 
 stored_logs: list = load_logs_from_file()
 
+# -----------------------------
+# DEXPAID KEYS HELPERS (GLOBAL)
+# -----------------------------
 
 def load_dexpaid_keys_from_file() -> Dict[str, float]:
     if not os.path.exists(DEXPAID_KEYS_FILE):
@@ -1812,6 +2108,7 @@ dexpaid_keys = load_dexpaid_keys_from_file()
 
 
 def generate_paid_key(length: int = 24) -> str:
+    # cryptographically secure token, not the `random` module
     return secrets.token_urlsafe(length)[:length]
 
 
@@ -1822,7 +2119,7 @@ def cleanup_expired_paid_keys():
         dexpaid_keys.pop(k, None)
 
 
-MAX_KEY_DURATION_HOURS = 24 * 365
+MAX_KEY_DURATION_HOURS = 24 * 365  # 1 year cap, prevents absurd/overflow values
 
 
 def parse_duration_hours(raw: str) -> Optional[float]:
@@ -1834,6 +2131,10 @@ def parse_duration_hours(raw: str) -> Optional[float]:
         return None
     return hours
 
+
+# -----------------------------
+# USERS / SCRIPTS HELPERS
+# -----------------------------
 
 def load_users_from_file() -> Dict[str, Dict[str, Any]]:
     if not os.path.exists(USERS_FILE):
@@ -1908,6 +2209,9 @@ RESERVED_PATHS_LOWER = {p.lower() for p in RESERVED_PATHS}
 
 
 def ensure_builtin_scripts():
+    """Registers the fixed scripts in the `scripts` dict for the admin
+    overview listing only. Their actual served content always comes from
+    get_github_script() at request time, never from this dict."""
     builtin = [
         ("DexFree", "dexfree", DEXFREE_FILE, DEFAULT_DEXFREE),
         ("DexChilli", "dexchilli", DEXCHILLI_FILE, DEFAULT_DEXCHILLI),
@@ -1939,6 +2243,14 @@ def ensure_builtin_scripts():
 
 ensure_builtin_scripts()
 
+# -----------------------------
+# GLOBAL HTTP MIDDLEWARE — applies to every plain HTTP request (not the
+# WebSocket upgrade, which is handled separately below): an overall per-IP
+# request budget on top of each endpoint's own tighter limit, a standard
+# set of defensive response headers, and a catch-all so nothing ever leaks
+# a stack trace to a client.
+# -----------------------------
+
 GLOBAL_HTTP_RATE_LIMIT = 200
 GLOBAL_HTTP_RATE_WINDOW = 10.0
 
@@ -1947,6 +2259,11 @@ GLOBAL_HTTP_RATE_WINDOW = 10.0
 async def global_rate_limit_and_security_headers(request: Request, call_next):
     ip = _client_ip(request)
 
+    # The private Discord bridge is an internal job transport. Do not apply
+    # the site's normal per-IP request budget to bridge traffic; the bridge
+    # worker polls it continuously and must be able to receive/submit jobs
+    # without this middleware returning 429. Authentication is still checked
+    # by each bridge endpoint below.
     is_bridge_request = request.url.path.startswith("/bridge/")
 
     if not is_bridge_request and rate_limited(
@@ -1962,9 +2279,12 @@ async def global_rate_limit_and_security_headers(request: Request, call_next):
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
     )
+    # Session-bearing / dynamic pages should never be cached by an
+    # intermediary; static loader responses are short-lived anyway.
     if "Cache-Control" not in response.headers:
         response.headers["Cache-Control"] = "no-store"
 
+    # Consistent DexNotifier visual skin for every HTML endpoint.
     media = response.headers.get("content-type", "")
     if "text/html" in media and getattr(response, "body", None):
         skin = b"""<style id="dex-global-skin">
@@ -2002,11 +2322,13 @@ hr{border:0!important;border-top:1px solid rgba(75,94,130,.25)!important}
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
+    # Never leak stack traces / internals to the client.
     print(f"❌ Unhandled exception on {request.url.path}: {exc}")
     return PlainTextResponse("Something went wrong. Please try again.", status_code=500)
 
 
 async def github_script_refresh_loop():
+    """Refresh all script sources once per minute without blocking requests."""
     while True:
         try:
             results = await refresh_all_github_scripts()
@@ -2028,6 +2350,9 @@ async def startup_event():
     asyncio.create_task(username_cleanup_janitor())
     asyncio.create_task(github_script_refresh_loop())
 
+# -----------------------------
+# /secure ENDPOINT (now key-protected - previously open to anyone)
+# -----------------------------
 current_wss: Optional[str] = None
 
 SECURE_RATE_LIMIT = 20
@@ -2082,6 +2407,13 @@ async def get_wss(request: Request):
     return {"wss": current_wss}
 
 
+# -----------------------------
+# WEBSOCKET ENDPOINT (VIEWERS + SENDER) - requires a key to connect, capped
+# per IP, and now rate-limited on both connection attempts and message
+# volume so a single client can't flood the broadcast or brute-force the
+# in-band sender-auth message.
+# -----------------------------
+
 MAX_WS_CONNECTIONS_PER_IP = 5
 WS_CONNECT_RATE_LIMIT = 20
 WS_CONNECT_RATE_WINDOW = 60.0
@@ -2103,6 +2435,8 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=4429)
         return
 
+    # Require a valid key just to open the connection at all - previously
+    # anyone could connect anonymously and read every broadcast log.
     key_param = websocket.query_params.get("key", "")
     if not is_valid_key(key_param):
         await websocket.close(code=4401)
@@ -2136,6 +2470,7 @@ async def websocket_endpoint(websocket: WebSocket):
             except Exception:
                 break
 
+            # basic message-size guard
             if len(msg) > MAX_GENERIC_BODY:
                 continue
 
@@ -2191,6 +2526,12 @@ async def websocket_endpoint(websocket: WebSocket):
             if ws_ip_connection_counts[ip] <= 0:
                 ws_ip_connection_counts.pop(ip, None)
 
+# -----------------------------
+# LOGS ENDPOINT (HTTP -> WS) - stays key-less per requirements, but is now
+# rate-limited AND content-filtered: control characters, links/Discord
+# invites, and profanity/slurs (including obfuscated variants) cause the
+# post to be rejected outright rather than stored or broadcast.
+# -----------------------------
 
 LOGS_POST_RATE_LIMIT = 20
 LOGS_POST_RATE_WINDOW = 10.0
@@ -2200,6 +2541,11 @@ LOGS_GET_RATE_WINDOW = 10.0
 
 @app.post("/logs")
 async def post_logs(request: Request):
+    # Intentionally NO key check here - /logs is one of the POST endpoints
+    # that stays open per updated requirements (like /usernames below).
+    # Because it's open, it gets its own rate limit and strict content
+    # filtering so it can't be used to spam the WS broadcast with links,
+    # slurs, or garbage.
     ip = _client_ip(request)
     if rate_limited(ip, "logs_post", max_requests=LOGS_POST_RATE_LIMIT, window_seconds=LOGS_POST_RATE_WINDOW):
         return PlainTextResponse("RATE_LIMITED", status_code=429)
@@ -2255,6 +2601,32 @@ async def get_logs(request: Request):
     async with logs_lock:
         return PlainTextResponse("\n".join(stored_logs))
 
+# -----------------------------
+# USERNAME ENDPOINTS
+#
+# POST is now OPEN - no X-Api-Key required at all. Because anyone can hit
+# it, it leans much harder on the layered defenses below instead of an
+# auth check:
+#   - tight sliding-window rate limit per IP (volume)
+#   - a separate failed-attempt lockout per IP for rejected submissions
+#     (so a script hammering it with garbage gets locked out, not just
+#     slowed down)
+#   - strict shape check (letters/digits/_/- only, 3-32 chars)
+#   - ANY whitespace at all (space, tab, newline, unicode space) means the
+#     submission is silently ignored - nothing is stored, no error is
+#     raised, it just doesn't get added
+#   - full bad-word / slur / link / Discord-invite filter (including
+#     leetspeak + accent + spacing evasion) - any match is rejected and
+#     never stored
+#   - spam-repetition filter ("aaaaaaaaa", "!!!!!!!!!")
+#   - reserved-name + case-insensitive dedup
+#   - hard cap of MAX_STORED_USERNAMES (5000): once reached, the list is
+#     swept for anything that shouldn't be there, and if it's still at
+#     capacity after that, the process restarts itself so it comes back up
+#     clean
+#
+# GET stays public and rate-limited, same as before.
+# -----------------------------
 
 USERNAME_POST_RATE_LIMIT = 8
 USERNAME_POST_RATE_WINDOW = 10.0
@@ -2266,9 +2638,13 @@ USERNAME_GET_RATE_WINDOW = 10.0
 async def add_username(request: Request):
     ip = _client_ip(request)
 
+    # Volume-based limit (applies to every request, valid or not).
     if rate_limited(ip, "username_post", max_requests=USERNAME_POST_RATE_LIMIT, window_seconds=USERNAME_POST_RATE_WINDOW):
         return PlainTextResponse("RATE_LIMITED", status_code=429)
 
+    # Failed-attempt lockout (applies specifically to rejected submissions -
+    # this is what actually stops someone from grinding away at the filter
+    # with garbage now that there's no key gating the endpoint).
     if await is_rate_limited("username_reject", ip):
         return PlainTextResponse("RATE_LIMITED", status_code=429)
 
@@ -2284,6 +2660,10 @@ async def add_username(request: Request):
     if not raw_username or len(raw_username) > MAX_USERNAME_LEN:
         return PlainTextResponse("EMPTY")
 
+    # Any whitespace anywhere (not just leading/trailing, which .strip()
+    # already removed) means this isn't a single real username token -
+    # ignore it outright, don't store it, don't even count it as a
+    # "rejection" since it's not an attack signal on its own.
     if _ANY_WHITESPACE_PATTERN.search(raw_username):
         return PlainTextResponse("IGNORED_CONTAINS_WHITESPACE")
 
@@ -2293,10 +2673,14 @@ async def add_username(request: Request):
 
     username = normalize_field(raw_username)
 
+    # Re-check whitespace after normalization too (NFKC can turn some
+    # unicode spacing characters into a plain space).
     if _ANY_WHITESPACE_PATTERN.search(username):
         return PlainTextResponse("IGNORED_CONTAINS_WHITESPACE")
 
     if not is_valid_username(username):
+        # is_valid_username() already covers shape, reserved names, and the
+        # blocked-content filter (bad words / slurs / links) in one place.
         await record_failed_attempt("username_reject", ip)
         return PlainTextResponse("REJECTED_INVALID_OR_BLOCKED", status_code=400)
 
@@ -2311,6 +2695,8 @@ async def add_username(request: Request):
             stored_usernames.add(username)
             stored_usernames_lower.add(username.lower())
 
+        # Defense-in-depth: sweep out anything bad that might already be in
+        # the set (e.g. a legacy entry from before this filter existed).
         _purge_bad_usernames_locked()
 
         save_usernames_to_file(stored_usernames)
@@ -2321,6 +2707,9 @@ async def add_username(request: Request):
     await clear_attempts("username_reject", ip)
 
     if should_restart:
+        # Let this response go out first, then tear down and re-exec so the
+        # app comes back up with a clean slate instead of just silently
+        # refusing every new username forever.
         asyncio.create_task(schedule_restart())
         return PlainTextResponse("OK_LIMIT_REACHED_RESTARTING")
 
@@ -2335,6 +2724,10 @@ async def get_usernames(request: Request):
     async with lock:
         return PlainTextResponse("\n".join(sorted(stored_usernames)))
 
+# -----------------------------
+# BLACKLIST ENDPOINTS - writes key-protected + rate-limited, reads public
+# but rate-limited too.
+# -----------------------------
 
 BLACKLIST_POST_RATE_LIMIT = 15
 BLACKLIST_POST_RATE_WINDOW = 10.0
@@ -2410,6 +2803,10 @@ async def get_blacklisted(request: Request):
     async with blacklist_lock:
         return PlainTextResponse("\n".join(sorted(blacklisted_usernames)))
 
+# -----------------------------
+# ANNOUNCEMENTS ENDPOINT - POST key-protected + rate-limited, GET public
+# but rate-limited (generously, since clients poll it).
+# -----------------------------
 
 ANNOUNCEMENT_POST_RATE_LIMIT = 10
 ANNOUNCEMENT_POST_RATE_WINDOW = 10.0
@@ -2457,6 +2854,12 @@ async def get_announcement(request: Request):
     async with announcement_lock:
         return PlainTextResponse(announcement_text)
 
+# -----------------------------
+# /banner ENDPOINT - the persistent banner shown at the top of /scripts.
+# POST is key-protected + rate-limited (this is the endpoint the admin
+# panel instructions point at); GET is public + rate-limited so the
+# /scripts page (or anything else) can read the current value.
+# -----------------------------
 
 BANNER_POST_RATE_LIMIT = 10
 BANNER_POST_RATE_WINDOW = 10.0
@@ -2472,6 +2875,9 @@ async def post_banner(request: Request):
     if rate_limited(ip, "banner_post", max_requests=BANNER_POST_RATE_LIMIT, window_seconds=BANNER_POST_RATE_WINDOW):
         return PlainTextResponse("RATE_LIMITED", status_code=429)
 
+    # Key required - this is the only write path for the banner. No key,
+    # no post: an invalid or missing X-Api-Key is rejected outright and
+    # nothing is ever stored.
     api_key = request.headers.get("X-Api-Key", "")
     if not is_valid_key(api_key):
         await record_failed_attempt("banner_auth", ip)
@@ -2489,6 +2895,9 @@ async def post_banner(request: Request):
     if len(msg) > MAX_BANNER_LEN:
         return PlainTextResponse("TOO_LONG", status_code=400)
 
+    # Banner is rendered on a public page - block control characters even
+    # though the admin is trusted, as defense in depth against a leaked/
+    # mistyped key being used to inject junk into stored HTML-adjacent text.
     if _CONTROL_CHAR_PATTERN.search(msg):
         return PlainTextResponse("REJECTED_INVALID_CHARACTERS", status_code=400)
 
@@ -2508,6 +2917,9 @@ async def get_banner(request: Request):
     async with banner_lock:
         return PlainTextResponse(banner_text)
 
+# -----------------------------
+# DEXPAID GLOBAL KEY GENERATION - moved out of /admin (which is view-only now)
+# -----------------------------
 
 DEXPAID_KEYS_RATE_LIMIT = 10
 DEXPAID_KEYS_RATE_WINDOW = 60.0
@@ -2554,6 +2966,9 @@ async def create_dexpaid_key(request: Request):
         "loadstring": last_generated_paid_loadstring,
     })
 
+# -----------------------------
+# GITHUB CACHE REFRESH - moved out of /admin (which is view-only now)
+# -----------------------------
 
 GITHUB_REFRESH_RATE_LIMIT = 5
 GITHUB_REFRESH_RATE_WINDOW = 60.0
@@ -2576,6 +2991,11 @@ async def refresh_github(request: Request):
 
 @app.post("/admin/github/refresh")
 async def admin_refresh_github(request: Request):
+    """Admin-dashboard version of /github/refresh: authenticated with the
+    admin session cookie (which the dashboard already has) instead of the
+    separate X-Api-Key, and it eagerly re-fetches every script right away so
+    the button can show real success/failure per script instead of just
+    clearing the cache and hoping."""
     ip = _client_ip(request)
     if not require_admin_session(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -2589,6 +3009,9 @@ async def admin_refresh_github(request: Request):
     all_ok = all(r.get("ok") for r in results.values())
     return JSONResponse({"ok": all_ok, "results": results})
 
+# -----------------------------
+# HOME PAGE (ROOT)
+# -----------------------------
 
 INDEX_RATE_LIMIT = 30
 INDEX_RATE_WINDOW = 10.0
@@ -2596,6 +3019,12 @@ INDEX_RATE_WINDOW = 10.0
 
 @app.get("/favicon.ico")
 async def favicon_ico():
+    # Browsers/tabs request /favicon.ico directly (ignoring the <link> tags in
+    # <head>) whenever they can't resolve the icon another way. Without this
+    # explicit route, that request fell through to the catch-all dynamic
+    # loader below, which returned a "Private Script" text response instead
+    # of an image - that's why the tab showed a default grey globe instead
+    # of the DexNotifier icon. Redirecting here fixes it everywhere at once.
     return RedirectResponse(url=DEX_FAVICON_URL, status_code=307)
 
 
@@ -2695,7 +3124,9 @@ async def index(request: Request):
     """
     return HTMLResponse(html_page)
 
-
+# -----------------------------
+# /scripts PAGE - public, read-only showcase of every free/public loader
+# -----------------------------
 SCRIPTS_GET_RATE_LIMIT = 30
 SCRIPTS_GET_RATE_WINDOW = 10.0
 
@@ -2722,6 +3153,7 @@ SCRIPTS_PAGE_HTML = """
             color: #e6e6e6;
         }}
         .wrap {{ max-width: 1180px; margin: 0 auto; padding: 48px 22px 60px; }}
+
         .hero {{ text-align: center; margin-bottom: 34px; }}
         .hero h1 {{
             margin: 0; font-size: 46px; font-weight: 800; letter-spacing: 0.08em;
@@ -2737,12 +3169,14 @@ SCRIPTS_PAGE_HTML = """
         }}
         .pill.green {{ background: rgba(0,230,118,0.14); border-color: rgba(0,230,118,0.35); color: #e6fff3; }}
         .pill.purple {{ background: rgba(124,77,255,0.14); border-color: rgba(124,77,255,0.35); color: #f0e6ff; }}
+
         .banner {{
             max-width: 900px; margin: 0 auto 34px; padding: 14px 20px; border-radius: 14px;
             background: linear-gradient(135deg, rgba(124,77,255,0.16), rgba(79,195,247,0.16));
             border: 1px solid rgba(124,77,255,0.35); color: #f2f2ff; font-size: 14px;
             text-align: center; box-shadow: 0 12px 30px rgba(0,0,0,0.35);
         }}
+
         .grid {{
             display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 22px;
         }}
@@ -2766,6 +3200,7 @@ SCRIPTS_PAGE_HTML = """
         .endpoint-row code {{
             background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 6px; color: #c9c9e0;
         }}
+
         .code-row {{
             display: flex; align-items: center; gap: 10px;
             background: rgba(8,8,13,0.95); border: 1px solid #262636; border-radius: 12px;
@@ -2783,11 +3218,13 @@ SCRIPTS_PAGE_HTML = """
         }}
         .copy-btn:hover {{ opacity: 0.85; }}
         .copy-btn.copied {{ background: linear-gradient(135deg, var(--accent4), #00c853); }}
+
         .paid-note {{
             max-width: 900px; margin: 34px auto 0; text-align: center; font-size: 13px; color: #8a8aa0;
         }}
         .paid-note a {{ color: var(--accent1); text-decoration: none; }}
         .paid-note a:hover {{ text-decoration: underline; }}
+
         footer {{ text-align: center; margin-top: 46px; font-size: 12px; color: #5c5c70; }}
     </style>
 </head>
@@ -2802,9 +3239,9 @@ SCRIPTS_PAGE_HTML = """
                 <span class="pill purple">Always up to date</span>
             </div>
         </div>
-        {{banner_html}}
+        {banner_html}
         <div class="grid">
-            {{cards}}
+            {cards}
         </div>
         <p class="paid-note">Looking for the paid script? Head to <a href="/dexpaid?key=YOUR_KEY">/dexpaid</a> with your key instead.</p>
         <footer>Dex API</footer>
@@ -2886,27 +3323,3975 @@ async def scripts_page(request: Request):
         page = build_scripts_page_html()
     return HTMLResponse(page)
 
+# -----------------------------
+# /HOME USER SCRIPT PANEL
+# -----------------------------
 
-# ─────────────────────────────────────────────────────────────────────────────
-# NOTE: The HOME, ADMIN, DISCORD OAUTH, LOADER ENDPOINTS, OBFUSCATOR,
-# CHAT, BRIDGE, and GAME-CHAT sections below are identical to the original
-# source. Only @app.post("/obfuscate") / obfuscate_api has been changed.
-# To keep this file at a manageable size for the diff, the remainder of
-# the original source follows verbatim from this point.
+HOME_BASE_HTML = """
+<!DOCTYPE html>
+<html>
+<head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536">
+    <title>Dex Home</title>
+    <style>
+        :root {{ --bg: #050509; --card-bg: #0f0f16; --accent1: #4fc3f7; --accent2: #7c4dff; --accent3: #ff5252; --accent4: #00e676; --border: #1c1c24; }}
+        * {{ box-sizing: border-box; }}
+        body {{
+            background: radial-gradient(circle at top left, #202040 0, #050509 40%, #000000 100%),
+                linear-gradient(135deg, rgba(79,195,247,0.08), rgba(255,82,82,0.08));
+            color:#e6e6e6; font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif; margin:0;
+        }}
+        .wrap {{ max-width:1200px; margin:40px auto; padding:0 20px 40px; }}
+        .card {{
+            background: linear-gradient(135deg, rgba(15,15,22,0.95), rgba(10,10,18,0.95));
+            border-radius:20px; padding:22px; margin-bottom:24px; border:1px solid rgba(79,195,247,0.18);
+            box-shadow:0 24px 60px rgba(0,0,0,0.75); position:relative; overflow:hidden;
+        }}
+        h1,h2 {{ margin-top:0; }}
+        h1 {{ font-size:26px; letter-spacing:0.04em; }}
+        h2 {{ font-size:20px; }}
+        input[type=password], input[type=text] {{
+            width:100%; padding:12px; border-radius:12px; border:1px solid #262636;
+            background:rgba(8,8,13,0.95); color:#e6e6e6; outline:none;
+        }}
+        textarea {{
+            width:100%; min-height:180px; background:rgba(8,8,13,0.95); color:#9eff9e;
+            border-radius:12px; border:1px solid #262636; padding:12px; font-family:monospace;
+            font-size:14px; outline:none;
+        }}
+        button {{
+            padding:10px 22px; border-radius:999px; border:none; cursor:pointer; font-weight:600;
+            background:linear-gradient(135deg,var(--accent1),var(--accent2)); color:#050509; margin-top:10px;
+        }}
+        .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:20px; }}
+        .label {{ font-size:13px; color:#b0b0c0; margin-bottom:6px; }}
+        .pill {{
+            display:inline-block; padding:4px 10px; border-radius:999px; font-size:11px;
+            background:rgba(79,195,247,0.18); border:1px solid rgba(79,195,247,0.4); color:#e6f7ff; margin-right:6px;
+        }}
+        .pill.red {{ background:rgba(255,82,82,0.18); border-color:rgba(255,82,82,0.4); color:#ffe6e6; }}
+        .pill.green {{ background:rgba(0,230,118,0.18); border-color:rgba(0,230,118,0.4); color:#e6fff3; }}
+        .pill.purple {{ background:rgba(124,77,255,0.18); border-color:rgba(124,77,255,0.4); color:#f0e6ff; }}
+        .small-text {{ font-size:12px; color:#8a8aa0; }}
+        .logs-box {{
+            background:rgba(8,8,13,0.95); border-radius:12px; border:1px solid #262636; padding:12px;
+            font-family:monospace; font-size:12px; max-height:240px; overflow:auto; white-space:pre-wrap;
+        }}
+        /* ── Obfustucate History ── */
+        .obf-history-card{{margin-top:0}}
+        .obf-history-header{{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:16px}}
+        .obf-history-search-row{{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}}
+        .obf-search-wrap{{position:relative;flex:1;min-width:200px}}
+        .obf-search-wrap input{{width:100%;padding:9px 12px 9px 36px!important;font-size:12px!important;border-radius:11px!important}}
+        .obf-search-icon{{position:absolute;left:11px;top:50%;transform:translateY(-50%);width:14px;height:14px;pointer-events:none;color:#5a6478}}
+        .obf-history-list{{display:grid;gap:9px;max-height:660px;overflow-y:auto;padding-right:3px}}
+        .obf-history-list::-webkit-scrollbar{{width:5px}}.obf-history-list::-webkit-scrollbar-track{{background:transparent}}.obf-history-list::-webkit-scrollbar-thumb{{background:rgba(255,255,255,.1);border-radius:99px}}
+        .obf-history-item{{padding:13px 15px;border:1px solid rgba(255,255,255,.07);border-radius:13px;background:rgba(6,7,12,.58);transition:transform .18s ease,border-color .18s ease,background .18s ease}}
+        .obf-history-item:hover{{transform:translateY(-2px);border-color:rgba(139,92,246,.28);background:rgba(10,11,18,.72)}}
+        .obf-history-top{{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}}
+        .obf-history-left{{display:flex;align-items:center;gap:10px;min-width:0;flex:1}}
+        .obf-history-num{{flex:0 0 auto;width:30px;height:30px;display:grid;place-items:center;border-radius:9px;background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.18);color:#c4b5fd;font-size:10px;font-weight:900}}
+        .obf-history-left strong.obf-id-text{{display:block;color:#e2e8f0;font-size:12px;font-weight:900;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px}}
+        .obf-history-left .small-text{{display:block;margin-top:2px;font-size:11px;color:#5a6478}}
+        .obf-history-actions{{display:flex;align-items:center;gap:6px;flex-shrink:0}}
+        .obf-link-btn{{display:inline-flex!important;align-items:center;gap:5px;padding:7px 11px;border-radius:9px;font-size:11px!important;font-weight:850!important;border:1px solid transparent!important;transition:background .18s ease,border-color .18s ease,color .18s ease,transform .18s ease!important;background:none!important;box-shadow:none!important;white-space:nowrap}}
+        .obf-link-btn:hover{{transform:translateY(-1px)}}
+        .obf-raw-link{{background:rgba(34,211,238,.07)!important;border-color:rgba(34,211,238,.18)!important;color:#67e8f9!important}}
+        .obf-raw-link:hover{{background:rgba(34,211,238,.14)!important;border-color:rgba(34,211,238,.3)!important;color:#fff!important}}
+        .obf-src-link{{background:rgba(139,92,246,.08)!important;border-color:rgba(139,92,246,.2)!important;color:#c4b5fd!important}}
+        .obf-src-link:hover{{background:rgba(139,92,246,.16)!important;border-color:rgba(139,92,246,.35)!important;color:#fff!important}}
+        .obf-history-meta{{display:flex;align-items:center;gap:7px;margin-top:9px;flex-wrap:wrap}}
+        .obf-meta-label{{color:#3e4a5a;font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}}
+        .obf-meta-sep{{color:#2d3748;font-size:10px}}
+        .obf-sha,.obf-id-small{{color:#7c6fcd;font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:rgba(139,92,246,.07);border:1px solid rgba(139,92,246,.12);padding:2px 7px;border-radius:6px}}
+        @media(max-width:680px){{.obf-history-actions{{flex-direction:column;align-items:flex-start}}.obf-history-left strong.obf-id-text{{max-width:140px}}}}
+        .error {{ margin-top:10px; color:#ff5252; font-size:13px; }}
+        .success {{ margin-top:10px; color:#00e676; font-size:13px; }}
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        {body}
+    </div>
+</body>
+</html>
+"""
+
+
+def build_home_logged_out_body(message: str = "") -> str:
+    msg_html = ""
+    if message:
+        msg_html = f'<div class="error">{html.escape(message)}</div>'
+    discord_html = ""
+    if discord_oauth_configured():
+        discord_html = """
+        <div class="card" style="margin-bottom:16px;text-align:center;">
+            <h2 style="margin-top:0;">Continue with Discord</h2>
+            <p class="small-text">Sign in with your Discord account (Dex Bot) - one click, no password needed.</p>
+            <a href="/login" style="display:inline-flex;align-items:center;justify-content:center;gap:10px;margin-top:10px;padding:13px 22px;border-radius:13px;background:#5865F2;color:#fff!important;font-weight:900;text-decoration:none;">
+                <svg width="20" height="20" viewBox="0 0 127.14 96.36" fill="currentColor" aria-hidden="true"><path d="M107.7,8.07A105.15,105.15,0,0,0,81.47,0a72.06,72.06,0,0,0-3.36,6.83A97.68,97.68,0,0,0,49,6.83,72.37,72.37,0,0,0,45.64,0,105.89,105.89,0,0,0,19.39,8.09C2.79,32.65-1.71,56.6.54,80.21h0A105.73,105.73,0,0,0,32.71,96.36,77.7,77.7,0,0,0,39.6,85.25a68.42,68.42,0,0,1-10.85-5.18c.91-.66,1.8-1.34,2.66-2a75.57,75.57,0,0,0,64.32,0c.87.71,1.76,1.39,2.66,2a68.68,68.68,0,0,1-10.87,5.19,77,77,0,0,0,6.89,11.1A105.25,105.25,0,0,0,126.6,80.22h0C129.24,52.84,122.09,29.11,107.7,8.07ZM42.45,65.69C36.18,65.69,31,60,31,53s5-12.74,11.43-12.74S54,46,53.89,53,48.84,65.69,42.45,65.69Zm42.24,0C78.41,65.69,73.25,60,73.25,53s5-12.74,11.44-12.74S96.23,46,96.12,53,91.08,65.69,84.69,65.69Z"/></svg>
+                Continue with Discord
+            </a>
+        </div>""" if False else f"""
+        <div class="card" style="margin-bottom:16px;">
+            <h2 style="margin-top:0;">Continue with Discord</h2>
+            <p class="small-text">Sign in with your Discord account (Dex Bot) - one click, no password needed.</p>
+            <a href="/login" style="display:inline-flex;align-items:center;justify-content:center;gap:10px;margin-top:10px;padding:13px 22px;border-radius:13px;background:#5865F2;color:#fff!important;font-weight:900;text-decoration:none;">
+                Continue with Discord
+            </a>
+        </div>"""
+    else:
+        discord_html = """
+        <div class="card" style="margin-bottom:16px;">
+            <h2 style="margin-top:0;">Continue with Discord</h2>
+            <p class="small-text">Discord login isn't configured on this deployment yet. Set DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, and DISCORD_REDIRECT_URI in Railway to enable it.</p>
+        </div>"""
+    body = f"""
+    <div class="card">
+        <h1>Dex Home - Login / Register</h1>
+        <p class="label">
+            <span class="pill">Public Script Loader</span>
+            <span class="pill green">Create Your Own Endpoint</span>
+            <span class="pill purple">Paid / Free & HWID Lock</span>
+        </p>
+        <p class="label">Login or create an account to manage your scripts and get loadstrings.</p>
+        {msg_html}
+    </div>
+    {discord_html}
+    <div class="card">
+        <p class="small-text" style="margin:0 0 14px;">Or use a username and password instead:</p>
+        <div class="grid">
+            <div>
+                <h2>Login</h2>
+                <form method="post" action="/home">
+                    <input type="hidden" name="action" value="login">
+                    <label class="label">Username</label>
+                    <input type="text" name="username" placeholder="Your username" maxlength="32">
+                    <label class="label">Password</label>
+                    <input type="password" name="password" placeholder="Your password" maxlength="128">
+                    <button type="submit">Login</button>
+                </form>
+            </div>
+            <div>
+                <h2>Register</h2>
+                <form method="post" action="/home">
+                    <input type="hidden" name="action" value="register">
+                    <label class="label">Username (3-32 chars: letters, numbers, _ -)</label>
+                    <input type="text" name="username" placeholder="Choose a username" maxlength="32">
+                    <label class="label">Password (min 8 chars)</label>
+                    <input type="password" name="password" placeholder="Choose a strong password" maxlength="128">
+                    <button type="submit">Create Account</button>
+                </form>
+            </div>
+        </div>
+    </div>
+    """
+    return body
+
+
+def build_home_logged_in_body(username: str, message: str = "", success: str = "") -> str:
+    msg_html = ""
+    if message:
+        msg_html += f'<div class="error">{html.escape(message)}</div>'
+    if success:
+        msg_html += f'<div class="success">{html.escape(success)}</div>'
+
+    user_scripts = [s for s in scripts.values() if s.get("owner") == username]
+    cards_html = ""
+    for s in user_scripts:
+        slug = s["slug"]
+        name = s["name"]
+        code = html.escape(s.get("code", ""))
+        is_paid = s.get("is_paid", False)
+        hwid_lock = s.get("hwid_lock", False)
+        last_key = s.get("last_key", "")
+        last_loadstring = s.get("last_loadstring", "")
+        paid_text = "Paid" if is_paid else "Free"
+        hwid_text = "HWID Locked" if hwid_lock else "HWID Unlocked"
+        endpoint = f"{BASE_URL}/{slug}"
+        cards_html += f"""
+        <div class="card">
+            <h2>{html.escape(name)} ({html.escape(slug)})</h2>
+            <p class="label">
+                <span class="pill {'red' if is_paid else 'green'}">{paid_text}</span>
+                <span class="pill {'purple' if hwid_lock else ''}">{hwid_text}</span>
+            </p>
+            <p class="small-text">Endpoint: <code>{html.escape(endpoint)}</code></p>
+            <p class="small-text">Executor loadstring:</p>
+            <div class="logs-box">
+loadstring(game:HttpGet("{html.escape(endpoint)}"))()
+            </div>
+            <p class="small-text" style="margin-top:10px;">Last generated key:</p>
+            <div class="logs-box">{html.escape(last_key or 'No key yet.')}</div>
+            <p class="small-text" style="margin-top:10px;">Last generated loadstring (paid):</p>
+            <div class="logs-box">{html.escape(last_loadstring or 'No paid loadstring yet.')}</div>
+            <p class="small-text" style="margin-top:10px;">Edit script:</p>
+            <form method="post" action="/home">
+                <input type="hidden" name="action" value="update_script">
+                <input type="hidden" name="slug" value="{html.escape(slug)}">
+                <label class="label">Script Name</label>
+                <input type="text" name="name" value="{html.escape(name)}" maxlength="48">
+                <label class="label">Script Code (Lua)</label>
+                <textarea name="code">{code}</textarea>
+                <label class="label">Paid?</label>
+                <input type="text" name="is_paid" placeholder="yes/no" value="{ 'yes' if is_paid else 'no' }">
+                <label class="label">HWID Lock?</label>
+                <input type="text" name="hwid_lock" placeholder="yes/no" value="{ 'yes' if hwid_lock else 'no' }">
+                <button type="submit">Save Changes</button>
+            </form>
+            <p class="small-text" style="margin-top:10px;">Generate paid key for this script:</p>
+            <form method="post" action="/home">
+                <input type="hidden" name="action" value="generate_key">
+                <input type="hidden" name="slug" value="{html.escape(slug)}">
+                <label class="label">Duration (hours, max {MAX_KEY_DURATION_HOURS})</label>
+                <input type="text" name="hours" placeholder="e.g. 1, 5, 10">
+                <button type="submit">Generate Key</button>
+            </form>
+            <p class="small-text" style="margin-top:10px;">Delete this script:</p>
+            <form method="post" action="/home">
+                <input type="hidden" name="action" value="delete_script">
+                <input type="hidden" name="slug" value="{html.escape(slug)}">
+                <button type="submit" style="background:linear-gradient(135deg,#ff5252,#ff1744);">Delete Script</button>
+            </form>
+        </div>
+        """
+
+    if not cards_html:
+        cards_html = """
+        <div class="card">
+            <h2>No scripts yet</h2>
+            <p class="label">Create your first script below.</p>
+        </div>
+        """
+
+    body = f"""
+    <div class="card">
+        <h1>Dex Home - Script Manager</h1>
+        <p class="label">
+            <span class="pill">Logged in as {html.escape(username)}</span>
+            <span class="pill green">Create / Edit Scripts</span>
+            <span class="pill purple">Paid / Free & HWID Lock</span>
+        </p>
+        <form method="post" action="/home" style="margin-top:10px;">
+            <input type="hidden" name="action" value="logout">
+            <button type="submit" style="background:linear-gradient(135deg,#ff5252,#ff1744);">Logout</button>
+        </form>
+        {msg_html}
+    </div>
+
+    <div class="card">
+        <h2>Create New Script</h2>
+        <p class="label">Name determines endpoint. Spaces become dashes. Example: "Dex 2" -> /Dex-2</p>
+        <form method="post" action="/home">
+            <input type="hidden" name="action" value="create_script">
+            <label class="label">Script Name</label>
+            <input type="text" name="name" placeholder="e.g. Dexnew, Dex 2" maxlength="48">
+            <label class="label">Script Code (Lua)</label>
+            <textarea name="code" placeholder="Paste your Lua script here"></textarea>
+            <label class="label">Paid? (yes/no)</label>
+            <input type="text" name="is_paid" placeholder="yes or no">
+            <label class="label">HWID Lock? (yes/no)</label>
+            <input type="text" name="hwid_lock" placeholder="yes or no">
+            <button type="submit">Add Script</button>
+        </form>
+        <p class="small-text" style="margin-top:10px;">After creation, you will see your script below with loadstring and controls.</p>
+    </div>
+
+    <div class="grid">
+        {cards_html}
+    </div>
+    """
+    return body
+
+
+def get_logged_in_user(request: Request) -> Optional[str]:
+    token = request.cookies.get("dex_session")
+    username = verify_session_token(token, SESSION_MAX_AGE)
+    if username and username in users:
+        return username
+    return None
+
+
+def set_session_cookie(resp, username: str):
+    token = create_session_token(username)
+    resp.set_cookie(
+        "dex_session", token,
+        httponly=True, secure=True, samesite="strict",
+        max_age=SESSION_MAX_AGE,
+    )
+
+
+# -----------------------------
+# DISCORD OAUTH LOGIN (Dex Bot)
+# /login kicks off the OAuth round-trip, Discord sends the person back to
+# /auth/discord/callback, and a successful login redirects to / already
+# signed in - no username/password needed for accounts created this way.
+# -----------------------------
+
+DISCORD_LOGIN_RATE_LIMIT = 20
+DISCORD_LOGIN_RATE_WINDOW = 60.0
+DISCORD_STATE_MAX_AGE = 600  # 10 minutes to complete the Discord round-trip
+
+# The dex_discord_state cookie set below is defense-in-depth, but it is not
+# the source of truth for the state check - some browsers/in-app webviews
+# (Discord's own mobile in-app browser included) don't reliably round-trip
+# a cookie set on /login back to /auth/discord/callback.
 #
-# IMPORTANT: In your actual deployment, paste everything from the original
-# main.py that comes after the /scripts endpoint here — starting from
-# HOME_BASE_HTML through to the final `if __name__ == "__main__":` block.
-# The ONLY function that has changed is obfuscate_api (shown below).
-# ─────────────────────────────────────────────────────────────────────────────
+# An in-memory "pending states" dict is NOT reliable either: if Railway ever
+# runs more than one replica/worker (or restarts the process between the two
+# requests), /login and /auth/discord/callback can be handled by different
+# processes that don't share memory, and the callback would reject a
+# perfectly valid state - this is what caused the discord_error=invalid_state
+# redirects. Instead, the state we hand out IS the proof: a signed,
+# timestamped token (HMAC'd with SECRET_KEY), so ANY process can verify it
+# on its own, with zero shared state, regardless of replica count or
+# restarts.
+DISCORD_STATE_SEP = "."
 
-# [ ... all HOME, ADMIN, DISCORD OAUTH, LOADER, OBFUSCATOR page/helpers ... ]
-# [ ... PASTE THE ORIGINAL FILE CONTENT HERE from HOME_BASE_HTML onward  ... ]
-# [ ... replacing ONLY the @app.post("/obfuscate") function body          ... ]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# THE ONLY CHANGED FUNCTION — drop this in place of the old obfuscate_api:
-# ─────────────────────────────────────────────────────────────────────────────
+def _make_discord_state() -> str:
+    nonce = secrets.token_urlsafe(16)
+    expires = str(int(time.time()) + DISCORD_STATE_MAX_AGE)
+    payload = f"{nonce}{DISCORD_STATE_SEP}{expires}"
+    sig = hmac.new(SECRET_KEY.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{payload}{DISCORD_STATE_SEP}{sig}"
+
+
+def _verify_discord_state(state: str) -> bool:
+    """Stateless check: the token is well-formed, its signature matches
+    (proving we issued it), and it hasn't expired."""
+    parts = state.split(DISCORD_STATE_SEP)
+    if len(parts) != 3:
+        return False
+    nonce, expires, sig = parts
+    payload = f"{nonce}{DISCORD_STATE_SEP}{expires}"
+    expected_sig = hmac.new(SECRET_KEY.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not constant_time_eq(sig, expected_sig):
+        return False
+    try:
+        return int(expires) >= int(time.time())
+    except ValueError:
+        return False
+
+
+def _discord_avatar_url(discord_id: str, avatar_hash: Optional[str], discriminator: str) -> str:
+    if avatar_hash:
+        ext = "gif" if avatar_hash.startswith("a_") else "png"
+        return f"https://cdn.discordapp.com/avatars/{discord_id}/{avatar_hash}.{ext}?size=128"
+    try:
+        index = (int(discriminator) % 5) if discriminator and discriminator != "0" else (int(discord_id) >> 22) % 6
+    except Exception:
+        index = 0
+    return f"https://cdn.discordapp.com/embed/avatars/{index}.png"
+
+
+def _discord_exchange_code_sync(code: str) -> Optional[dict]:
+    """Blocking token exchange, run via asyncio.to_thread."""
+    payload = urlencode({
+        "client_id": DISCORD_CLIENT_ID,
+        "client_secret": DISCORD_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": DISCORD_REDIRECT_URI,
+    }).encode("utf-8")
+    req = urllib.request.Request("https://discord.com/api/oauth2/token", data=payload, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    req.add_header("User-Agent", "DexNotifier (https://dexapi1.up.railway.app, 1.0)")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # Discord's actual reason (invalid_client, invalid_grant, redirect_uri
+        # mismatch, etc.) is in the response body - the old code discarded
+        # this, which is why token_exchange_failed gave no clue why. Now it's
+        # printed to the Railway logs so the real cause is visible there.
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        print(f"[DISCORD OAUTH] token exchange failed: HTTP {e.code} - {body}")
+        return None
+    except Exception as e:
+        print(f"[DISCORD OAUTH] token exchange failed: {e}")
+        return None
+
+
+def _discord_fetch_profile_sync(access_token: str) -> Optional[dict]:
+    """Blocking profile fetch, run via asyncio.to_thread."""
+    req = urllib.request.Request("https://discord.com/api/users/@me")
+    req.add_header("Authorization", f"Bearer {access_token}")
+    req.add_header("User-Agent", "DexNotifier (https://dexapi1.up.railway.app, 1.0)")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        print(f"[DISCORD OAUTH] profile fetch failed: HTTP {e.code} - {body}")
+        return None
+    except Exception as e:
+        print(f"[DISCORD OAUTH] profile fetch failed: {e}")
+        return None
+
+
+def _sanitize_discord_username(raw: str, discord_id: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_.\-]", "", raw or "").strip(".")[:MAX_USERNAME_LEN]
+    if len(cleaned) < 2:
+        cleaned = f"user_{discord_id[-8:]}"
+    if cleaned.lower() in RESERVED_USERNAMES or cleaned.lower() in RESERVED_PATHS_LOWER:
+        cleaned = f"{cleaned}_{discord_id[-4:]}"[:MAX_USERNAME_LEN]
+    return cleaned
+
+
+async def _find_username_by_discord_id(discord_id: str) -> Optional[str]:
+    async with users_lock:
+        for uname, rec in users.items():
+            if rec.get("discord_id") == discord_id:
+                return uname
+    return None
+
+
+async def _upsert_discord_user(profile: dict) -> str:
+    """Create or update the local account tied to this Discord id, and
+    return the (local) username to log in as. Matching is by discord_id so
+    a Discord username change later doesn't create a duplicate account."""
+    discord_id = str(profile.get("id", ""))
+    discord_username = str(profile.get("username", "") or "")
+    global_name = str(profile.get("global_name") or "") or discord_username
+    discriminator = str(profile.get("discriminator", "0"))
+    avatar_url = _discord_avatar_url(discord_id, profile.get("avatar"), discriminator)
+
+    existing_username = await _find_username_by_discord_id(discord_id)
+
+    async with users_lock:
+        if existing_username:
+            username = existing_username
+        else:
+            candidate = _sanitize_discord_username(discord_username, discord_id)
+            username = candidate
+            suffix = 1
+            while username in users:
+                suffix += 1
+                username = f"{candidate}_{suffix}"[:MAX_USERNAME_LEN]
+            users[username] = {"username": username, "created_at": time.time()}
+
+        users[username].update({
+            "discord_id": discord_id,
+            "discord_username": discord_username,
+            "discord_global_name": global_name,
+            "discord_avatar_url": avatar_url,
+            "discord_last_login": time.time(),
+        })
+        save_users_to_file()
+    return username
+
+
+@app.get("/login")
+async def discord_login(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "discord_login", max_requests=DISCORD_LOGIN_RATE_LIMIT, window_seconds=DISCORD_LOGIN_RATE_WINDOW):
+        return PlainTextResponse("Rate limited, try again shortly.", status_code=429)
+
+    if not discord_oauth_configured():
+        return PlainTextResponse(
+            "Discord login is not configured on this deployment yet. "
+            "Set DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, and DISCORD_REDIRECT_URI in Railway.",
+            status_code=503,
+        )
+
+    if get_logged_in_user(request):
+        return RedirectResponse(url="/", status_code=303)
+
+    state = _make_discord_state()
+    params = {
+        "client_id": DISCORD_CLIENT_ID,
+        "redirect_uri": DISCORD_REDIRECT_URI,
+        "response_type": "code",
+        "scope": DISCORD_OAUTH_SCOPE,
+        "state": state,
+        "prompt": "consent",
+    }
+    resp = RedirectResponse(url="https://discord.com/api/oauth2/authorize?" + urlencode(params))
+    # samesite="lax" (not "strict") is required here: Discord sends the
+    # person back with a top-level cross-site GET redirect, and a "strict"
+    # cookie would not be attached to that request, breaking the state check.
+    # This cookie is now just an extra check on top of the signed state
+    # token above, which is the real source of truth - so login still works
+    # even when a browser/webview doesn't send the cookie back at all, and
+    # regardless of how many server processes are handling requests
+    # (see /auth/discord/callback).
+    resp.set_cookie(
+        "dex_discord_state", state,
+        httponly=True, secure=True, samesite="lax",
+        max_age=DISCORD_STATE_MAX_AGE, path="/",
+    )
+    return resp
+
+
+@app.get("/auth/discord/callback")
+async def discord_callback(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "discord_callback", max_requests=DISCORD_LOGIN_RATE_LIMIT, window_seconds=DISCORD_LOGIN_RATE_WINDOW):
+        return PlainTextResponse("Rate limited, try again shortly.", status_code=429)
+
+    if not discord_oauth_configured():
+        return PlainTextResponse("Discord login is not configured on this deployment.", status_code=503)
+
+    if request.query_params.get("error"):
+        resp = RedirectResponse(url="/?discord_error=access_denied", status_code=303)
+        resp.delete_cookie("dex_discord_state", path="/")
+        return resp
+
+    code = request.query_params.get("code", "")
+    state = request.query_params.get("state", "")
+    cookie_state = request.cookies.get("dex_discord_state", "")
+
+    # The signature check is the real check, and it is what makes this work
+    # even when a browser/webview never sends dex_discord_state back, and
+    # regardless of how many Railway replicas/workers are running. If a
+    # cookie *was* sent, it still has to match the state Discord returned,
+    # so a swapped-out state is still caught for the common case where the
+    # cookie does round-trip correctly.
+    state_recognized = bool(state) and _verify_discord_state(state)
+    cookie_matches = (not cookie_state) or constant_time_eq(state, cookie_state)
+
+    if not code or not state or not state_recognized or not cookie_matches:
+        print(
+            f"[DISCORD OAUTH] invalid_state ip={ip} has_code={bool(code)} "
+            f"has_state={bool(state)} server_recognized={state_recognized} "
+            f"had_cookie={bool(cookie_state)} cookie_matched={cookie_matches}"
+        )
+        resp = RedirectResponse(url="/?discord_error=invalid_state", status_code=303)
+        resp.delete_cookie("dex_discord_state", path="/")
+        return resp
+
+    token_data = await asyncio.to_thread(_discord_exchange_code_sync, code)
+    access_token = (token_data or {}).get("access_token")
+    if not access_token:
+        resp = RedirectResponse(url="/?discord_error=token_exchange_failed", status_code=303)
+        resp.delete_cookie("dex_discord_state", path="/")
+        return resp
+
+    profile = await asyncio.to_thread(_discord_fetch_profile_sync, access_token)
+    if not profile or not profile.get("id"):
+        resp = RedirectResponse(url="/?discord_error=profile_fetch_failed", status_code=303)
+        resp.delete_cookie("dex_discord_state", path="/")
+        return resp
+
+    username = await _upsert_discord_user(profile)
+
+    resp = RedirectResponse(url="/", status_code=303)
+    resp.delete_cookie("dex_discord_state", path="/")
+    set_session_cookie(resp, username)
+    return resp
+
+
+HOME_GET_RATE_LIMIT = 30
+HOME_GET_RATE_WINDOW = 10.0
+HOME_POST_RATE_LIMIT = 20
+HOME_POST_RATE_WINDOW = 10.0
+
+
+@app.get("/home")
+async def home_get(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "home_get", max_requests=HOME_GET_RATE_LIMIT, window_seconds=HOME_GET_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
+    username = get_logged_in_user(request)
+    if not username:
+        body = build_home_logged_out_body(discord_error_message(request.query_params.get("discord_error", "")))
+        return HTMLResponse(HOME_BASE_HTML.format(body=body))
+    body = build_home_logged_in_body(username)
+    return HTMLResponse(HOME_BASE_HTML.format(body=body))
+
+
+@app.post("/home")
+async def home_post(request: Request):
+    ip = _client_ip(request)
+
+    # Coarse per-IP volume cap on top of the existing failed-login lockout
+    # below - stops mass script/account creation even when every individual
+    # attempt "succeeds".
+    if rate_limited(ip, "home_post", max_requests=HOME_POST_RATE_LIMIT, window_seconds=HOME_POST_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
+    if reject_if_oversized(request, MAX_FORM_BODY):
+        return PlainTextResponse("Payload too large.", status_code=413)
+
+    raw = await request.body()
+    if len(raw) > MAX_FORM_BODY:
+        return PlainTextResponse("Payload too large.", status_code=413)
+
+    data = parse_qs(raw.decode(errors="ignore"))
+    action = data.get("action", [""])[0]
+    username = data.get("username", [""])[0].strip()
+    password = data.get("password", [""])[0]
+    if len(password) > MAX_PASSWORD_LEN:
+        password = password[:MAX_PASSWORD_LEN]
+
+    if action == "register":
+        if await is_rate_limited("home_register", ip):
+            return HTMLResponse(HOME_BASE_HTML.format(
+                body=build_home_logged_out_body("Too many attempts. Try again later.")), status_code=429)
+
+        if not username or not password:
+            await record_failed_attempt("home_register", ip)
+            return HTMLResponse(HOME_BASE_HTML.format(
+                body=build_home_logged_out_body("Username and password required.")))
+        if not is_valid_username(username):
+            await record_failed_attempt("home_register", ip)
+            return HTMLResponse(HOME_BASE_HTML.format(
+                body=build_home_logged_out_body(
+                    "Username must be 3-32 chars: letters, numbers, _ or - only, and not a reserved/blocked name.")))
+        if len(password) < 8:
+            await record_failed_attempt("home_register", ip)
+            return HTMLResponse(HOME_BASE_HTML.format(
+                body=build_home_logged_out_body("Password must be at least 8 characters.")))
+        async with users_lock:
+            if username in users:
+                await record_failed_attempt("home_register", ip)
+                return HTMLResponse(HOME_BASE_HTML.format(
+                    body=build_home_logged_out_body("Username already in use.")))
+            users[username] = {
+                "username": username,
+                "password_hash": hash_password(password),
+                "created_at": time.time(),
+            }
+            save_users_to_file()
+        await clear_attempts("home_register", ip)
+        resp = HTMLResponse(HOME_BASE_HTML.format(
+            body=build_home_logged_in_body(username, success="Account created and logged in.")))
+        set_session_cookie(resp, username)
+        return resp
+
+    if action == "login":
+        if await is_rate_limited("home_login", ip):
+            return HTMLResponse(HOME_BASE_HTML.format(
+                body=build_home_logged_out_body("Too many failed attempts. Try again later.")), status_code=429)
+
+        async with users_lock:
+            user = users.get(username)
+        if not user or "password_hash" not in user or not verify_password(password, user["password_hash"]):
+            await record_failed_attempt("home_login", ip)
+            return HTMLResponse(HOME_BASE_HTML.format(
+                body=build_home_logged_out_body("Invalid username or password.")))
+
+        await clear_attempts("home_login", ip)
+        resp = HTMLResponse(HOME_BASE_HTML.format(
+            body=build_home_logged_in_body(username, success="Logged in.")))
+        set_session_cookie(resp, username)
+        return resp
+
+    current_user = get_logged_in_user(request)
+    if not current_user:
+        return HTMLResponse(HOME_BASE_HTML.format(
+            body=build_home_logged_out_body("You must be logged in.")))
+
+    if action == "logout":
+        resp = HTMLResponse(HOME_BASE_HTML.format(body=build_home_logged_out_body("Logged out.")))
+        resp.delete_cookie("dex_session")
+        return resp
+
+    if action == "create_script":
+        name = data.get("name", [""])[0].strip()
+        code = data.get("code", [""])[0]
+        is_paid_str = data.get("is_paid", ["no"])[0].strip().lower()
+        hwid_lock_str = data.get("hwid_lock", ["no"])[0].strip().lower()
+
+        if not name or not code:
+            return HTMLResponse(HOME_BASE_HTML.format(
+                body=build_home_logged_in_body(current_user, message="Name and code required.")))
+        if len(code.encode("utf-8")) > MAX_SCRIPT_BODY:
+            return HTMLResponse(HOME_BASE_HTML.format(
+                body=build_home_logged_in_body(current_user, message="Script code is too large.")))
+
+        slug = make_slug(name)
+        if not slug or slug.lower() in RESERVED_PATHS_LOWER:
+            return HTMLResponse(HOME_BASE_HTML.format(
+                body=build_home_logged_in_body(current_user, message="Invalid or reserved script name.")))
+
+        async with scripts_lock:
+            if any(k.lower() == slug.lower() for k in scripts.keys()):
+                return HTMLResponse(HOME_BASE_HTML.format(
+                    body=build_home_logged_in_body(current_user, message="Endpoint already exists.")))
+            scripts[slug] = {
+                "name": name,
+                "slug": slug,
+                "code": code,
+                "is_paid": is_paid_str == "yes",
+                "hwid_lock": hwid_lock_str == "yes",
+                "owner": current_user,
+                "created_at": time.time(),
+                "updated_at": time.time(),
+                "keys": {},
+                "last_key": "",
+                "last_loadstring": "",
+            }
+            save_scripts_to_file()
+        return HTMLResponse(HOME_BASE_HTML.format(
+            body=build_home_logged_in_body(current_user, success="Script created.")))
+
+    if action == "update_script":
+        slug = data.get("slug", [""])[0].strip()
+        name = data.get("name", [""])[0].strip()
+        code = data.get("code", [""])[0]
+        is_paid_str = data.get("is_paid", ["no"])[0].strip().lower()
+        hwid_lock_str = data.get("hwid_lock", ["no"])[0].strip().lower()
+
+        async with scripts_lock:
+            s = scripts.get(slug)
+            if not s or s.get("owner") != current_user:
+                return HTMLResponse(HOME_BASE_HTML.format(
+                    body=build_home_logged_in_body(current_user, message="Script not found or not owned by you.")))
+            if s.get("github_managed"):
+                return HTMLResponse(HOME_BASE_HTML.format(
+                    body=build_home_logged_in_body(
+                        current_user,
+                        message="This script is managed via the GitHub repo and can't be edited here.")))
+            if len(code.encode("utf-8")) > MAX_SCRIPT_BODY:
+                return HTMLResponse(HOME_BASE_HTML.format(
+                    body=build_home_logged_in_body(current_user, message="Script code is too large.")))
+            s["name"] = name or s["name"]
+            s["code"] = code
+            s["is_paid"] = is_paid_str == "yes"
+            s["hwid_lock"] = hwid_lock_str == "yes"
+            s["updated_at"] = time.time()
+            save_scripts_to_file()
+        return HTMLResponse(HOME_BASE_HTML.format(
+            body=build_home_logged_in_body(current_user, success="Script updated.")))
+
+    if action == "delete_script":
+        slug = data.get("slug", [""])[0].strip()
+        async with scripts_lock:
+            s = scripts.get(slug)
+            if not s or s.get("owner") != current_user:
+                return HTMLResponse(HOME_BASE_HTML.format(
+                    body=build_home_logged_in_body(current_user, message="Script not found or not owned by you.")))
+            if s.get("github_managed"):
+                return HTMLResponse(HOME_BASE_HTML.format(
+                    body=build_home_logged_in_body(
+                        current_user,
+                        message="This script is managed via the GitHub repo and can't be deleted here.")))
+            scripts.pop(slug, None)
+            save_scripts_to_file()
+        return HTMLResponse(HOME_BASE_HTML.format(
+            body=build_home_logged_in_body(current_user, success="Script deleted.")))
+
+    if action == "generate_key":
+        slug = data.get("slug", [""])[0].strip()
+        hours_str = data.get("hours", [""])[0].strip()
+        hours = parse_duration_hours(hours_str)
+        if hours is None:
+            return HTMLResponse(HOME_BASE_HTML.format(
+                body=build_home_logged_in_body(current_user, message="Invalid duration.")))
+        async with scripts_lock:
+            s = scripts.get(slug)
+            if not s or s.get("owner") != current_user:
+                return HTMLResponse(HOME_BASE_HTML.format(
+                    body=build_home_logged_in_body(current_user, message="Script not found or not owned by you.")))
+            new_key = generate_paid_key(20)
+            expiry = time.time() + hours * 3600.0
+            keys = s.get("keys", {})
+            keys[new_key] = {"expiry": expiry, "hwid": None}
+            s["keys"] = keys
+            s["last_key"] = new_key
+            s["last_loadstring"] = f'loadstring(game:HttpGet("{BASE_URL}/{slug}?key={new_key}&hwid=YOUR_HWID"))()'
+            save_scripts_to_file()
+        return HTMLResponse(HOME_BASE_HTML.format(
+            body=build_home_logged_in_body(current_user, success="Key generated.")))
+
+    return HTMLResponse(HOME_BASE_HTML.format(
+        body=build_home_logged_in_body(current_user, message="Unknown action.")))
+
+# -----------------------------
+# ADMIN PANEL
+# -----------------------------
+
+ADMIN_BASE_HTML = """
+<!DOCTYPE html>
+<html>
+<head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536">
+    <title>Dex Admin</title>
+    <style>
+        /* NOTE: --dn-bg custom prop below is a deliberate no-op - the
+           site-wide UI middleware skips injecting its global purple theme
+           into any page whose own <style> already defines --dn-bg, which
+           is what lets this dashboard keep its own distinct look. */
+        :root {{ --dn-bg:#0a0c10; --bg:#0a0c10; --panel:#12151b; --panel-2:#15181f; --line:#232830; --line-soft:#1b1f27;
+            --text:#eef1f5; --muted:#8891a0; --dim:#5b6472; --accent:#f0a94e; --accent-ink:#1a1200; --accent-soft:rgba(240,169,78,.14);
+            --teal:#33d1c0; --teal-soft:rgba(51,209,192,.14); --danger:#ef5b5b; --danger-soft:rgba(239,91,91,.14);
+            --good:#39d98a; --good-soft:rgba(57,217,138,.14); --radius:14px; }}
+        * {{ box-sizing:border-box; }}
+        html,body {{ background:var(--bg); }}
+        body {{ margin:0; color:var(--text); font-family:'Segoe UI',system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+            display:flex; min-height:100vh; }}
+        ::-webkit-scrollbar {{ width:9px; height:9px; }}
+        ::-webkit-scrollbar-thumb {{ background:#262b34; border-radius:8px; }}
+
+        .dn-sidebar {{ width:236px; flex:0 0 236px; background:var(--panel-2); border-right:1px solid var(--line);
+            padding:22px 14px; position:sticky; top:0; align-self:flex-start; height:100vh; overflow-y:auto; }}
+        .dn-sidebar-brand {{ display:flex; align-items:center; gap:10px; padding:0 8px 18px; border-bottom:1px solid var(--line); margin-bottom:14px; }}
+        .dn-sidebar-brand .logo {{ width:32px; height:32px; border-radius:9px; flex:0 0 32px;
+            background:linear-gradient(135deg,var(--accent),var(--teal)); display:grid; place-items:center;
+            font-weight:900; color:var(--accent-ink); font-size:12px; }}
+        .dn-sidebar-brand strong {{ font-size:14px; letter-spacing:-.01em; display:block; }}
+        .dn-sidebar-brand span {{ display:block; font-size:10px; color:var(--muted); letter-spacing:.08em; text-transform:uppercase; margin-top:2px; }}
+        .dn-nav {{ list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:3px; }}
+        .dn-nav button {{ all:unset; box-sizing:border-box; cursor:pointer; display:flex; align-items:center; gap:10px;
+            padding:10px 12px; border-radius:10px; font-size:13px; font-weight:700; color:var(--muted); width:100%; }}
+        .dn-nav button:hover {{ background:rgba(255,255,255,.045); color:var(--text); }}
+        .dn-nav button.active {{ background:var(--accent-soft); color:var(--accent); }}
+        .dn-nav button.danger-tab.active {{ background:var(--danger-soft); color:#ffb3b3; }}
+        .dn-nav-icon {{ width:18px; text-align:center; font-size:14px; flex:0 0 18px; }}
+        .dn-sidebar-foot {{ margin-top:18px; padding-top:14px; border-top:1px solid var(--line); font-size:11px; color:var(--dim); padding-left:8px; }}
+        .dn-sidebar-foot a {{ color:var(--muted); text-decoration:none; font-weight:800; }}
+        .dn-sidebar-foot a:hover {{ color:var(--text); }}
+
+        .dn-main {{ flex:1; min-width:0; padding:26px 34px 60px; }}
+        .dn-topbar {{ display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:20px; flex-wrap:wrap; }}
+        .dn-topbar h1 {{ margin:0; font-size:21px; letter-spacing:-.02em; }}
+        .dn-topbar .sub {{ color:var(--muted); font-size:12.5px; margin-top:4px; max-width:640px; }}
+        .dn-session-pill {{ display:inline-flex; align-items:center; gap:7px; background:var(--good-soft);
+            border:1px solid rgba(57,217,138,.3); color:#a8f3cb; padding:7px 12px; border-radius:999px; font-size:12px; font-weight:700; white-space:nowrap; }}
+        .dn-session-pill i {{ width:6px; height:6px; border-radius:50%; background:var(--good); box-shadow:0 0 10px var(--good); }}
+        .dn-session-pill a {{ color:#a8f3cb; margin-left:8px; text-decoration:underline; }}
+
+        .tab-panel {{ display:none; }}
+        .tab-panel.active {{ display:block; animation:dnFade .22s ease both; }}
+        @keyframes dnFade {{ from {{ opacity:0; transform:translateY(4px); }} to {{ opacity:1; transform:translateY(0); }} }}
+
+        h1,h2,h3 {{ margin-top:0; color:var(--text); }}
+        h2 {{ font-size:16px; font-weight:800; letter-spacing:-.01em; }}
+        h3 {{ font-size:12px; text-transform:uppercase; letter-spacing:.07em; color:var(--muted); font-weight:800; }}
+        .card {{ background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--line-soft);
+            border-radius:var(--radius); padding:20px 22px; margin-bottom:16px; }}
+        .card.accent-amber {{ border-left-color:var(--accent); }}
+        .card.accent-teal {{ border-left-color:var(--teal); }}
+        .card.accent-danger {{ border-left-color:var(--danger); }}
+        .card.accent-good {{ border-left-color:var(--good); }}
+
+        input[type=password], input[type=text] {{ width:100%; padding:11px 13px; border-radius:10px; border:1px solid var(--line);
+            background:#0d0f14; color:var(--text); outline:none; font:inherit; }}
+        input:focus {{ border-color:var(--accent); }}
+        textarea {{ width:100%; min-height:150px; background:#0d0f14; color:#c9f7d3; border-radius:10px; border:1px solid var(--line);
+            padding:12px; font-family:Consolas,'JetBrains Mono',monospace; font-size:13px; outline:none; resize:vertical; }}
+        textarea:focus {{ border-color:var(--accent); }}
+
+        button {{ padding:9px 18px; border-radius:9px; border:1px solid transparent; cursor:pointer; font-weight:800;
+            font-size:13px; background:var(--accent); color:var(--accent-ink); transition:filter .15s ease, transform .15s ease; }}
+        button:hover {{ filter:brightness(1.08); transform:translateY(-1px); }}
+        button:active {{ transform:translateY(0); }}
+        button.secondary {{ background:transparent; border-color:var(--line); color:var(--text); }}
+        button.ghost-btn {{ background:transparent; border-color:var(--line); color:var(--muted); }}
+        button.danger-btn {{ background:var(--danger); color:#2b0808; }}
+        button.teal-btn {{ background:var(--teal); color:#052420; }}
+        button:disabled {{ opacity:.5; cursor:not-allowed; transform:none; }}
+
+        .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(270px,1fr)); gap:16px; }}
+        .label {{ font-size:12.5px; color:var(--muted); margin-bottom:6px; }}
+        .pill {{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:11px;
+            background:var(--teal-soft); border:1px solid rgba(51,209,192,.35); color:#bdf7f0; margin-right:6px; margin-bottom:4px; }}
+        .pill.red {{ background:var(--danger-soft); border-color:rgba(239,91,91,.4); color:#ffd6d6; }}
+        .pill.green {{ background:var(--good-soft); border-color:rgba(57,217,138,.4); color:#c7ffe4; }}
+        .pill.purple {{ background:var(--accent-soft); border-color:rgba(240,169,78,.4); color:#ffe6bd; }}
+        .stats-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-top:14px; }}
+        .stat-box {{ background:#0d0f14; border-radius:10px; border:1px solid var(--line); padding:12px 14px; }}
+        .stat-label {{ color:var(--muted); font-size:11px; text-transform:uppercase; letter-spacing:.05em; }}
+        .stat-value {{ font-size:20px; font-weight:800; margin-top:5px; }}
+        .small-text {{ font-size:12px; color:var(--muted); }}
+        .error {{ margin-top:10px; color:#ffb0b0; font-size:13px; background:var(--danger-soft); border:1px solid rgba(239,91,91,.3); padding:9px 12px; border-radius:8px; }}
+        .locked-note {{ margin-top:8px; font-size:12px; color:#ffd58a; background:rgba(240,169,78,.1); border:1px solid rgba(240,169,78,.3); border-radius:8px; padding:8px 10px; }}
+        .logs-box {{ background:#0d0f14; border-radius:10px; border:1px solid var(--line); padding:12px; font-family:Consolas,monospace; font-size:12px; max-height:240px; overflow:auto; white-space:pre-wrap; }}
+        a {{ color:var(--teal); }}
+        a.repo-link {{ color:var(--teal); }}
+
+        .admin-control-form {{ margin-top:14px; }}
+        .admin-control-row {{ display:flex; align-items:center; justify-content:space-between; gap:14px; margin-top:11px; flex-wrap:wrap; }}
+        .admin-control-row>div {{ display:flex; gap:8px; }}
+
+        .dn-switch-row {{ display:flex; align-items:center; justify-content:space-between; gap:14px; padding:14px 0; border-bottom:1px solid var(--line-soft); }}
+        .dn-switch-row:last-of-type {{ border-bottom:none; }}
+        .dn-switch-row .meta strong {{ display:block; font-size:14px; }}
+        .dn-switch-row .meta span {{ font-size:12px; color:var(--muted); }}
+        .dn-switch {{ position:relative; display:inline-block; width:46px; height:26px; flex:0 0 46px; }}
+        .dn-switch input {{ opacity:0; width:0; height:0; position:absolute; }}
+        .dn-switch .slider {{ position:absolute; inset:0; background:#333844; transition:.2s ease; border-radius:999px; cursor:pointer; }}
+        .dn-switch .slider:before {{ position:absolute; content:""; height:20px; width:20px; left:3px; top:3px; background:#fff; transition:.2s ease; border-radius:50%; }}
+        .dn-switch input:checked+.slider {{ background:var(--good); }}
+        .dn-switch input:checked+.slider:before {{ transform:translateX(20px); }}
+        .dn-switch input:disabled+.slider {{ opacity:.5; cursor:not-allowed; }}
+        .dn-room-actions {{ display:flex; gap:8px; margin-top:2px; flex-wrap:wrap; }}
+
+        .me-admin-grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:16px}}
+        .me-admin-form,.me-members{{padding:15px;border:1px solid var(--line);border-radius:12px;background:#0d0f14}}
+        .me-admin-form label{{display:block;color:var(--muted);font-size:12px;font-weight:800;margin-bottom:8px}}
+        .me-add-row{{display:flex;gap:8px}}.me-add-row select{{flex:1;min-width:0;background:#0d0f14;color:var(--text);border:1px solid var(--line);border-radius:9px;padding:10px}}
+        .me-member{{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line-soft)}}
+        .me-member:last-child{{border-bottom:0}}
+        .me-member strong{{display:block;color:var(--text);font-size:12px}}
+        .me-member span{{display:block;color:var(--dim);font-size:10px;margin-top:3px}}
+        .me-remove{{background:var(--danger-soft)!important;color:#ffd6d6!important;border-color:rgba(239,91,91,.3)!important;padding:8px 10px!important;font-size:11px!important}}
+        .me-empty{{color:var(--dim);font-size:12px}}
+        @media(max-width:900px){{ body{{flex-direction:column}} .dn-sidebar{{position:relative;width:100%;flex:none;height:auto;border-right:none;border-bottom:1px solid var(--line)}} .dn-nav{{flex-direction:row;flex-wrap:wrap}} .me-admin-grid{{grid-template-columns:1fr}} }}
+</style>
+    <script>
+        function showTab(id) {{
+            document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + id));
+            document.querySelectorAll('#dn-nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === id));
+            try {{ localStorage.setItem('dn-admin-tab', id); }} catch (e) {{}}
+        }}
+        async function refreshStats() {{
+            try {{
+                const res = await fetch('/admin/stats', {{ cache: 'no-store', credentials: 'same-origin' }});
+                if (!res.ok) return;
+                const data = await res.json();
+                document.getElementById('stat-usernames').textContent = data.usernames_count;
+                document.getElementById('stat-blacklisted').textContent = data.blacklisted_count;
+                document.getElementById('stat-logs').textContent = data.logs_count;
+                document.getElementById('stat-viewers').textContent = data.viewers_count;
+                document.getElementById('stat-sender').textContent = data.sender_connected ? 'Yes' : 'No';
+                document.getElementById('last-log-box').textContent = data.last_log || 'No logs yet.';
+                document.getElementById('recent-logs-box').textContent = data.recent_logs || 'No logs.';
+                const annPreview = document.getElementById('announcement-preview-inline');
+                if (annPreview) annPreview.textContent = data.announcement || 'No active announcement.';
+                const bannerPreview = document.getElementById('banner-preview-inline');
+                if (bannerPreview) bannerPreview.textContent = data.banner || 'No banner set.';
+                document.getElementById('blacklist-preview-box').textContent = data.blacklisted_list || '';
+                document.getElementById('dexpaid-keys-box').textContent = data.dexpaid_keys_preview || 'No paid keys.';
+                document.getElementById('dexpaid-last-key-box').textContent = data.dexpaid_last_key || 'No key generated yet.';
+                document.getElementById('dexpaid-last-loadstring-box').textContent = data.dexpaid_last_loadstring || 'No loadstring generated yet.';
+                document.getElementById('admin-users-box').textContent = data.users_preview || 'No users.';
+                document.getElementById('admin-scripts-box').textContent = data.scripts_preview || 'No scripts.';
+
+                // Chat Control tab
+                const chatToggle = document.getElementById('chat-toggle-chat');
+                const meToggle = document.getElementById('chat-toggle-me');
+                if (chatToggle && document.activeElement !== chatToggle) chatToggle.checked = !!data.chat_enabled;
+                if (meToggle && document.activeElement !== meToggle) meToggle.checked = !!data.me_chat_enabled;
+                const chatCount = document.getElementById('chat-msg-count');
+                const meCount = document.getElementById('me-chat-msg-count');
+                if (chatCount) chatCount.textContent = (data.chat_message_count ?? 0) + ' message(s) · ' + (data.chat_online ?? 0) + ' online';
+                if (meCount) meCount.textContent = (data.me_chat_message_count ?? 0) + ' message(s) · ' + (data.me_chat_online ?? 0) + ' online';
+                const clearChatBtn = document.getElementById('chat-clear-chat');
+                const clearMeBtn = document.getElementById('chat-clear-me');
+                const clearBothBtn = document.getElementById('chat-clear-both');
+                const clearAllBtn = document.getElementById('danger-clear-all');
+                if (clearChatBtn) clearChatBtn.disabled = !(data.chat_message_count > 0);
+                if (clearMeBtn) clearMeBtn.disabled = !(data.me_chat_message_count > 0);
+                const totalMsgs = (data.chat_message_count || 0) + (data.me_chat_message_count || 0);
+                if (clearBothBtn) clearBothBtn.disabled = !(totalMsgs > 0);
+                if (clearAllBtn) clearAllBtn.disabled = !(totalMsgs > 0);
+
+                const history = Array.isArray(data.obfuscation_history) ? data.obfuscation_history : [];
+                const countEl = document.getElementById('obf-history-count');
+                if (countEl) countEl.textContent = `${{data.obfuscation_history_count || 0}} submissions`;
+                const historyEl = document.getElementById('obf-history-box');
+                const obfSearchEl = document.getElementById('obf-history-search');
+                // Store full history for search filtering
+                if (historyEl) {{
+                    window._obfHistory = history;
+                    function renderObfHistory(items) {{
+                        if (!items.length) {{
+                            historyEl.innerHTML = '<div class="small-text" style="padding:18px 0;text-align:center;color:#687489;">No submissions match your search.</div>';
+                            return;
+                        }}
+                        historyEl.innerHTML = items.map((item, idx) => {{
+                            const when = new Date((Number(item.created_at) || 0) * 1000).toLocaleString();
+                            const bytes = Number(item.source_bytes) || 0;
+                            const raw = String(item.raw_url || '#');
+                            const id = String(item.id || '');
+                            const sha = String(item.source_sha256 || '');
+                            const shaShort = sha.slice(0, 16);
+                            const sourceLink = `/admin/obfuscate/${{encodeURIComponent(id)}}/source`;
+                            const num = items.length - idx;
+                            return `<div class="obf-history-item" data-obf-id="${{id}}">
+  <div class="obf-history-top">
+    <div class="obf-history-left">
+      <span class="obf-history-num">#${{num}}</span>
+      <div>
+        <strong class="obf-id-text">${{id}}</strong>
+        <span class="small-text">${{when}} &nbsp;·&nbsp; ${{bytes.toLocaleString()}} bytes</span>
+      </div>
+    </div>
+    <div class="obf-history-actions">
+      <a class="obf-link-btn obf-raw-link" href="${{raw}}" target="_blank" rel="noopener noreferrer">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+        Raw payload
+      </a>
+      <a class="obf-link-btn obf-src-link" href="${{sourceLink}}" target="_blank" rel="noopener noreferrer">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        Raw input
+      </a>
+    </div>
+  </div>
+  <div class="obf-history-meta">
+    <span class="obf-meta-label">SHA-256</span>
+    <code class="obf-sha" title="${{sha}}">${{shaShort}}…</code>
+    <span class="obf-meta-sep">·</span>
+    <span class="obf-meta-label">ID</span>
+    <code class="obf-id-small">${{id}}</code>
+  </div>
+</div>`;
+                        }}).join('');
+                    }}
+                    if (!history.length) {{
+                        historyEl.innerHTML = '<div class="small-text" style="padding:18px 0;text-align:center;color:#687489;">No Obfustucate submissions yet.</div>';
+                    }} else {{
+                        renderObfHistory(history);
+                    }}
+                    if (obfSearchEl) {{
+                        obfSearchEl.addEventListener('input', () => {{
+                            const q = obfSearchEl.value.trim().toLowerCase();
+                            if (!q) {{ renderObfHistory(window._obfHistory || []); return; }}
+                            const filtered = (window._obfHistory || []).filter(item =>
+                                String(item.id || '').toLowerCase().includes(q) ||
+                                String(item.source_sha256 || '').toLowerCase().includes(q)
+                            );
+                            renderObfHistory(filtered);
+                        }});
+                    }}
+                }}
+            }} catch (e) {{
+                console.error(e);
+            }}
+        }}
+        function wireAdminControl(formId, endpoint, textareaId, statusId, clearId) {{
+            const form=document.getElementById(formId), area=document.getElementById(textareaId), status=document.getElementById(statusId), clear=document.getElementById(clearId);
+            if(!form) return;
+            form.addEventListener('submit', async (e)=>{{e.preventDefault();status.textContent='Saving…';const r=await fetch(endpoint,{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams({{text:area.value}}),credentials:'same-origin'}});const d=await r.json().catch(()=>({{}}));if(!r.ok){{status.textContent=d.error||'Could not save.';return}}status.textContent='Saved';area.value=d.text||'';refreshStats();}});
+            clear.addEventListener('click',()=>{{area.value='';form.requestSubmit();}});
+        }}
+        function wireChatToggle(id, room) {{
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.addEventListener('change', async () => {{
+                const enabled = el.checked;
+                el.disabled = true;
+                try {{
+                    const r = await fetch('/admin/chat/toggle', {{ method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}}, body:new URLSearchParams({{room, enabled: enabled ? 'true' : 'false'}}), credentials:'same-origin' }});
+                    if (!r.ok) {{ el.checked = !enabled; alert('Could not update chat status.'); }}
+                }} catch (e) {{ el.checked = !enabled; alert('Could not update chat status.'); }}
+                el.disabled = false;
+                refreshStats();
+            }});
+        }}
+        function wireChatClear(btnId, room, label) {{
+            const btn = document.getElementById(btnId);
+            if (!btn) return;
+            btn.addEventListener('click', async () => {{
+                if (!confirm('Permanently delete all ' + label + ' messages? This cannot be undone, and clears the chat live for anyone currently online.')) return;
+                btn.disabled = true;
+                const old = btn.textContent; btn.textContent = 'Clearing…';
+                try {{
+                    const r = await fetch('/admin/chat/clear', {{ method:'POST', headers:{{'Content-Type':'application/x-www-form-urlencoded'}}, body:new URLSearchParams({{room}}), credentials:'same-origin' }});
+                    const d = await r.json().catch(() => ({{}}));
+                    if (!r.ok) alert(d.error || 'Could not clear messages.');
+                }} catch (e) {{ alert('Could not clear messages.'); }}
+                btn.textContent = old; btn.disabled = false;
+                refreshStats();
+            }});
+        }}
+        function wireGithubRefresh() {{
+            const btn = document.getElementById('github-refresh-btn');
+            const status = document.getElementById('github-refresh-status');
+            if (!btn) return;
+            btn.addEventListener('click', async () => {{
+                btn.disabled = true;
+                const original = btn.textContent;
+                btn.textContent = 'Refreshing…';
+                if (status) {{ status.textContent = ''; status.style.color = ''; }}
+                try {{
+                    const r = await fetch('/admin/github/refresh', {{ method: 'POST', credentials: 'same-origin' }});
+                    const d = await r.json().catch(() => ({{}}));
+                    if (!r.ok) {{
+                        if (status) {{ status.textContent = d.error || ('Failed (' + r.status + ')'); status.style.color = '#ffb3b3'; }}
+                    }} else {{
+                        const names = Object.keys(d.results || {{}});
+                        const failed = names.filter(n => !d.results[n].ok);
+                        if (status) {{
+                            status.textContent = failed.length
+                                ? (failed.length + ' of ' + names.length + ' failed - check the cards below')
+                                : ('All ' + names.length + ' scripts refreshed from GitHub');
+                            status.style.color = failed.length ? '#ffb3b3' : '#a8f3cb';
+                        }}
+                        setTimeout(() => location.reload(), 900);
+                    }}
+                }} catch (e) {{
+                    if (status) {{ status.textContent = 'Network error - see console.'; status.style.color = '#ffb3b3'; }}
+                }} finally {{
+                    btn.disabled = false;
+                    btn.textContent = original;
+                }}
+            }});
+        }}
+        async function adminMutation(formData, statusEl) {{
+            const response = await fetch('/admin/update', {{
+                method: 'POST',
+                headers: {{'Content-Type':'application/x-www-form-urlencoded'}},
+                body: formData,
+                credentials: 'same-origin',
+                cache: 'no-store'
+            }});
+            const data = await response.json().catch(() => ({{}}));
+            if (!response.ok) throw new Error(data.error || 'Admin action failed.');
+            return data;
+        }}
+
+        function wireAdminExtendedControls() {{
+            const blacklistForm = document.getElementById('admin-blacklist-form');
+            const blacklistInput = document.getElementById('admin-blacklist-username');
+            const blacklistStatus = document.getElementById('admin-blacklist-status');
+            const unblacklistBtn = document.getElementById('admin-unblacklist-btn');
+
+            if (blacklistForm && blacklistInput && blacklistStatus) {{
+                blacklistForm.addEventListener('submit', async (e) => {{
+                    e.preventDefault();
+                    const username = blacklistInput.value.trim();
+                    if (!username) {{ blacklistStatus.textContent = 'Enter a username.'; return; }}
+                    blacklistStatus.textContent = 'Updating…';
+                    try {{
+                        await adminMutation(new URLSearchParams({{action:'blacklist', username}}), blacklistStatus);
+                        blacklistStatus.textContent = 'User blacklisted.';
+                        blacklistInput.value = '';
+                        refreshStats();
+                    }} catch (err) {{
+                        blacklistStatus.textContent = err.message;
+                    }}
+                }});
+            }}
+
+            if (unblacklistBtn && blacklistInput && blacklistStatus) {{
+                unblacklistBtn.addEventListener('click', async () => {{
+                    const username = blacklistInput.value.trim();
+                    if (!username) {{ blacklistStatus.textContent = 'Enter a username.'; return; }}
+                    blacklistStatus.textContent = 'Updating…';
+                    try {{
+                        await adminMutation(new URLSearchParams({{action:'unblacklist', username}}), blacklistStatus);
+                        blacklistStatus.textContent = 'User unblacklisted.';
+                        blacklistInput.value = '';
+                        refreshStats();
+                    }} catch (err) {{
+                        blacklistStatus.textContent = err.message;
+                    }}
+                }});
+            }}
+
+            const paidForm = document.getElementById('admin-paid-key-form');
+            const paidHours = document.getElementById('admin-paid-key-hours');
+            const paidStatus = document.getElementById('admin-paid-key-status');
+            if (paidForm && paidHours && paidStatus) {{
+                paidForm.addEventListener('submit', async (e) => {{
+                    e.preventDefault();
+                    const hours = paidHours.value.trim();
+                    if (!hours || Number(hours) <= 0) {{ paidStatus.textContent = 'Enter a valid duration.'; return; }}
+                    paidStatus.textContent = 'Generating…';
+                    try {{
+                        const data = await adminMutation(new URLSearchParams({{action:'generate_paid_key', hours}}), paidStatus);
+                        paidStatus.textContent = 'Key generated successfully.';
+                        const keyBox = document.getElementById('dexpaid-last-key-box');
+                        const loadBox = document.getElementById('dexpaid-last-loadstring-box');
+                        if (keyBox) keyBox.textContent = data.key || 'No key generated.';
+                        if (loadBox) loadBox.textContent = data.loadstring || 'No loadstring generated.';
+                        refreshStats();
+                    }} catch (err) {{
+                        paidStatus.textContent = err.message;
+                    }}
+                }});
+            }}
+        }}
+
+        document.addEventListener('DOMContentLoaded', () => {{
+            document.querySelectorAll('#dn-nav button[data-tab]').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+            let savedTab = 'overview';
+            try {{ const t = localStorage.getItem('dn-admin-tab'); if (t && document.getElementById('tab-' + t)) savedTab = t; }} catch (e) {{}}
+            showTab(savedTab);
+            wireAdminControl('admin-announcement-form','/admin/announcement','admin-announcement-text','admin-announcement-status','admin-clear-announcement');
+            wireAdminControl('admin-banner-form','/admin/banner','admin-banner-text','admin-banner-status','admin-clear-banner');
+            wireAdminExtendedControls();
+            wireChatToggle('chat-toggle-chat','chat');
+            wireChatToggle('chat-toggle-me','me');
+            wireChatClear('chat-clear-chat','chat','Chat');
+            wireChatClear('chat-clear-me','me','ME-Chat');
+            wireChatClear('chat-clear-both','both','Chat AND ME-Chat');
+            wireChatClear('danger-clear-all','both','Chat AND ME-Chat');
+            wireGithubRefresh();
+            refreshStats();
+            setInterval(refreshStats, 3000);
+        }});
+    </script>
+</head>
+<body>
+    {body}
+</body>
+</html>
+"""
+
+
+def admin_login_form(error: str = "") -> str:
+    err_html = f'<div class="error" id="dn-login-error">{html.escape(error)}</div>' if error else ""
+    shake_class = " dn-login-shake" if error else ""
+    return f"""
+    <style>
+        .dn-login-wrap{{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;
+            background:radial-gradient(760px 460px at 12% 6%,rgba(240,169,78,.11),transparent 60%),
+                       radial-gradient(680px 480px at 92% 94%,rgba(51,209,192,.09),transparent 62%),
+                       var(--bg);overflow:hidden;z-index:1;}}
+        .dn-login-wrap:before{{content:"";position:absolute;inset:0;pointer-events:none;z-index:0;
+            background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);
+            background-size:54px 54px;mask-image:radial-gradient(circle at 50% 28%,#000 0%,transparent 72%);}}
+        .dn-login-card{{position:relative;z-index:1;width:100%;max-width:400px;
+            background:linear-gradient(160deg,var(--panel-2),var(--panel));
+            border:1px solid var(--line);border-radius:20px;padding:38px 32px 28px;
+            box-shadow:0 30px 90px rgba(0,0,0,.55);animation:dnLoginIn .5s cubic-bezier(.2,.8,.2,1) both;}}
+        @keyframes dnLoginIn{{from{{opacity:0;transform:translateY(14px) scale(.98)}}to{{opacity:1;transform:none}}}}
+        .dn-login-shake{{animation:dnLoginIn .5s cubic-bezier(.2,.8,.2,1) both,dnShakeCard .4s ease .48s both;}}
+        @keyframes dnShakeCard{{0%,100%{{transform:translateX(0)}}20%{{transform:translateX(-8px)}}40%{{transform:translateX(7px)}}60%{{transform:translateX(-5px)}}80%{{transform:translateX(3px)}}}}
+        .dn-login-logo{{width:54px;height:54px;border-radius:16px;margin:0 auto 18px;display:grid;place-items:center;
+            background:linear-gradient(135deg,var(--accent),var(--teal));box-shadow:0 16px 36px rgba(240,169,78,.3);
+            font-weight:1000;font-size:19px;color:var(--accent-ink);position:relative;overflow:hidden;}}
+        .dn-login-logo:after{{content:"";position:absolute;inset:-80%;
+            background:linear-gradient(120deg,transparent 35%,rgba(255,255,255,.4),transparent 65%);
+            animation:dnLoginShine 4.5s ease-in-out infinite;}}
+        @keyframes dnLoginShine{{0%,55%{{transform:translateX(-20%) rotate(20deg)}}75%,100%{{transform:translateX(120%) rotate(20deg)}}}}
+        .dn-login-card h1{{text-align:center;font-size:22px;margin:0 0 4px;letter-spacing:-.02em;}}
+        .dn-login-sub{{text-align:center;color:var(--muted);font-size:12.5px;margin:0 0 20px;line-height:1.5;}}
+        .dn-login-pills{{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-bottom:24px;}}
+        .dn-login-field{{position:relative;margin-top:6px;}}
+        .dn-login-field svg{{position:absolute;left:13px;top:50%;transform:translateY(-50%);opacity:.5;pointer-events:none;color:var(--muted);}}
+        .dn-login-field input{{padding-left:38px !important;}}
+        .dn-login-card button[type=submit]{{width:100%;margin-top:18px;padding:12px;font-size:13.5px;}}
+        .dn-login-foot{{text-align:center;margin-top:20px;font-size:11px;color:var(--dim);}}
+        @media(max-width:480px){{.dn-login-card{{padding:30px 22px 24px;border-radius:16px;}}}}
+    </style>
+    <div class="dn-login-wrap">
+        <div class="dn-login-card{shake_class}">
+            <div class="dn-login-logo">DX</div>
+            <h1>Dex Admin</h1>
+            <p class="dn-login-sub">Control Center for DexNotifier's loaders, chat, and scripts.</p>
+            <div class="dn-login-pills">
+                <span class="pill">Private System</span>
+                <span class="pill red">Key Protected</span>
+                <span class="pill green">Loader Scripts</span>
+            </div>
+            <form method="post" autocomplete="off">
+                <label class="label" for="dn-admin-key">Admin Password</label>
+                <div class="dn-login-field">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+                    <input id="dn-admin-key" type="password" name="key" placeholder="Enter the admin password" autocomplete="current-password" autofocus>
+                </div>
+                <button type="submit">Open Control Center &rarr;</button>
+                {err_html}
+            </form>
+            <p class="dn-login-foot">Access is logged. Repeated failed attempts are rate-limited.</p>
+        </div>
+    </div>
+    """
+
+
+ADMIN_GET_RATE_LIMIT = 20
+ADMIN_GET_RATE_WINDOW = 60.0
+
+
+@app.get("/admin")
+async def admin_get(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "admin_get", max_requests=ADMIN_GET_RATE_LIMIT, window_seconds=ADMIN_GET_RATE_WINDOW):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
+    # if already have a valid admin session, skip straight to dashboard
+    token = request.cookies.get("dex_admin_session")
+    if verify_session_token(token, ADMIN_SESSION_MAX_AGE) == "admin":
+        return HTMLResponse(ADMIN_BASE_HTML.format(body=await build_admin_dashboard_body()))
+    return HTMLResponse(ADMIN_BASE_HTML.format(body=admin_login_form()))
+
+
+def _format_age(fetched_at: Optional[float]) -> str:
+    if not fetched_at:
+        return "never"
+    delta = max(0, int(time.time() - fetched_at))
+    if delta < 60:
+        return f"{delta}s ago"
+    if delta < 3600:
+        return f"{delta // 60}m ago"
+    return f"{delta // 3600}h ago"
+
+
+async def build_fixed_script_card(name: str) -> str:
+    meta = FIXED_SCRIPTS[name]
+    content = await get_github_script(name, meta["file"], meta["default"])
+    cache_meta = get_cache_meta(name)
+    source = cache_meta.get("source") if cache_meta else "unknown"
+    fetched_at = cache_meta.get("fetched_at") if cache_meta else None
+    repo_path = GITHUB_SCRIPT_PATHS.get(name, "")
+    status = get_github_status(name)
+    source_url = _script_source_url(name)
+
+    if source_url:
+        source_line = (
+            f'Source: <a class="repo-link" href="{html.escape(source_url)}" target="_blank" rel="noopener">'
+            f'{html.escape(source_url)}</a>'
+        )
+    else:
+        source_line = "Source unavailable - serving the last-known-good local fallback."
+
+    if source in ("github", "raw_url"):
+        source_pill = '<span class="pill green">live from source</span>'
+    elif source == "local_fallback":
+        source_pill = '<span class="pill red">fallback (GitHub fetch failed)</span>'
+    else:
+        source_pill = f'<span class="pill">{html.escape(source or "unknown")}</span>'
+
+    error_html = ""
+    if status and not status.get("ok") and status.get("error"):
+        error_html = (
+            f'<div class="locked-note" style="border-color:rgba(239,91,91,.35);background:rgba(239,91,91,.08);color:#ffd0d0;">'
+            f'Last GitHub fetch failed: {html.escape(status["error"])}</div>'
+        )
+
+    return f"""
+    <div class="card" data-script-card="{html.escape(name)}">
+        <h2>{html.escape(meta['label'])}</h2>
+        <p class="label">
+            <span class="pill purple">Read-only</span>
+            {source_pill}
+            <span class="pill">fetched {html.escape(_format_age(fetched_at))}</span>
+        </p>
+        <p class="small-text">{source_line}</p>
+        {error_html}
+        <div class="locked-note">
+            This script is hard-locked to its configured source URL. The server fetches the plain text directly and refreshes it every 60 seconds. The last known good copy is kept if a temporary fetch fails.
+        </div>
+        <p class="small-text" style="margin-top:10px;">Current content (read-only):</p>
+        <div class="logs-box">{html.escape(content)}</div>
+    </div>
+    """
+
+
+async def build_me_group_admin_panel() -> str:
+    async with users_lock:
+        registered = sorted(users.keys(), key=str.lower)
+    async with me_group_lock:
+        members = sorted(me_group_users, key=str.lower)
+    member_set = set(members)
+    options = "".join(f'<option value="{html.escape(u, quote=True)}">{html.escape(u)}</option>' for u in registered if u not in member_set) or '<option value="">All registered users are already in ME-Group</option>'
+    member_cards = "".join(f'''<div class="me-member"><div><strong>{html.escape(u)}</strong><span>Registered account</span></div><button type="button" class="me-remove" data-user="{html.escape(u, quote=True)}">Remove</button></div>''' for u in members) or '<div class="me-empty">No members have been added yet.</div>'
+    return f'''\
+    <section class="card me-group-admin" style="margin-top:18px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;">
+        <div><span class="pill purple">PRIVATE ACCESS</span><h2 style="margin:10px 0 5px;">ME-Group</h2><p class="small-text">Only accounts listed here can open <code>/ME-chat</code> or its WebSocket. Changes are saved to disk.</p></div>
+        <span class="pill green">{len(members)} member{'s' if len(members)!=1 else ''}</span>
+      </div>
+      <div class="me-admin-grid">
+        <form id="me-group-add-form" class="me-admin-form">
+          <label>Add registered user</label>
+          <div class="me-add-row"><select id="me-group-user">{options}</select><button type="submit">Add to group</button></div>
+          <div id="me-group-status" class="small-text" style="margin-top:9px;">Choose a registered account.</div>
+        </form>
+        <div class="me-members"><div class="small-text" style="margin-bottom:9px;">Current members</div>{member_cards}</div>
+      </div>
+      <script>
+      (()=>{{
+        const form=document.getElementById('me-group-add-form'), sel=document.getElementById('me-group-user'), status=document.getElementById('me-group-status');
+        if(form) form.addEventListener('submit',async e=>{{e.preventDefault();const username=sel.value;if(!username)return;status.textContent='Adding…';const r=await fetch('/admin/me-group',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams({{action:'add',username}})}});const d=await r.json().catch(()=>({{}}));if(!r.ok){{status.textContent=d.error||'Could not add user';return}}location.reload();}});
+        document.querySelectorAll('.me-remove').forEach(btn=>btn.addEventListener('click',async()=>{{const username=btn.dataset.user;if(!confirm('Remove '+username+' from ME-Group?'))return;const r=await fetch('/admin/me-group',{{method:'POST',headers:{{'Content-Type':'application/x-www-form-urlencoded'}},body:new URLSearchParams({{action:'remove',username}})}});const d=await r.json().catch(()=>({{}}));if(!r.ok){{alert(d.error||'Could not remove user');return}}location.reload();}}));
+      }})();
+      </script>
+    </section>
+    '''
+
+async def _admin_form_action(request: Request, action: str):
+    if not require_admin_session(request):
+        return JSONResponse({"error": "admin login required"}, status_code=401)
+    if reject_if_oversized(request, MAX_GENERIC_BODY):
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+    raw = await request.body()
+    if len(raw) > MAX_GENERIC_BODY:
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+    data = parse_qs(raw.decode("utf-8", errors="ignore"))
+    text = normalize_field(data.get("text", [""])[0].strip())
+    if len(text) > MAX_BANNER_LEN:
+        return JSONResponse({"error": f"maximum {MAX_BANNER_LEN} characters"}, status_code=400)
+    if _CONTROL_CHAR_PATTERN.search(text):
+        return JSONResponse({"error": "invalid control characters"}, status_code=400)
+    global announcement_text, announcement_timestamp, banner_text
+    if action == "announcement":
+        async with announcement_lock:
+            announcement_text = text
+            announcement_timestamp = time.time() if text else 0.0
+            save_announcement_to_file(announcement_text)
+    else:
+        async with banner_lock:
+            banner_text = text
+            save_banner_to_file(banner_text)
+    return JSONResponse({"ok": True, "text": text})
+
+@app.post("/admin/announcement")
+async def admin_set_announcement(request: Request):
+    return await _admin_form_action(request, "announcement")
+
+@app.post("/admin/banner")
+async def admin_set_banner(request: Request):
+    return await _admin_form_action(request, "banner")
+
+
+async def build_admin_dashboard_body() -> str:
+    fixed_cards_html = ""
+    for name in ("dexchilli", "dexfree", "dexserverhop", "dexhub", "dexpaid", "dexautoroll", "dexcodesniper"):
+        fixed_cards_html += await build_fixed_script_card(name)
+
+    keys_preview_lines = []
+    now = time.time()
+    for k, exp in dexpaid_keys.items():
+        remaining = max(0, int(exp - now))
+        keys_preview_lines.append(f"{k}  |  expires in {remaining} seconds")
+    keys_preview_text = "\n".join(keys_preview_lines) if keys_preview_lines else "No paid keys."
+
+    # SECURITY FIX: no longer displays plaintext passwords (they no longer exist).
+    users_lines = []
+    for u in users.values():
+        users_lines.append(f"{u['username']} | created: {int(u.get('created_at', 0))}")
+    users_preview = "\n".join(users_lines) if users_lines else "No users."
+
+    scripts_lines = []
+    for s in scripts.values():
+        scripts_lines.append(
+            f"{s['name']} ({s['slug']}) | owner: {s['owner']} | paid: {s['is_paid']} | "
+            f"hwid_lock: {s['hwid_lock']}{' | GITHUB-LOCKED' if s.get('github_managed') else ''}"
+        )
+    scripts_preview = "\n".join(scripts_lines) if scripts_lines else "No scripts."
+
+    github_status = (
+        f"Connected to {html.escape(GITHUB_OWNER)}/{html.escape(GITHUB_REPO)}@{html.escape(GITHUB_BRANCH)}"
+        if github_configured() else
+        "Not configured - set DEX_GITHUB_OWNER and DEX_GITHUB_REPO"
+    )
+
+    me_group_panel = await build_me_group_admin_panel()
+
+    sidebar = """
+    <nav class="dn-sidebar">
+        <div class="dn-sidebar-brand"><div class="logo">DX</div><div><strong>Dex Admin</strong><span>Control Center</span></div></div>
+        <ul class="dn-nav" id="dn-nav" style="list-style:none;margin:0;padding:0;">
+            <li><button class="active" data-tab="overview"><span class="dn-nav-icon">&#9679;</span>Overview</button></li>
+            <li><button data-tab="chat"><span class="dn-nav-icon">&#9993;</span>Chat Control</button></li>
+            <li><button data-tab="content"><span class="dn-nav-icon">&#9998;</span>Content</button></li>
+            <li><button data-tab="scripts"><span class="dn-nav-icon">&#9636;</span>Scripts &amp; Loaders</button></li>
+            <li><button data-tab="users"><span class="dn-nav-icon">&#9786;</span>Users &amp; Keys</button></li>
+            <li><button data-tab="obf"><span class="dn-nav-icon">&#9670;</span>Obfustucate</button></li>
+            <li><button class="danger-tab" data-tab="danger"><span class="dn-nav-icon">&#9888;</span>Danger Zone</button></li>
+        </ul>
+        <div class="dn-sidebar-foot">Signed in with the Railway admin session.<br><a href="/admin/logout">Log out &rarr;</a></div>
+    </nav>
+    """
+
+    topbar = f"""
+    <div class="dn-topbar">
+        <div>
+            <h1>Dex Control Center</h1>
+            <p class="sub">Authenticated control center for this deployment. Your Railway admin password gates this page, and every change below is protected by the same admin session.</p>
+        </div>
+        <span class="dn-session-pill"><i></i>Session active<a href="/admin/logout">Log out</a></span>
+    </div>
+    <p class="small-text" style="margin:-8px 0 18px;">GitHub source: {github_status}</p>
+    """
+
+    tab_overview = f"""
+    <section class="tab-panel active" id="tab-overview">
+        <div class="card accent-teal">
+            <h2>System Overview</h2>
+            <p class="label" style="margin-top:8px;">
+                <span class="pill">/dexchilli</span>
+                <span class="pill">/dexfree</span>
+                <span class="pill">/dexserverhop</span>
+                <span class="pill purple">/dexhub</span>
+                <span class="pill green">/dexpaid</span>
+                <span class="pill green">/dexautoroll</span>
+                <span class="pill purple">/scripts</span>
+            </p>
+            <div class="stats-grid">
+                <div class="stat-box"><div class="stat-label">Registered Usernames</div><div class="stat-value" id="stat-usernames">0</div></div>
+                <div class="stat-box"><div class="stat-label">Blacklisted Users</div><div class="stat-value" id="stat-blacklisted">0</div></div>
+                <div class="stat-box"><div class="stat-label">Total Logs (Discord / Sender)</div><div class="stat-value" id="stat-logs">0</div></div>
+                <div class="stat-box"><div class="stat-label">Viewers Connected (WS)</div><div class="stat-value" id="stat-viewers">0</div></div>
+                <div class="stat-box"><div class="stat-label">Sender Connected</div><div class="stat-value" id="stat-sender">No</div></div>
+            </div>
+            <p class="small-text" style="margin-top:14px;">Last log entry:</p>
+            <div class="logs-box" id="last-log-box">No logs yet.</div>
+        </div>
+        <div class="card">
+            <h2>Recent Logs (Discord / Sender)</h2>
+            <div class="logs-box" id="recent-logs-box">No logs.</div>
+        </div>
+    </section>
+    """
+
+    tab_chat = """
+    <section class="tab-panel" id="tab-chat">
+        <div class="card accent-amber">
+            <h2>Chat Rooms</h2>
+            <p class="small-text" style="margin-top:6px;">Turn either room on or off site-wide, or wipe its message history. Both actions apply immediately - connected users are notified live, no page refresh needed.</p>
+
+            <div class="dn-switch-row">
+                <div class="meta"><strong>Chat</strong><span>Public community room at <code>/chat</code>. <span id="chat-msg-count">0 message(s) · 0 online</span></span></div>
+                <label class="dn-switch"><input type="checkbox" id="chat-toggle-chat" checked><span class="slider"></span></label>
+            </div>
+            <div class="dn-room-actions">
+                <button type="button" class="danger-btn" id="chat-clear-chat">Clear Chat messages</button>
+            </div>
+
+            <div class="dn-switch-row" style="margin-top:6px;">
+                <div class="meta"><strong>ME-Chat</strong><span>Private room at <code>/ME-chat</code> for ME-Group members only. <span id="me-chat-msg-count">0 message(s) · 0 online</span></span></div>
+                <label class="dn-switch"><input type="checkbox" id="chat-toggle-me" checked><span class="slider"></span></label>
+            </div>
+            <div class="dn-room-actions">
+                <button type="button" class="danger-btn" id="chat-clear-me">Clear ME-Chat messages</button>
+            </div>
+
+            <div class="dn-room-actions" style="margin-top:16px;border-top:1px solid var(--line-soft);padding-top:16px;">
+                <button type="button" class="danger-btn" id="chat-clear-both">Clear BOTH rooms</button>
+            </div>
+        </div>
+    </section>
+    """
+
+    tab_content = f"""
+    <section class="tab-panel" id="tab-content">
+        <div class="grid">
+            <div class="card accent-teal admin-announcement-card">
+                <span class="pill purple">SITE-WIDE</span><h2 style="margin:10px 0 5px;">Announcement</h2><p class="small-text">Shows as a dismissible announcement across the site's HTML pages. Leave empty to clear it.</p>
+                <form id="admin-announcement-form" class="admin-control-form"><textarea name="text" id="admin-announcement-text" maxlength="{MAX_BANNER_LEN}" placeholder="Write the announcement everyone should see…"></textarea><div class="admin-control-row"><span id="admin-announcement-status" class="small-text">Current: <b id="announcement-preview-inline">No active announcement.</b></span><div><button type="button" class="ghost-btn" id="admin-clear-announcement">Clear</button><button type="submit">Publish Announcement</button></div></div></form>
+            </div>
+            <div class="card accent-good admin-announcement-card">
+                <span class="pill green">PERSISTENT</span><h2 style="margin:10px 0 5px;">Site Banner</h2><p class="small-text">The existing persistent banner value used by the site. Leave empty to remove it.</p>
+                <form id="admin-banner-form" class="admin-control-form"><textarea name="text" id="admin-banner-text" maxlength="{MAX_BANNER_LEN}" placeholder="Write a persistent site banner…"></textarea><div class="admin-control-row"><span id="admin-banner-status" class="small-text">Current: <b id="banner-preview-inline">No banner set.</b></span><div><button type="button" class="ghost-btn" id="admin-clear-banner">Clear</button><button type="submit">Save Banner</button></div></div></form>
+            </div>
+            <div class="card">
+                <h2>Blacklisted Users</h2>
+                <p class="small-text">Full admin access. Add or remove usernames directly from this panel.</p>
+                <form id="admin-blacklist-form" class="admin-control-form">
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <input id="admin-blacklist-username" name="username" maxlength="128" placeholder="Roblox username" autocomplete="off" style="flex:1;min-width:190px;">
+                        <button type="submit">Blacklist</button>
+                        <button type="button" class="ghost-btn" id="admin-unblacklist-btn">Unblacklist</button>
+                    </div>
+                    <div id="admin-blacklist-status" class="small-text" style="margin-top:9px;">Ready.</div>
+                </form>
+                <div class="logs-box" id="blacklist-preview-box" style="margin-top:12px;"></div>
+            </div>
+        </div>
+    </section>
+    """
+
+    tab_scripts = f"""
+    <section class="tab-panel" id="tab-scripts">
+        <div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;">
+            <div>
+                <h2 style="margin-bottom:4px;">GitHub-Managed Loaders (Hardlocked)</h2>
+                <p class="small-text">{github_status} · Sources cannot be edited or redirected from /admin.</p>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;">
+                <span id="github-refresh-status" class="small-text"></span>
+                <button type="button" id="github-refresh-btn">Refresh from GitHub</button>
+            </div>
+        </div>
+        <div class="grid">
+            {fixed_cards_html}
+        </div>
+        <div class="card">
+            <h2>Scripts Overview</h2>
+            <div class="logs-box" id="admin-scripts-box">{scripts_preview}</div>
+        </div>
+    </section>
+    """
+
+    tab_users = f"""
+    <section class="tab-panel" id="tab-users">
+        <div class="grid">
+            <div class="card">
+                <h2>Users Overview</h2>
+                <p class="label">Registered usernames (password hashes are never displayed).</p>
+                <div class="logs-box" id="admin-users-box">{users_preview}</div>
+            </div>
+            <div class="card">
+                <h2>DexPaid Keys</h2>
+                <p class="small-text">Full admin access. Generate paid keys here; the loader endpoint itself remains hardlocked.</p>
+                <form id="admin-paid-key-form" class="admin-control-form">
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+                        <input id="admin-paid-key-hours" name="hours" type="number" min="0.01" step="0.01" value="24" placeholder="Hours" style="width:150px;">
+                        <button type="submit">Generate Key</button>
+                    </div>
+                    <div id="admin-paid-key-status" class="small-text" style="margin-top:9px;">Ready.</div>
+                </form>
+                <p class="small-text" style="margin-top:10px;">Last generated key:</p>
+                <div class="logs-box" id="dexpaid-last-key-box">No key generated yet.</div>
+                <p class="small-text" style="margin-top:10px;">Last generated loadstring:</p>
+                <div class="logs-box" id="dexpaid-last-loadstring-box">No loadstring generated yet.</div>
+                <p class="small-text" style="margin-top:10px;">All active paid keys:</p>
+                <div class="logs-box" id="dexpaid-keys-box">{keys_preview_text}</div>
+            </div>
+        </div>
+        {me_group_panel}
+    </section>
+    """
+
+    tab_obf = """
+    <section class="tab-panel" id="tab-obf">
+        <div class="card obf-history-card">
+            <div class="obf-history-header">
+                <div>
+                    <h2 style="margin-bottom:5px;">Obfustucate History</h2>
+                    <p class="small-text">Every submission made through <code>/obfuscate</code>. Each entry links directly to the raw obfuscated payload and the original plaintext input — neither link is public.</p>
+                </div>
+                <span class="pill purple" id="obf-history-count">0 submissions</span>
+            </div>
+            <div class="obf-history-search-row">
+                <div class="obf-search-wrap">
+                    <svg class="obf-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    <input id="obf-history-search" type="text" placeholder="Filter by ID or SHA-256…" autocomplete="off" spellcheck="false">
+                </div>
+                <span class="small-text" style="color:#687489;white-space:nowrap;">Newest first</span>
+            </div>
+            <div id="obf-history-box" class="obf-history-list">
+                <div class="small-text" style="padding:18px 0;text-align:center;color:#687489;">Loading submissions…</div>
+            </div>
+        </div>
+    </section>
+    """
+
+    tab_danger = """
+    <section class="tab-panel" id="tab-danger">
+        <div class="card accent-danger">
+            <h2 style="color:#ffb3b3;">Danger Zone</h2>
+            <p class="small-text" style="margin-top:6px;">Destructive, irreversible actions. Double-check before clicking anything here.</p>
+            <div class="dn-switch-row">
+                <div class="meta"><strong>Wipe all chat history</strong><span>Deletes every stored message in both Chat and ME-Chat, and clears it live for anyone currently connected. Room on/off switches and media files are unaffected.</span></div>
+                <button type="button" class="danger-btn" id="danger-clear-all">Clear all messages</button>
+            </div>
+        </div>
+    </section>
+    """
+
+    return (
+        sidebar
+        + '<main class="dn-main">'
+        + topbar
+        + tab_overview
+        + tab_chat
+        + tab_content
+        + tab_scripts
+        + tab_users
+        + tab_obf
+        + tab_danger
+        + "</main>"
+    )
+
+
+@app.post("/admin")
+async def admin_post(request: Request):
+    ip = _client_ip(request)
+    if await is_rate_limited("admin_login", ip):
+        return HTMLResponse(ADMIN_BASE_HTML.format(
+            body=admin_login_form("Too many failed attempts. Try again later.")), status_code=429)
+
+    if reject_if_oversized(request, MAX_GENERIC_BODY):
+        return PlainTextResponse("Payload too large.", status_code=413)
+
+    raw = await request.body()
+    if len(raw) > MAX_GENERIC_BODY:
+        return PlainTextResponse("Payload too large.", status_code=413)
+    data = parse_qs(raw.decode(errors="ignore"))
+    key = data.get("key", [""])[0]
+
+    if not key or not constant_time_eq(key, ADMIN_PASSWORD):
+        await record_failed_attempt("admin_login", ip)
+        return HTMLResponse(ADMIN_BASE_HTML.format(body=admin_login_form("Invalid admin password.")))
+
+    await clear_attempts("admin_login", ip)
+    resp = HTMLResponse(ADMIN_BASE_HTML.format(body=await build_admin_dashboard_body()))
+    admin_token = create_session_token("admin")
+    resp.set_cookie(
+        "dex_admin_session", admin_token,
+        httponly=True, secure=True, samesite="strict",
+        max_age=ADMIN_SESSION_MAX_AGE,
+    )
+    return resp
+
+
+def require_admin_session(request: Request) -> bool:
+    token = request.cookies.get("dex_admin_session")
+    return verify_session_token(token, ADMIN_SESSION_MAX_AGE) == "admin"
+
+
+@app.get("/admin/logout")
+@app.post("/admin/logout")
+async def admin_logout():
+    # Clears the admin session cookie so /admin asks for the Railway
+    # DEX_ADMIN_KEY password again. Useful for testing that the password
+    # gate is actually working - an existing valid session cookie (good for
+    # ADMIN_SESSION_MAX_AGE, 2 hours) is what lets /admin skip straight to
+    # the dashboard, which is expected behavior, not a missing password gate.
+    resp = RedirectResponse(url="/admin", status_code=303)
+    resp.delete_cookie("dex_admin_session")
+    return resp
+
+
+@app.post("/admin/me-group")
+async def admin_me_group(request: Request):
+    if not require_admin_session(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    data=parse_qs((await request.body()).decode(errors="ignore")); action=data.get("action",[""])[0].strip().lower(); username=data.get("username",[""])[0].strip()
+    if not username or len(username)>64: return JSONResponse({"error":"invalid username"},status_code=400)
+    async with users_lock: registered=username in users
+    if not registered: return JSONResponse({"error":"that username is not registered"},status_code=404)
+    async with me_group_lock:
+        if action=="add": me_group_users.add(username)
+        elif action=="remove": me_group_users.discard(username)
+        else: return JSONResponse({"error":"action must be add or remove"},status_code=400)
+        _save_me_group_file(); members=sorted(me_group_users,key=str.lower)
+    return JSONResponse({"ok":True,"members":members})
+
+@app.get("/admin/me-group")
+async def admin_me_group_get(request: Request):
+    if not require_admin_session(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    async with me_group_lock: members=sorted(me_group_users,key=str.lower)
+    return JSONResponse({"ok":True,"members":members})
+
+
+@app.get("/admin/datadir")
+async def admin_datadir_status(request: Request):
+    # Quick way to check - without digging through deploy logs - whether this
+    # process is actually writing to the mounted Volume right now, or has
+    # silently fallen back to ephemeral local storage.
+    if not require_admin_session(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    configured = (os.environ.get("DEX_DATA_DIR", "/data").strip() or "/data")
+    live_write_ok = True
+    live_error = None
+    try:
+        _write_test(DATA_DIR)
+    except Exception as e:
+        live_write_ok = False
+        live_error = str(e)
+    disk = {}
+    try:
+        import shutil as _shutil
+        t, u, f = _shutil.disk_usage(DATA_DIR)
+        disk = {"total_mb": t // (1024**2), "used_mb": u // (1024**2), "free_mb": f // (1024**2)}
+    except Exception:
+        pass
+    return JSONResponse({
+        "configured_data_dir": configured,
+        "active_data_dir": DATA_DIR,
+        "using_persistent_volume": not _USING_FALLBACK_DATA_DIR,
+        "live_write_check_ok": live_write_ok,
+        "live_write_error": live_error,
+        "disk": disk,
+        "files_present": sorted(os.listdir(DATA_DIR)) if os.path.isdir(DATA_DIR) else [],
+    })
+
+@app.post("/admin/update")
+async def admin_update(request: Request):
+    """Authenticated admin mutation gateway.
+
+    /admin is fully writable for administrative data and controls. The only
+    intentionally immutable resources are the GitHub-managed scripts/loaders;
+    those continue to come only from their existing hardlocked source URLs.
+    """
+    if not require_admin_session(request):
+        return JSONResponse({"error": "admin login required"}, status_code=401)
+
+    if reject_if_oversized(request, MAX_GENERIC_BODY):
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
+    raw = await request.body()
+    if len(raw) > MAX_GENERIC_BODY:
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
+    data = parse_qs(raw.decode("utf-8", errors="ignore"))
+    action = data.get("action", [""])[0].strip().lower()
+
+    if action == "announcement":
+        return await _admin_form_action(request, "announcement")
+
+    if action == "banner":
+        return await _admin_form_action(request, "banner")
+
+    if action == "blacklist":
+        username = normalize_field(data.get("username", [""])[0].strip())
+        if not username or len(username) > 128:
+            return JSONResponse({"error": "invalid username"}, status_code=400)
+        if _STRICT_SINGLE_LINE_PATTERN.search(username):
+            return JSONResponse({"error": "invalid username"}, status_code=400)
+        async with blacklist_lock:
+            blacklisted_usernames.add(username)
+            save_blacklist_to_file(blacklisted_usernames)
+        return JSONResponse({"ok": True, "action": "blacklist", "username": username})
+
+    if action == "unblacklist":
+        username = normalize_field(data.get("username", [""])[0].strip())
+        if not username or len(username) > 128:
+            return JSONResponse({"error": "invalid username"}, status_code=400)
+        if _STRICT_SINGLE_LINE_PATTERN.search(username):
+            return JSONResponse({"error": "invalid username"}, status_code=400)
+        async with blacklist_lock:
+            blacklisted_usernames.discard(username)
+            save_blacklist_to_file(blacklisted_usernames)
+        return JSONResponse({"ok": True, "action": "unblacklist", "username": username})
+
+    if action == "generate_paid_key":
+        global last_generated_paid_key, last_generated_paid_loadstring
+        hours = parse_duration_hours(data.get("hours", [""])[0].strip())
+        if hours is None:
+            return JSONResponse(
+                {"error": f"invalid duration (0 < hours <= {MAX_KEY_DURATION_HOURS})"},
+                status_code=400,
+            )
+        async with dexpaid_keys_lock:
+            cleanup_expired_paid_keys()
+            new_key = generate_paid_key(20)
+            expiry = time.time() + hours * 3600.0
+            dexpaid_keys[new_key] = expiry
+            save_dexpaid_keys_to_file(dexpaid_keys)
+            last_generated_paid_key = new_key
+            last_generated_paid_loadstring = (
+                f'loadstring(game:HttpGet("{BASE_URL}/dexpaid?key={new_key}"))()'
+            )
+        return JSONResponse({
+            "ok": True,
+            "action": "generate_paid_key",
+            "key": new_key,
+            "expires_at": expiry,
+            "loadstring": last_generated_paid_loadstring,
+        })
+
+    if action == "refresh_scripts":
+        # This only refreshes the existing hardlocked sources; it cannot
+        # change, create, delete, or redirect a script/loader source.
+        if not github_configured() and not FIXED_RAW_SCRIPT_URLS:
+            return JSONResponse({"error": "No remote script sources configured"}, status_code=400)
+        results = await refresh_all_github_scripts()
+        return JSONResponse({
+            "ok": all(r.get("ok") for r in results.values()),
+            "results": results,
+            "hardlocked_sources": dict(FIXED_RAW_SCRIPT_URLS),
+        })
+
+    return JSONResponse({"error": "unknown admin action"}, status_code=400)
+
+# -----------------------------
+# ADMIN LIVE STATS API - requires an admin session, and is now rate-limited
+# with headroom for the dashboard's own 2s polling.
+# -----------------------------
+
+ADMIN_STATS_RATE_LIMIT = 30
+ADMIN_STATS_RATE_WINDOW = 10.0
+
+
+async def fetch_remote_info() -> dict:
+    url = f"{BASE_URL}/check"
+
+    def _do_request():
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                data = resp.read()
+                return json.loads(data.decode("utf-8"))
+        except Exception:
+            return {}
+
+    return await asyncio.to_thread(_do_request)
+
+
+@app.get("/admin/stats")
+async def admin_stats(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "admin_stats_get", max_requests=ADMIN_STATS_RATE_LIMIT, window_seconds=ADMIN_STATS_RATE_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    if not require_admin_session(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    global last_generated_paid_key, last_generated_paid_loadstring
+
+    async with logs_lock:
+        local_logs_count = len(stored_logs)
+        last_log = stored_logs[-1] if stored_logs else ""
+        recent_logs = "\n".join(stored_logs[-20:]) if stored_logs else ""
+    async with lock:
+        local_usernames_count = len(stored_usernames)
+    async with blacklist_lock:
+        blacklisted_count = len(blacklisted_usernames)
+        blacklisted_list = "\n".join(sorted(blacklisted_usernames))
+    async with announcement_lock:
+        announcement = announcement_text
+    async with banner_lock:
+        banner = banner_text
+    async with dexpaid_keys_lock:
+        cleanup_expired_paid_keys()
+        now = time.time()
+        preview_lines = []
+        for k, exp in dexpaid_keys.items():
+            remaining = max(0, int(exp - now))
+            preview_lines.append(f"{k}  |  expires in {remaining} seconds")
+        dexpaid_keys_preview = "\n".join(preview_lines) if preview_lines else "No paid keys."
+
+    async with users_lock:
+        users_lines = []
+        for u in users.values():
+            users_lines.append(f"{u['username']} | created: {int(u.get('created_at', 0))}")
+        users_preview = "\n".join(users_lines) if users_lines else "No users."
+
+    async with scripts_lock:
+        scripts_lines = []
+        for s in scripts.values():
+            scripts_lines.append(
+                f"{s['name']} ({s['slug']}) | owner: {s['owner']} | paid: {s['is_paid']} | "
+                f"hwid_lock: {s['hwid_lock']}{' | GITHUB-LOCKED' if s.get('github_managed') else ''}"
+            )
+        scripts_preview = "\n".join(scripts_lines) if scripts_lines else "No scripts."
+
+    remote = await fetch_remote_info()
+
+    sender_connected = remote.get("sender_connected", sender_ws is not None)
+    viewers_count = remote.get("viewer_count", len(viewers))
+    logs_count = remote.get("stored_logs_count", local_logs_count)
+    messages_count = remote.get("total_messages_broadcasted", logs_count)
+    usernames_count = remote.get("stored_usernames_count", local_usernames_count)
+
+    async with obf_history_lock:
+        history = _load_obf_history()
+    obf_preview = [{k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url")} for item in reversed(history)]
+
+    async with chat_lock:
+        chat_message_count = len(chat_history_cache)
+    async with me_chat_lock:
+        me_chat_message_count = len(me_chat_history_cache)
+
+    return JSONResponse(
+        {
+            "usernames_count": usernames_count,
+            "chat_enabled": chat_enabled,
+            "me_chat_enabled": me_chat_enabled,
+            "chat_message_count": chat_message_count,
+            "me_chat_message_count": me_chat_message_count,
+            "chat_online": len(chat_connections),
+            "me_chat_online": len(me_chat_connections),
+            "blacklisted_count": blacklisted_count,
+            "logs_count": logs_count,
+            "messages_count": messages_count,
+            "viewers_count": viewers_count,
+            "sender_connected": sender_connected,
+            "last_log": last_log,
+            "recent_logs": recent_logs,
+            "announcement": announcement,
+            "banner": banner,
+            "blacklisted_list": blacklisted_list,
+            "dexpaid_keys_preview": dexpaid_keys_preview,
+            "dexpaid_last_key": last_generated_paid_key,
+            "dexpaid_last_loadstring": last_generated_paid_loadstring,
+            "users_preview": users_preview,
+            "scripts_preview": scripts_preview,
+            "obfuscation_history": obf_preview,
+            "obfuscation_history_count": len(history),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+# -----------------------------
+# SIMPLE EXECUTOR CHECK
+# -----------------------------
+
+EXECUTOR_UA_SIGNATURES = (
+    "roblox",       # official Roblox client / most executors identify as this
+    "wininet",      # Windows WinINet HTTP stack used by many executors
+    "winhttp",      # Windows WinHTTP stack used by a handful of executors
+    "roblox/winhttp",
+    "robloxapp",
+    "robloxstudio",
+)
+
+
+def is_executor(request: Request) -> bool:
+    """Best-effort check for "this request came from a Roblox game/executor,
+    not a person's web browser". Not perfect (a browser can spoof its
+    User-Agent), but it's enough to stop the raw script source from being
+    casually opened, indexed, or scraped as a plain webpage."""
+    ua = request.headers.get("User-Agent", "")
+    ua_lower = ua.lower()
+    return any(sig in ua_lower for sig in EXECUTOR_UA_SIGNATURES)
+
+
+def _protected_script_page_html() -> str:
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">'
+        '<title>Protected Script — DexNotifier</title></head><body>'
+        '<main class="wrap" style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:28px;">'
+        '<div class="card" style="max-width:480px;width:100%;text-align:center;padding:38px 32px;">'
+        '<div style="width:62px;height:62px;margin:0 auto 20px;border-radius:18px;display:grid;place-items:center;'
+        'background:linear-gradient(135deg,#8b5cf6,#22d3ee);box-shadow:0 14px 40px rgba(139,92,246,.35);">'
+        '<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" '
+        'stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="10" rx="2"/>'
+        '<path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg></div>'
+        '<span class="pill red" style="margin-bottom:12px;display:inline-block;">Protected Script</span>'
+        '<h1 style="font-size:21px;margin:6px 0 10px;">This Script Is Owned And Protected By Dex Notifier</h1>'
+        '<p style="margin:0 0 6px;">This link only serves script source to a Roblox executor request '
+        '- it can\'t be viewed in a regular web browser.</p>'
+        '<p class="small-text" style="margin-top:14px;">If you were given this link, load it from inside a '
+        'Roblox executor instead. Viewing, copying, or scraping this page will not reveal the script.</p>'
+        '</div></main></body></html>'
+    )
+
+
+def protected_script_response(status_code: int = 403) -> HTMLResponse:
+    """What a browser (or anything else that doesn't look like a Roblox
+    executor) gets back from a script-loader endpoint, instead of the raw
+    Lua source or a bare 'Private Script' string."""
+    return HTMLResponse(_protected_script_page_html(), status_code=status_code)
+
+# -----------------------------
+# FIXED LOADER ENDPOINTS (GITHUB-MANAGED) - rate-limited per IP so the
+# loader can't be hammered into re-fetching from GitHub constantly (the
+# cache absorbs most of this anyway, but the limit protects against abuse
+# regardless of cache state).
+# -----------------------------
+
+LOADER_RATE_LIMIT = 30
+LOADER_RATE_WINDOW = 10.0
+
+
+@app.get("/dexfree")
+async def dexfree(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+    if not is_executor(request):
+        return protected_script_response()
+    return PlainTextResponse(await get_github_script("dexfree", DEXFREE_FILE, DEFAULT_DEXFREE))
+
+
+@app.get("/dexchilli")
+async def dexchilli(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+    if not is_executor(request):
+        return protected_script_response()
+    return PlainTextResponse(await get_github_script("dexchilli", DEXCHILLI_FILE, DEFAULT_DEXCHILLI))
+
+
+@app.get("/dexserverhop")
+async def dexserverhop(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+    if not is_executor(request):
+        return protected_script_response()
+    return PlainTextResponse(await get_github_script("dexserverhop", DEXSERVERHOP_FILE, DEFAULT_DEXSERVERHOP))
+
+
+@app.get("/dexhub")
+async def dexhub(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+    if not is_executor(request):
+        return protected_script_response()
+    return PlainTextResponse(await get_github_script("dexhub", DEXHUB_FILE, DEFAULT_DEXHUB))
+
+
+@app.get("/dexautoroll")
+async def dexautoroll(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+    if not is_executor(request):
+        return protected_script_response()
+    return PlainTextResponse(await get_github_script("dexautoroll", DEXAUTOROLL_FILE, DEFAULT_DEXAUTOROLL))
+
+
+@app.get("/dexcodesniper")
+async def dexcodesniper(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+    if not is_executor(request):
+        return protected_script_response()
+    return PlainTextResponse(await get_github_script("dexcodesniper", DEXCODESNIPER_FILE, DEFAULT_DEXCODESNIPER))
+
+
+# Paid-key guessing gets its own failed-attempt lockout (separate from the
+# general loader rate limit above) since a wrong key here is a meaningful
+# "attack signal", not just traffic volume.
+DEXPAID_KEY_CHECK_RATE_LIMIT = 20
+DEXPAID_KEY_CHECK_RATE_WINDOW = 60.0
+
+
+@app.get("/dexpaid")
+async def dexpaid(request: Request):
+    ip = _client_ip(request)
+
+    if rate_limited(ip, "loader_get", max_requests=LOADER_RATE_LIMIT, window_seconds=LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+
+    if not is_executor(request):
+        return protected_script_response()
+
+    if await is_rate_limited("dexpaid_key_guess", ip):
+        return PlainTextResponse("-- Too many invalid key attempts. Try again later.", status_code=429)
+
+    if rate_limited(ip, "dexpaid_key_check", max_requests=DEXPAID_KEY_CHECK_RATE_LIMIT, window_seconds=DEXPAID_KEY_CHECK_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+
+    key = request.query_params.get("key", "").strip()
+    if not key:
+        return PlainTextResponse("-- Missing paid key.")
+
+    async with dexpaid_keys_lock:
+        cleanup_expired_paid_keys()
+        expiry = None
+        for stored_key, exp in dexpaid_keys.items():
+            if constant_time_eq(stored_key, key):
+                expiry = exp
+                break
+        if not expiry:
+            await record_failed_attempt("dexpaid_key_guess", ip)
+            return PlainTextResponse("-- Invalid paid key.")
+        if time.time() > expiry:
+            dexpaid_keys.pop(key, None)
+            save_dexpaid_keys_to_file(dexpaid_keys)
+            return PlainTextResponse("-- Paid key expired.")
+
+    await clear_attempts("dexpaid_key_guess", ip)
+    return PlainTextResponse(await get_github_script("dexpaid", DEXPAID_FILE, DEFAULT_DEXPAID))
+
+# -----------------------------
+# RAW LOADER BACKEND
+# -----------------------------
+# The obfuscator POSTs the final Lua text here. This backend stores the
+# exact payload under a random loader id and returns a stable raw URL:
+#   https://dexapi1.up.railway.app/raw/<LOADER_ID>
+#
+# Set DEX_API_KEY on this service. The obfuscator sends the same value in
+# X-Api-Key (or its own DEX_RAW_BACKEND_API_KEY if you want a separate key).
+
+RAW_LOADER_DIR = os.environ.get("DEX_RAW_LOADER_DIR", "").strip() or os.path.join(DATA_DIR, "raw_loaders")
+RAW_LOADER_POST_RATE_LIMIT = 30
+RAW_LOADER_POST_RATE_WINDOW = 60.0
+RAW_LOADER_GET_RATE_LIMIT = 120
+RAW_LOADER_GET_RATE_WINDOW = 10.0
+RAW_LOADER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+
+OBF_HISTORY_DIR = os.environ.get("DEX_OBF_HISTORY_DIR", "").strip() or os.path.join(DATA_DIR, "obf_history")
+OBF_HISTORY_FILE = os.path.join(OBF_HISTORY_DIR, "index.json")
+OBF_HISTORY_MAX = 5000
+OBF_HISTORY_META_PREVIEW = 100
+obf_history_lock = asyncio.Lock()
+
+def _load_obf_history() -> list:
+    try:
+        with open(OBF_HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def _save_obf_history(data: list):
+    os.makedirs(OBF_HISTORY_DIR, exist_ok=True)
+    _atomic_write(OBF_HISTORY_FILE, json.dumps(data, ensure_ascii=False), mode=0o600)
+
+def _obf_source_path(submission_id: str) -> str:
+    if not RAW_LOADER_ID_PATTERN.fullmatch(submission_id):
+        raise ValueError("Invalid submission id.")
+    os.makedirs(OBF_HISTORY_DIR, exist_ok=True)
+    return os.path.join(OBF_HISTORY_DIR, submission_id + ".lua")
+
+def _record_obfustucate_submission(source: str, loader_id: str, raw_url: str) -> dict:
+    source_path = _obf_source_path(loader_id)
+    _atomic_write(source_path, source, mode=0o600)
+    entry = {"id": loader_id, "created_at": time.time(), "source_bytes": len(source.encode("utf-8")), "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(), "raw_url": raw_url, "source_path": source_path}
+    history = _load_obf_history()
+    history.append(entry)
+    if len(history) > OBF_HISTORY_MAX:
+        stale = history[:-OBF_HISTORY_MAX]
+        history = history[-OBF_HISTORY_MAX:]
+        for old in stale:
+            try: os.remove(old.get("source_path", ""))
+            except Exception: pass
+    _save_obf_history(history)
+    return entry
+
+
+def _publish_local_payload(payload: str):
+    if not isinstance(payload, str) or not payload.strip():
+        raise ValueError("Raw payload is empty.")
+    loader_id = _create_raw_loader_id()
+    path = _raw_loader_path(loader_id)
+    _atomic_write(path, payload, mode=0o600)
+    raw_url = f"https://dexnotifier.xyz/raw/{loader_id}"
+    return raw_url, loader_id
+
+
+def _raw_loader_path(loader_id: str) -> str:
+    if not RAW_LOADER_ID_PATTERN.fullmatch(loader_id):
+        raise ValueError("Invalid loader id.")
+    return os.path.join(RAW_LOADER_DIR, loader_id + ".lua")
+
+
+def _create_raw_loader_id() -> str:
+    os.makedirs(RAW_LOADER_DIR, exist_ok=True)
+    for _ in range(10):
+        loader_id = secrets.token_urlsafe(18).rstrip("=")
+        if RAW_LOADER_ID_PATTERN.fullmatch(loader_id):
+            path = _raw_loader_path(loader_id)
+            if not os.path.exists(path):
+                return loader_id
+    raise RuntimeError("Could not allocate a unique loader id.")
+
+
+@app.post("/raw")
+async def create_raw_loader(request: Request):
+    ip = _client_ip(request)
+
+    if rate_limited(
+        ip,
+        "raw_loader_post",
+        max_requests=RAW_LOADER_POST_RATE_LIMIT,
+        window_seconds=RAW_LOADER_POST_RATE_WINDOW,
+    ):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    api_key = request.headers.get("X-Api-Key", "")
+    if not is_valid_key(api_key):
+        await record_failed_attempt("raw_loader_auth", ip)
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    if reject_if_oversized(request, MAX_SCRIPT_BODY):
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
+    try:
+        body = await request.body()
+    except Exception:
+        return JSONResponse({"error": "invalid request body"}, status_code=400)
+
+    if len(body) > MAX_SCRIPT_BODY:
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
+    try:
+        payload = body.decode("utf-8")
+    except UnicodeDecodeError:
+        return JSONResponse({"error": "payload must be UTF-8 text"}, status_code=400)
+
+    if not payload.strip():
+        return JSONResponse({"error": "payload is empty"}, status_code=400)
+
+    if _NUL_BYTE_PATTERN.search(payload):
+        return JSONResponse({"error": "payload contains NUL bytes"}, status_code=400)
+
+    try:
+        loader_id = _create_raw_loader_id()
+        path = _raw_loader_path(loader_id)
+        _atomic_write(path, payload, mode=0o600)
+    except Exception as exc:
+        print(f"[RAW_LOADER] Failed to store payload: {exc}")
+        return JSONResponse({"error": "could not store payload"}, status_code=500)
+
+    await clear_attempts("raw_loader_auth", ip)
+
+    raw_url = f"https://dexnotifier.xyz/raw/{loader_id}"
+    return JSONResponse(
+        {
+            "ok": True,
+            "loader_id": loader_id,
+            "raw_url": raw_url,
+            "loadstring": f'loadstring(game:HttpGet("{raw_url}"))()',
+        }
+    )
+
+
+@app.get("/raw/{loader_id}")
+async def get_raw_loader(loader_id: str, request: Request):
+    ip = _client_ip(request)
+
+    if rate_limited(
+        ip,
+        "raw_loader_get",
+        max_requests=RAW_LOADER_GET_RATE_LIMIT,
+        window_seconds=RAW_LOADER_GET_RATE_WINDOW,
+    ):
+        return PlainTextResponse("RATE_LIMITED", status_code=429)
+
+    if not RAW_LOADER_ID_PATTERN.fullmatch(loader_id):
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+
+    path = _raw_loader_path(loader_id)
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = f.read()
+    except FileNotFoundError:
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+    except Exception as exc:
+        print(f"[RAW_LOADER] Failed to read {loader_id}: {exc}")
+        return PlainTextResponse("Something went wrong. Please try again.", status_code=500)
+
+    return PlainTextResponse(
+        payload,
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+OBF_LEVELS = {
+    "light": {"block1": (31, 53), "block2": (35, 59), "decoys": (16, 24), "fragment": (45, 85)},
+    "medium": {"block1": (23, 49), "block2": (27, 55), "decoys": (64, 96), "fragment": (25, 65)},
+    "hard": {"block1": (9, 27), "block2": (11, 31), "decoys": (256, 384), "fragment": (8, 32)},
+}
+
+def normalize_obf_level(level):
+    level = str(level or "hard").strip().lower()
+    if level in {"lightly", "light"}:
+        return "light"
+    if level in {"medium"}:
+        return "medium"
+    if level in {"hard"}:
+        return "hard"
+    raise ValueError("Invalid obfuscation level. Choose lightly, medium, or hard.")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# OBFUSCATOR
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _build_loadstring(raw_url):
+    """Build the exact loader text shown to the user/copy controls."""
+    if not isinstance(raw_url, str):
+        raw_url = str(raw_url)
+
+    raw_url = raw_url.strip()
+    if not raw_url:
+        raise ValueError("Raw loader URL is empty.")
+
+    # JSON string quoting is also valid Lua string quoting for URLs and avoids
+    # accidental breakage if the URL ever contains a quote or backslash.
+    return "loadstring(game:HttpGet(" + json.dumps(raw_url) + "))()"
+
+
+def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) -> str:
+
+    if source is None:
+        raise ValueError(
+            "No Lua source was supplied."
+        )
+
+    if not isinstance(source, str):
+        source = str(source)
+
+    if not source.strip():
+        raise ValueError(
+            "Lua source is empty."
+        )
+
+    level = normalize_obf_level(level)
+    profile = OBF_LEVELS[level]
+
+    src = source.encode("utf-8")
+
+    if not src:
+        raise ValueError(
+            "Lua source is empty."
+        )
+
+    used = set()
+
+    def N():
+        return _unique_name(used)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # RANDOM IDENTIFIERS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    V_BYTE       = N()
+    V_CHAR       = N()
+    V_LEN        = N()
+    V_CONCAT     = N()
+    V_INSERT     = N()
+    V_FLOOR      = N()
+    V_LOAD       = N()
+
+    V_XOR        = N()
+
+    V_SEED1      = N()
+    V_SEED2      = N()
+    V_SEED3      = N()
+    V_SEED4      = N()
+
+    V_SEED5      = N()
+    V_SEED6      = N()
+    V_SEED7      = N()
+    V_SEED8      = N()
+
+    # Ten independent cipher layers. Each build gets fresh seeds and fresh
+    # block schedules; the runtime reverses all ten layers before loading.
+    V_SEED9      = N()
+    V_SEED10     = N()
+    V_SEED11     = N()
+    V_SEED12     = N()
+
+    # Seven additional independent cipher layers (10 total).
+    V_SEED13     = N()
+    V_SEED14     = N()
+    V_SEED15     = N()
+    V_SEED16     = N()
+    V_SEED17     = N()
+    V_SEED18     = N()
+    V_SEED19     = N()
+    V_SEED20     = N()
+    V_SEED21     = N()
+    V_SEED22     = N()
+    V_SEED23     = N()
+    V_SEED24     = N()
+    V_SEED25     = N()
+    V_SEED26     = N()
+    V_SEED27     = N()
+    V_SEED28     = N()
+    V_SEED29     = N()
+    V_SEED30     = N()
+    V_SEED31     = N()
+    V_SEED32     = N()
+    V_SEED33     = N()
+    V_SEED34     = N()
+    V_SEED35     = N()
+    V_SEED36     = N()
+    V_SEED37     = N()
+    V_SEED38     = N()
+    V_SEED39     = N()
+    V_SEED40     = N()
+
+    V_BLOCKSIZE  = N()
+    V_BLOCKSIZE2 = N()
+    V_BLOCKSIZE3 = N()
+    V_BLOCKSIZE4 = N()
+    V_BLOCKSIZE5 = N()
+    V_BLOCKSIZE6 = N()
+    V_BLOCKSIZE7 = N()
+    V_BLOCKSIZE8 = N()
+    V_BLOCKSIZE9 = N()
+    V_BLOCKSIZE10 = N()
+
+    V_PARTS      = N()
+    V_PAYLOAD    = N()
+    V_DECODED    = N()
+    V_SOURCE     = N()
+    V_RESULT     = N()
+
+    V_BLOCKLEN   = N()
+    V_STATE      = N()
+    V_PERM       = N()
+
+    V_I          = N()
+    V_J          = N()
+    V_K          = N()
+
+    V_ORIGINAL   = N()
+    V_ABSOLUTE   = N()
+
+    V_VALUE      = N()
+    V_ROTATION   = N()
+    V_ADD        = N()
+    V_X          = N()
+
+    V_PREVIOUS   = N()
+    V_CURRENT    = N()
+    V_FEEDBACK   = N()
+    V_FINALMIX   = N()
+
+    V_H1         = N()
+    V_H2         = N()
+    V_H3         = N()
+    V_H4         = N()
+
+    V_EXPECT1    = N()
+    V_EXPECT2    = N()
+    V_EXPECT3    = N()
+    V_EXPECT4    = N()
+
+    V_CH1        = N()
+    V_CH2        = N()
+    V_CH3        = N()
+
+    V_CEXPECT1   = N()
+    V_CEXPECT2   = N()
+    V_CEXPECT3   = N()
+
+    V_LENGTH     = N()
+    V_EXPECTLEN  = N()
+
+    V_NOISE      = N()
+
+    V_FN         = N()
+    V_ERR        = N()
+
+    V_BITCOUNT   = N()
+    V_BYTEVALUE  = N()
+    V_TOKEN     = N()
+
+    V_ZEROCHAR   = N()
+    V_ONECHAR    = N()
+
+    V_GUARD      = N()
+    V_GUARD2     = N()
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # RANDOM BUILD STATE
+    # ═══════════════════════════════════════════════════════════════════════
+
+    seed1 = _RNG.randint(0, 0xFFFF)
+    seed2 = _RNG.randint(0, 0xFFFF)
+    seed3 = _RNG.randint(0, 0xFFFF)
+    seed4 = _RNG.randint(0, 0xFFFF)
+
+    seed5 = _RNG.randint(0, 0xFFFF)
+    seed6 = _RNG.randint(0, 0xFFFF)
+    seed7 = _RNG.randint(0, 0xFFFF)
+    seed8 = _RNG.randint(0, 0xFFFF)
+
+    seed9 = _RNG.randint(0, 0xFFFF)
+    seed10 = _RNG.randint(0, 0xFFFF)
+    seed11 = _RNG.randint(0, 0xFFFF)
+    seed12 = _RNG.randint(0, 0xFFFF)
+    seed13 = _RNG.randint(0, 0xFFFF)
+    seed14 = _RNG.randint(0, 0xFFFF)
+    seed15 = _RNG.randint(0, 0xFFFF)
+    seed16 = _RNG.randint(0, 0xFFFF)
+    seed17 = _RNG.randint(0, 0xFFFF)
+    seed18 = _RNG.randint(0, 0xFFFF)
+    seed19 = _RNG.randint(0, 0xFFFF)
+    seed20 = _RNG.randint(0, 0xFFFF)
+    seed21 = _RNG.randint(0, 0xFFFF)
+    seed22 = _RNG.randint(0, 0xFFFF)
+    seed23 = _RNG.randint(0, 0xFFFF)
+    seed24 = _RNG.randint(0, 0xFFFF)
+    seed25 = _RNG.randint(0, 0xFFFF)
+    seed26 = _RNG.randint(0, 0xFFFF)
+    seed27 = _RNG.randint(0, 0xFFFF)
+    seed28 = _RNG.randint(0, 0xFFFF)
+    seed29 = _RNG.randint(0, 0xFFFF)
+    seed30 = _RNG.randint(0, 0xFFFF)
+    seed31 = _RNG.randint(0, 0xFFFF)
+    seed32 = _RNG.randint(0, 0xFFFF)
+    seed33 = _RNG.randint(0, 0xFFFF)
+    seed34 = _RNG.randint(0, 0xFFFF)
+    seed35 = _RNG.randint(0, 0xFFFF)
+    seed36 = _RNG.randint(0, 0xFFFF)
+    seed37 = _RNG.randint(0, 0xFFFF)
+    seed38 = _RNG.randint(0, 0xFFFF)
+    seed39 = _RNG.randint(0, 0xFFFF)
+    seed40 = _RNG.randint(0, 0xFFFF)
+
+    block_size = _RNG.randint(*profile["block1"])
+    block_size2 = _RNG.randint(*profile["block2"])
+    block_size3 = _RNG.randint(*profile["block1"])
+    block_size4 = _RNG.randint(*profile["block2"])
+    block_size5 = _RNG.randint(*profile["block1"])
+    block_size6 = _RNG.randint(*profile["block2"])
+    block_size7 = _RNG.randint(*profile["block1"])
+    block_size8 = _RNG.randint(*profile["block2"])
+    block_size9 = _RNG.randint(*profile["block1"])
+    block_size10 = _RNG.randint(*profile["block2"])
+
+    token_zero, token_one = (
+        _make_token_alphabet()
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TEN-LAYER CIPHER PIPELINE
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # Layer 1: independent permutation/XOR/rotation/additive round.
+    encrypted1 = _encrypt_round(
+        src,
+        seed1,
+        seed2,
+        seed3,
+        seed4,
+        block_size
+    )
+
+    # Layer 2: independent permutation/XOR/rotation/additive round.
+    encrypted2 = _encrypt_round(
+        encrypted1,
+        seed5,
+        seed6,
+        seed7,
+        seed8,
+        block_size2
+    )
+
+    # Layer 3: independent permutation/XOR/rotation/additive round.
+    encrypted3 = _encrypt_round(
+        encrypted2,
+        seed9,
+        seed10,
+        seed11,
+        seed12,
+        block_size3
+    )
+
+    # Layer 4: independent permutation/XOR/rotation/additive round.
+    encrypted4 = _encrypt_round(
+        encrypted3,
+        seed13,
+        seed14,
+        seed15,
+        seed16,
+        block_size4
+    )
+
+    # Layer 5: independent permutation/XOR/rotation/additive round.
+    encrypted5 = _encrypt_round(
+        encrypted4,
+        seed17,
+        seed18,
+        seed19,
+        seed20,
+        block_size5
+    )
+
+    # Layer 6: independent permutation/XOR/rotation/additive round.
+    encrypted6 = _encrypt_round(
+        encrypted5,
+        seed21,
+        seed22,
+        seed23,
+        seed24,
+        block_size6
+    )
+
+    # Layer 7: independent permutation/XOR/rotation/additive round.
+    encrypted7 = _encrypt_round(
+        encrypted6,
+        seed25,
+        seed26,
+        seed27,
+        seed28,
+        block_size7
+    )
+
+    # Layer 8: independent permutation/XOR/rotation/additive round.
+    encrypted8 = _encrypt_round(
+        encrypted7,
+        seed29,
+        seed30,
+        seed31,
+        seed32,
+        block_size8
+    )
+
+    # Layer 9: independent permutation/XOR/rotation/additive round.
+    encrypted9 = _encrypt_round(
+        encrypted8,
+        seed33,
+        seed34,
+        seed35,
+        seed36,
+        block_size9
+    )
+
+    # Layer 10: independent permutation/XOR/rotation/additive round.
+    encrypted10 = _encrypt_round(
+        encrypted9,
+        seed37,
+        seed38,
+        seed39,
+        seed40,
+        block_size10
+    )
+
+    # Every layer is independently reversible; the final ciphertext is encrypted10.
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # INTERNAL TEN-LAYER ROUND-TRIP TEST
+    # ═══════════════════════════════════════════════════════════════════════
+
+    roundtrip9 = _decrypt_round(
+        encrypted10, seed37, seed38, seed39, seed40, block_size10
+    )
+
+    roundtrip8 = _decrypt_round(
+        roundtrip9, seed33, seed34, seed35, seed36, block_size9
+    )
+
+    roundtrip7 = _decrypt_round(
+        roundtrip8, seed29, seed30, seed31, seed32, block_size8
+    )
+
+    roundtrip6 = _decrypt_round(
+        roundtrip7, seed25, seed26, seed27, seed28, block_size7
+    )
+
+    roundtrip5 = _decrypt_round(
+        roundtrip6, seed21, seed22, seed23, seed24, block_size6
+    )
+
+    roundtrip4 = _decrypt_round(
+        roundtrip5, seed17, seed18, seed19, seed20, block_size5
+    )
+
+    roundtrip3 = _decrypt_round(
+        roundtrip4, seed13, seed14, seed15, seed16, block_size4
+    )
+
+    roundtrip2 = _decrypt_round(
+        roundtrip3, seed9, seed10, seed11, seed12, block_size3
+    )
+
+    roundtrip1 = _decrypt_round(
+        roundtrip2, seed5, seed6, seed7, seed8, block_size2
+    )
+
+    roundtrip0 = _decrypt_round(
+        roundtrip1, seed1, seed2, seed3, seed4, block_size
+    )
+
+    if roundtrip0 != src:
+        raise RuntimeError(
+            "Internal ten-layer encryption/decryption error."
+        )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # INTEGRITY VALUES
+    # ═══════════════════════════════════════════════════════════════════════
+
+    expected_h1, expected_h2, expected_h3, expected_h4 = (
+        _integrity_digest(src)
+    )
+
+    expected_ch1, expected_ch2, expected_ch3 = (
+        _cipher_digest(encrypted10)
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TOKEN ENCODING
+    # ═══════════════════════════════════════════════════════════════════════
+
+    token_payload = _encode_binary_tokens(
+        encrypted10,
+        token_zero,
+        token_one
+    )
+
+    if _decode_binary_tokens(
+        token_payload,
+        token_zero,
+        token_one
+    ) != encrypted10:
+        raise RuntimeError(
+            "Binary token encoder failure."
+        )
+
+    indexed_fragments = _fragment_tokens(
+        token_payload, profile["fragment"][0], profile["fragment"][1]
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # OUTPUT
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines = []
+
+    lines.append(
+        "-- This file was protected using Dex Obfustucator v4.5 [.gg/dexfinder]"
+    )
+
+    lines.append("")
+    lines.append("")
+
+    lines.append(
+        "return(function(...)"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # STANDARD FUNCTIONS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_BYTE}=string.byte"
+    )
+
+    lines.append(
+        f"local {V_CHAR}=string.char"
+    )
+
+    lines.append(
+        f"local {V_LEN}=string.len"
+    )
+
+    lines.append(
+        f"local {V_CONCAT}=table.concat"
+    )
+
+    lines.append(
+        f"local {V_INSERT}=table.insert"
+    )
+
+    lines.append(
+        f"local {V_FLOOR}=math.floor"
+    )
+
+    lines.append(
+        f"local {V_LOAD}=loadstring or load"
+    )
+
+    lines.append(
+        f"if not {V_LOAD} then "
+        f"error('Loadstring Is Not Supported On This Executer') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PURE LUA XOR
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local function {V_XOR}({V_I},{V_J})"
+    )
+
+    lines.append(
+        f"{V_I}={V_I}%256"
+    )
+
+    lines.append(
+        f"{V_J}={V_J}%256"
+    )
+
+    lines.append(
+        f"local {V_K}=0"
+    )
+
+    lines.append(
+        f"local {V_X}=1"
+    )
+
+    lines.append(
+        f"while {V_I}>0 or {V_J}>0 do"
+    )
+
+    lines.append(
+        f"local {V_VALUE}={V_I}%2"
+    )
+
+    lines.append(
+        f"local {V_ADD}={V_J}%2"
+    )
+
+    lines.append(
+        f"if {V_VALUE}~={V_ADD} then "
+        f"{V_K}={V_K}+{V_X} "
+        f"end"
+    )
+
+    lines.append(
+        f"{V_I}={V_FLOOR}({V_I}/2)"
+    )
+
+    lines.append(
+        f"{V_J}={V_FLOOR}({V_J}/2)"
+    )
+
+    lines.append(
+        f"{V_X}={V_X}*2"
+    )
+
+    lines.append("end")
+
+    lines.append(
+        f"return {V_K}%256"
+    )
+
+    lines.append("end")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # SEEDS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    for variable, value in (
+        (V_SEED1, seed1),
+        (V_SEED2, seed2),
+        (V_SEED3, seed3),
+        (V_SEED4, seed4),
+        (V_SEED5, seed5),
+        (V_SEED6, seed6),
+        (V_SEED7, seed7),
+        (V_SEED8, seed8),
+        (V_SEED9, seed9),
+        (V_SEED10, seed10),
+        (V_SEED11, seed11),
+        (V_SEED12, seed12),
+        (V_SEED13, seed13),
+        (V_SEED14, seed14),
+        (V_SEED15, seed15),
+        (V_SEED16, seed16),
+        (V_SEED17, seed17),
+        (V_SEED18, seed18),
+        (V_SEED19, seed19),
+        (V_SEED20, seed20),
+        (V_SEED21, seed21),
+        (V_SEED22, seed22),
+        (V_SEED23, seed23),
+        (V_SEED24, seed24),
+        (V_SEED25, seed25),
+        (V_SEED26, seed26),
+        (V_SEED27, seed27),
+        (V_SEED28, seed28),
+        (V_SEED29, seed29),
+        (V_SEED30, seed30),
+        (V_SEED31, seed31),
+        (V_SEED32, seed32),
+        (V_SEED33, seed33),
+        (V_SEED34, seed34),
+        (V_SEED35, seed35),
+        (V_SEED36, seed36),
+        (V_SEED37, seed37),
+        (V_SEED38, seed38),
+        (V_SEED39, seed39),
+        (V_SEED40, seed40),
+        (V_BLOCKSIZE, block_size),
+        (V_BLOCKSIZE2, block_size2),
+        (V_BLOCKSIZE3, block_size3),
+        (V_BLOCKSIZE4, block_size4),
+        (V_BLOCKSIZE5, block_size5),
+        (V_BLOCKSIZE6, block_size6),
+        (V_BLOCKSIZE7, block_size7),
+        (V_BLOCKSIZE8, block_size8),
+        (V_BLOCKSIZE9, block_size9),
+        (V_BLOCKSIZE10, block_size10),
+    ):
+        lines.append(
+            f"local {variable}={_num_expr(value)}"
+        )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TOKEN ALPHABET
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_ZEROCHAR}={_num_expr(ord(token_zero))}"
+    )
+
+    lines.append(
+        f"local {V_ONECHAR}={_num_expr(ord(token_one))}"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # RUNTIME GUARDS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    noise_a = _RNG.randint(1000, 9000)
+    noise_b = _RNG.randint(1000, 9000)
+
+    lines.append(
+        f"local {V_NOISE}=("
+        f"{_num_expr(noise_a)}*"
+        f"{_num_expr(noise_b)}-"
+        f"{_num_expr(noise_a)}*"
+        f"{_num_expr(noise_b)}"
+        f")"
+    )
+
+    lines.append(
+        f"if {V_NOISE}~={_num_expr(0)} then "
+        f"return nil "
+        f"end"
+    )
+
+    guard_value = _RNG.randint(
+        1000,
+        50000
+    )
+
+    guard_a = _RNG.randint(
+        100,
+        10000
+    )
+
+    guard_b = guard_value - guard_a
+
+    lines.append(
+        f"local {V_GUARD}=("
+        f"{_num_expr(guard_a)}+"
+        f"{_num_expr(guard_b)}"
+        f")"
+    )
+
+    lines.append(
+        f"if {V_GUARD}~={_num_expr(guard_value)} then "
+        f"error('Internal Error') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # DECOY RUNTIME ENVIRONMENT
+    # ═══════════════════════════════════════════════════════════════════════
+    #
+    # Non-semantic local environment noise. These fields are unrelated to the
+    # payload/decryption state and are discarded before decoding.
+
+    V_FENV      = N()
+    V_FACC      = N()
+    V_FTMP      = N()
+
+    decoy_count = _RNG.randint(*profile["decoys"])
+    decoys = []
+
+    lines.append(
+        f"local {V_FENV}={{}}"
+    )
+
+    lines.append(
+        f"local {V_FACC}=0"
+    )
+
+    for _ in range(decoy_count):
+        field = _rand_name(_RNG.randint(9, 17))
+        value = _RNG.randint(0, 65535)
+        add = _RNG.randint(1, 65535)
+
+        decoys.append((field, value))
+
+        lines.append(
+            f"{V_FENV}.{field}={_num_expr(value)}"
+        )
+
+        lines.append(
+            f"{V_FENV}.{field}={V_FENV}.{field}+"
+            f"{_num_expr(add)}-{_num_expr(add)}"
+        )
+
+        lines.append(
+            f"{V_FACC}={V_FACC}+({V_FENV}.{field}%257)"
+        )
+
+    expected_acc = sum(
+        value % 257
+        for _, value in decoys
+    )
+
+    lines.append(
+        f"local {V_FTMP}=({V_FACC}%{_num_expr(1000003)})"
+    )
+
+    lines.append(
+        f"if {V_FTMP}~={_num_expr(expected_acc % 1000003)} then "
+        f"error('Internal Error') end"
+    )
+
+    lines.append(
+        f"{V_FENV}=nil"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # EXPANDED FAKE GETFENV / ENVIRONMENT NOISE
+    # ═══════════════════════════════════════════════════════════════════════
+    # Non-semantic environment probes. Every call is protected with pcall so
+    # executors without getfenv support continue to execute normally.
+
+    V_GETFENV = N()
+    V_ENVPROBE = N()
+    V_ENVSINK = N()
+    V_ENVSEED = N()
+
+    lines.append(f"local {V_GETFENV}=getfenv")
+    lines.append(f"local {V_ENVSINK}=0")
+    lines.append(f"local {V_ENVSEED}={_num_expr(_RNG.randint(1, 65535))}")
+    lines.append(f"local {V_ENVPROBE}={{}}")
+
+    fake_env_calls = _RNG.randint(2500, 4000)
+    fake_indices = [0, 1, 2, -1, -2, 3, 4, 5, 7, 8, 16, 32, 64]
+    for _ in range(fake_env_calls):
+        index = _RNG.choice(fake_indices)
+        salt = _RNG.randint(1, 65535)
+        field = _rand_name(_RNG.randint(8, 15))
+        lines.append(
+            f"{V_ENVPROBE}.{field}=pcall({V_GETFENV},{_num_expr(index)})"
+        )
+        lines.append(
+            f"{V_ENVSINK}=({V_ENVSINK}+{_num_expr(salt)})%65536"
+        )
+        lines.append(
+            f"if {V_ENVPROBE}.{field}==nil then {V_ENVSINK}=({V_ENVSINK}+1)%65536 end"
+        )
+
+    # Keep the probe state live without affecting the protected payload.
+    lines.append(
+        f"{V_ENVSINK}=({V_ENVSINK}+{V_ENVSEED}*0)%65536"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # RUNTIME API CANARIES / TAMPER CHECKS
+    # ═══════════════════════════════════════════════════════════════════════
+    V_TAMPER = N()
+    lines.append(f"local {V_TAMPER}=false")
+    lines.append(
+        f"if string.byte~={V_BYTE} or string.char~={V_CHAR} or "
+        f"string.len~={V_LEN} or table.concat~={V_CONCAT} or "
+        f"table.insert~={V_INSERT} or math.floor~={V_FLOOR} then {V_TAMPER}=true end"
+    )
+    lines.append(f"if {V_TAMPER} then error('Runtime integrity check failed') end")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TOKEN PAYLOAD
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_PARTS}={{}}"
+    )
+
+    for index, fragment in indexed_fragments:
+
+        escaped = _lua_escape_bytes(
+            fragment.encode("ascii")
+        )
+
+        lines.append(
+            f"{V_PARTS}[{index+1}]=\"{escaped}\""
+        )
+
+    lines.append(
+        f"local {V_PAYLOAD}="
+        f"{V_CONCAT}({V_PARTS})"
+    )
+
+    lines.append(
+        f"local {V_EXPECTLEN}="
+        f"{_num_expr(len(encrypted10))}"
+    )
+
+    lines.append(
+        f"if {V_LEN}({V_PAYLOAD})~="
+        f"({V_EXPECTLEN}*8) then "
+        f"error('Protected payload length failure') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TOKEN DECODER
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_DECODED}={{}}"
+    )
+
+    lines.append(
+        f"local {V_I}=1"
+    )
+
+    lines.append(
+        f"local {V_LENGTH}={V_LEN}({V_PAYLOAD})"
+    )
+
+    lines.append(
+        f"while {V_I}<={V_LENGTH} do"
+    )
+
+    lines.append(
+        f"local {V_BYTEVALUE}=0"
+    )
+
+    lines.append(
+        f"for {V_BITCOUNT}=1,8 do"
+    )
+
+    lines.append(
+        f"local {V_TOKEN}="
+        f"{V_BYTE}("
+        f"{V_PAYLOAD},"
+        f"{V_I}+{V_BITCOUNT}-1"
+        f")"
+    )
+
+    lines.append(
+        f"if {V_TOKEN}=={V_ONECHAR} then "
+        f"{V_BYTEVALUE}="
+        f"{V_BYTEVALUE}*2+1 "
+        f"elseif {V_TOKEN}=={V_ZEROCHAR} then "
+        f"{V_BYTEVALUE}="
+        f"{V_BYTEVALUE}*2 "
+        f"else "
+        f"error('Protected token validation failure') "
+        f"end"
+    )
+
+    lines.append("end")
+
+    lines.append(
+        f"{V_INSERT}("
+        f"{V_DECODED},"
+        f"{V_CHAR}({V_BYTEVALUE})"
+        f")"
+    )
+
+    lines.append(
+        f"{V_I}={V_I}+8"
+    )
+
+    lines.append("end")
+
+    lines.append(
+        f"local {V_SOURCE}="
+        f"{V_CONCAT}({V_DECODED})"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # CIPHER LENGTH
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"if {V_LEN}({V_SOURCE})~="
+        f"{V_EXPECTLEN} then "
+        f"error('Internal Error') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # CIPHER INTEGRITY
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_CH1}=0x5A31"
+    )
+
+    lines.append(
+        f"local {V_CH2}=0x71C9"
+    )
+
+    lines.append(
+        f"local {V_CH3}=0x42D7"
+    )
+
+    lines.append(
+        f"for {V_I}=1,{V_LEN}({V_SOURCE}) do"
+    )
+
+    lines.append(
+        f"local {V_VALUE}="
+        f"{V_BYTE}({V_SOURCE},{V_I})"
+    )
+
+    lines.append(
+        f"{V_CH1}=("
+        f"{V_CH1}*251+"
+        f"{V_VALUE}+"
+        f"{V_I}*3"
+        f")%65536"
+    )
+
+    lines.append(
+        f"{V_CH2}=("
+        f"{V_CH2}*277+"
+        f"{V_VALUE}*7+"
+        f"{V_I}*13"
+        f")%65536"
+    )
+
+    lines.append(
+        f"{V_CH3}=("
+        f"{V_CH3}*283+"
+        f"{V_VALUE}*11+"
+        f"{V_I}*19"
+        f")%65536"
+    )
+
+    lines.append("end")
+
+    lines.append(
+        f"local {V_CEXPECT1}="
+        f"{_num_expr(expected_ch1)}"
+    )
+
+    lines.append(
+        f"local {V_CEXPECT2}="
+        f"{_num_expr(expected_ch2)}"
+    )
+
+    lines.append(
+        f"local {V_CEXPECT3}="
+        f"{_num_expr(expected_ch3)}"
+    )
+
+    lines.append(
+        f"if {V_CH1}~={V_CEXPECT1} or "
+        f"{V_CH2}~={V_CEXPECT2} or "
+        f"{V_CH3}~={V_CEXPECT3} then "
+        f"error('Internal Error') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # THREE-LAYER DECRYPTION
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def emit_decryption_layer(
+        layer_seed1,
+        layer_seed2,
+        layer_seed3,
+        layer_seed4,
+        layer_block_size,
+    ):
+        lines.append(
+            f"local {V_RESULT}={{}}"
+        )
+
+        lines.append(
+            f"local {V_I}=1"
+        )
+
+        lines.append(
+            f"while {V_I}<={V_LEN}({V_SOURCE}) do"
+        )
+
+        lines.append(
+            f"local {V_BLOCKLEN}=math.min("
+            f"{layer_block_size},"
+            f"{V_LEN}({V_SOURCE})-{V_I}+1"
+            f")"
+        )
+
+        lines.append(
+            f"local {V_PERM}={{}}"
+        )
+
+        lines.append(
+            f"for {V_J}=1,{V_BLOCKLEN} do "
+            f"{V_PERM}[{V_J}]={V_J}-1 "
+            f"end"
+        )
+
+        lines.append(
+            f"{V_STATE}=("
+            f"{layer_seed1}+"
+            f"{layer_seed2}+"
+            f"{layer_seed3}*{V_I}+"
+            f"{layer_seed4}*{V_BLOCKLEN}+"
+            f"({V_I}-1)*{_MIX_A}"
+            f")%65536"
+        )
+
+        lines.append(
+            f"for {V_J}={V_BLOCKLEN},2,-1 do"
+        )
+
+        lines.append(
+            f"{V_STATE}=("
+            f"{V_STATE}*25173+"
+            f"13849+"
+            f"({V_J}-1)*97"
+            f")%65536"
+        )
+
+        lines.append(
+            f"local {V_K}=({V_STATE}%{V_J})+1"
+        )
+
+        lines.append(
+            f"local {V_X}={V_PERM}[{V_J}]"
+        )
+
+        lines.append(
+            f"{V_PERM}[{V_J}]={V_PERM}[{V_K}]"
+        )
+
+        lines.append(
+            f"{V_PERM}[{V_K}]={V_X}"
+        )
+
+        lines.append("end")
+
+        lines.append(
+            f"{V_STATE}=("
+            f"{layer_seed1}+"
+            f"{layer_seed3}+"
+            f"{V_I}*17+"
+            f"{V_BLOCKLEN}*{_MIX_B}"
+            f")%65536"
+        )
+
+        lines.append(
+            f"local {V_PREVIOUS}=("
+            f"{layer_seed4}+"
+            f"{V_I}-1+"
+            f"{V_BLOCKLEN}"
+            f")%256"
+        )
+
+        lines.append(
+            f"local {V_DECODED}={{}}"
+        )
+
+        lines.append(
+            f"for {V_J}=1,{V_BLOCKLEN} do"
+        )
+
+        lines.append(
+            f"local {V_ORIGINAL}="
+            f"{V_PERM}[{V_J}]"
+        )
+
+        lines.append(
+            f"local {V_ABSOLUTE}="
+            f"{V_I}+{V_ORIGINAL}"
+        )
+
+        lines.append(
+            f"{V_STATE}=("
+            f"{V_STATE}*25173+"
+            f"13849+"
+            f"{V_ORIGINAL}+"
+            f"({V_J}-1)+"
+            f"{V_BLOCKLEN}"
+            f")%65536"
+        )
+
+        lines.append(
+            f"local {V_VALUE}="
+            f"{V_BYTE}("
+            f"{V_SOURCE},"
+            f"{V_I}+{V_J}-1"
+            f")"
+        )
+
+        lines.append(
+            f"{V_CURRENT}={V_VALUE}"
+        )
+
+        lines.append(
+            f"local {V_FINALMIX}=("
+            f"math.floor({layer_seed4}/256)+"
+            f"({V_J}-1)*17+"
+            f"{V_ORIGINAL}*31+"
+            f"{V_STATE}"
+            f")%256"
+        )
+
+        lines.append(
+            f"{V_VALUE}="
+            f"{V_XOR}("
+            f"{V_VALUE},"
+            f"{V_FINALMIX}"
+            f")"
+        )
+
+        lines.append(
+            f"{V_FEEDBACK}="
+            f"{V_XOR}("
+            f"{V_PREVIOUS},"
+            f"math.floor({V_STATE}/256)"
+            f")"
+        )
+
+        lines.append(
+            f"{V_FEEDBACK}="
+            f"{V_XOR}("
+            f"{V_FEEDBACK},"
+            f"{layer_seed1}%256"
+            f")"
+        )
+
+        lines.append(
+            f"{V_FEEDBACK}="
+            f"{V_XOR}("
+            f"{V_FEEDBACK},"
+            f"{V_ABSOLUTE}*11"
+            f")%256"
+        )
+
+        lines.append(
+            f"{V_VALUE}="
+            f"{V_XOR}("
+            f"{V_VALUE},"
+            f"{V_FEEDBACK}"
+            f")"
+        )
+
+        lines.append(
+            f"local {V_X}=("
+            f"({layer_seed3}%256)+"
+            f"({V_J}-1)*29+"
+            f"({V_STATE}%256)+"
+            f"{V_ABSOLUTE}*7+"
+            f"{V_BLOCKLEN}*{_MIX_D}"
+            f")%256"
+        )
+
+        lines.append(
+            f"{V_VALUE}="
+            f"{V_XOR}("
+            f"{V_VALUE},"
+            f"{V_X}"
+            f")"
+        )
+
+        lines.append(
+            f"local {V_ADD}="
+            f"{V_XOR}("
+            f"{V_XOR}("
+            f"math.floor({V_STATE}/256)%256,"
+            f"{layer_seed4}%256"
+            f"),"
+            f"{V_ABSOLUTE}*13"
+            f")"
+        )
+
+        lines.append(
+            f"{V_ADD}="
+            f"{V_XOR}("
+            f"{V_ADD},"
+            f"({V_J}-1)*{_MIX_C}"
+            f")%256"
+        )
+
+        lines.append(
+            f"{V_VALUE}=("
+            f"{V_VALUE}-{V_ADD}"
+            f")%256"
+        )
+
+        lines.append(
+            f"local {V_ROTATION}=("
+            f"{layer_seed2}+"
+            f"{V_ORIGINAL}+"
+            f"({V_J}-1)+"
+            f"{V_STATE}+"
+            f"{V_BLOCKLEN}"
+            f")%8"
+        )
+
+        lines.append(
+            f"if {V_ROTATION}~=0 then"
+        )
+
+        lines.append(
+            f"local {V_X}=2^{V_ROTATION}"
+        )
+
+        lines.append(
+            f"local {V_ADD}=2^(8-{V_ROTATION})"
+        )
+
+        lines.append(
+            f"{V_VALUE}=("
+            f"{V_FLOOR}("
+            f"{V_VALUE}/{V_X}"
+            f")+"
+            f"(({V_VALUE}%{V_X})*{V_ADD})"
+            f")%256"
+        )
+
+        lines.append("end")
+
+        lines.append(
+            f"{V_DECODED}[{V_ORIGINAL}+1]="
+            f"{V_VALUE}"
+        )
+
+        lines.append(
+            f"{V_PREVIOUS}={V_CURRENT}"
+        )
+
+        lines.append("end")
+
+        lines.append(
+            f"for {V_J}=1,{V_BLOCKLEN} do"
+        )
+
+        lines.append(
+            f"{V_INSERT}("
+            f"{V_RESULT},"
+            f"{V_CHAR}("
+            f"{V_DECODED}[{V_J}]"
+            f")"
+            f")"
+        )
+
+        lines.append("end")
+
+        lines.append(
+            f"{V_I}={V_I}+{V_BLOCKLEN}"
+        )
+
+        lines.append("end")
+
+        lines.append(
+            f"{V_SOURCE}="
+            f"{V_CONCAT}({V_RESULT})"
+        )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # REVERSE TEN-LAYER DECRYPTION
+    # ═══════════════════════════════════════════════════════════════════════
+
+    emit_decryption_layer(
+        f"{V_SEED37}",
+        f"{V_SEED38}",
+        f"{V_SEED39}",
+        f"{V_SEED40}",
+        f"{V_BLOCKSIZE10}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED33}",
+        f"{V_SEED34}",
+        f"{V_SEED35}",
+        f"{V_SEED36}",
+        f"{V_BLOCKSIZE9}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED29}",
+        f"{V_SEED30}",
+        f"{V_SEED31}",
+        f"{V_SEED32}",
+        f"{V_BLOCKSIZE8}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED25}",
+        f"{V_SEED26}",
+        f"{V_SEED27}",
+        f"{V_SEED28}",
+        f"{V_BLOCKSIZE7}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED21}",
+        f"{V_SEED22}",
+        f"{V_SEED23}",
+        f"{V_SEED24}",
+        f"{V_BLOCKSIZE6}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED17}",
+        f"{V_SEED18}",
+        f"{V_SEED19}",
+        f"{V_SEED20}",
+        f"{V_BLOCKSIZE5}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED13}",
+        f"{V_SEED14}",
+        f"{V_SEED15}",
+        f"{V_SEED16}",
+        f"{V_BLOCKSIZE4}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED9}",
+        f"{V_SEED10}",
+        f"{V_SEED11}",
+        f"{V_SEED12}",
+        f"{V_BLOCKSIZE3}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED5}",
+        f"{V_SEED6}",
+        f"{V_SEED7}",
+        f"{V_SEED8}",
+        f"{V_BLOCKSIZE2}",
+    )
+
+    emit_decryption_layer(
+        f"{V_SEED1}",
+        f"{V_SEED2}",
+        f"{V_SEED3}",
+        f"{V_SEED4}",
+        f"{V_BLOCKSIZE}",
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PLAINTEXT INTEGRITY
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_H1}=0x1357"
+    )
+
+    lines.append(
+        f"local {V_H2}=0x2468"
+    )
+
+    lines.append(
+        f"local {V_H3}=0x369C"
+    )
+
+    lines.append(
+        f"local {V_H4}=0x4ACE"
+    )
+
+    lines.append(
+        f"for {V_I}=1,{V_LEN}({V_SOURCE}) do"
+    )
+
+    lines.append(
+        f"local {V_VALUE}="
+        f"{V_BYTE}({V_SOURCE},{V_I})"
+    )
+
+    lines.append(
+        f"{V_H1}=("
+        f"{V_H1}*257+"
+        f"{V_VALUE}+"
+        f"{V_I}"
+        f")%65536"
+    )
+
+    lines.append(
+        f"{V_H2}=("
+        f"{V_H2}*263+"
+        f"{V_VALUE}*3+"
+        f"{V_I}*7"
+        f")%65536"
+    )
+
+    lines.append(
+        f"{V_H3}=("
+        f"{V_H3}*269+"
+        f"{V_VALUE}*5+"
+        f"{V_I}*11"
+        f")%65536"
+    )
+
+    lines.append(
+        f"{V_H4}=("
+        f"{V_H4}*271+"
+        f"{V_VALUE}*7+"
+        f"{V_I}*17"
+        f")%65536"
+    )
+
+    lines.append("end")
+
+    for variable, value in (
+        (V_EXPECT1, expected_h1),
+        (V_EXPECT2, expected_h2),
+        (V_EXPECT3, expected_h3),
+        (V_EXPECT4, expected_h4),
+    ):
+        lines.append(
+            f"local {variable}="
+            f"{_num_expr(value)}"
+        )
+
+    lines.append(
+        f"if {V_H1}~={V_EXPECT1} or "
+        f"{V_H2}~={V_EXPECT2} or "
+        f"{V_H3}~={V_EXPECT3} or "
+        f"{V_H4}~={V_EXPECT4} then "
+        f"error('Internal Error') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # FINAL LENGTH
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"if {V_LEN}({V_SOURCE})~="
+        f"{_num_expr(len(src))} then "
+        f"error('Internal Error') "
+        f"end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # FINAL RUNTIME INTEGRITY RECHECK
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"if string.byte~={V_BYTE} or string.char~={V_CHAR} or "
+        f"string.len~={V_LEN} or table.concat~={V_CONCAT} or "
+        f"table.insert~={V_INSERT} or math.floor~={V_FLOOR} then "
+        f"error('Runtime tamper detected') end"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # FINAL LOAD
+    # ═══════════════════════════════════════════════════════════════════════
+
+    lines.append(
+        f"local {V_FN},{V_ERR}="
+        f"{V_LOAD}({V_SOURCE})"
+    )
+
+    lines.append(
+        f"if not {V_FN} then "
+        f"error('Internal Error: '..tostring({V_ERR})) "
+        f"end"
+    )
+
+    lines.append(
+        f"return {V_FN}(...)"
+    )
+
+    lines.append(
+        "end)(...)"
+    )
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # COMPACT OUTPUT
+    # ═══════════════════════════════════════════════════════════════════════
+
+    header = lines[0]
+
+    # TWO EMPTY LINES ARE INTENTIONAL.
+
+    opener = lines[3]
+
+    body = " ".join(
+        line.strip()
+        for line in lines[4:]
+        if line.strip()
+    )
+
+    payload = (
+        header
+        + "\n\n"
+        + opener
+        + body
+    )
+
+
+    if minimum_size:
+        payload = _pad_lua_payload_to_minimum(payload)
+
+    if publish:
+        # The raw backend receives the complete executable payload. The Lua
+        # file itself must contain that payload, never the user-facing loader.
+        # The loader is exposed separately by obfuscate_lua_bundle().
+        _raw_backend_publish(payload)
+
+    return payload
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SAFE PUBLIC API
+# ═════════════════════════════════════════════════════════════════════════════
+
+_MIN_LUA_PAYLOAD_BYTES = 128 * 1024
+
+
+def _pad_lua_payload_to_minimum(payload):
+    if not isinstance(payload, str):
+        payload = str(payload)
+
+    current_size = len(payload.encode("utf-8"))
+    if current_size >= _MIN_LUA_PAYLOAD_BYTES:
+        return payload
+
+    remaining = _MIN_LUA_PAYLOAD_BYTES - current_size
+    body_len = max(0, remaining - 8)
+
+    alphabet = (
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789"
+        "_+-=.,;:!?~"
+    )
+
+    rng = random.SystemRandom()
+    chunks = []
+    left = body_len
+
+    while left:
+        take = min(8192, left)
+        chunks.append("".join(rng.choice(alphabet) for _ in range(take)))
+        left -= take
+
+    return payload + "--[[\n" + "".join(chunks) + "\n]]\n"
+
+
+def obfuscate_lua_bundle(source, publish=True, level="hard"):
+    """
+    Return the three separate pieces the Discord/UI layer needs.
+
+    lua_file
+        The actual .lua file. It contains:
+          line 1: header
+          line 2: blank
+          line 3: return:function(...) payload
+
+    pc_copy / mobile_copy
+        Plain text containing ONLY the loadstring. These are intentionally
+        outside the Lua file so the UI can provide independent PC/mobile
+        copy controls. Both values are identical by design.
+    """
+    if source is None:
+        raise ValueError(
+            "No Lua source was supplied."
+        )
+
+    if not isinstance(source, str):
+        source = str(source)
+
+    if not source.strip():
+        raise ValueError(
+            "Lua source is empty."
+        )
+
+    src = source.encode("utf-8")
+
+    # Build the protected Lua payload without publishing it twice.
+    level = normalize_obf_level(level)
+    lua_file = obfuscate_lua(source, publish=False, level=level, minimum_size=True)
+
+    if publish:
+        # Keep the hosted raw-loader copy compact. The executable content is
+        # identical; only the inert minimum-size comment is omitted.
+        backend_payload = obfuscate_lua(
+            source,
+            publish=False,
+            level=level,
+            minimum_size=False,
+        )
+        raw_url, _loader_id = _publish_local_payload(backend_payload)
+        loader_text = _build_loadstring(raw_url)
+    else:
+        # A deterministic local placeholder is useful for tests. No fake
+        # loader is emitted to the Lua file.
+        loader_text = ""
+
+    # User-facing output for the Discord/UI layer.
+    # IMPORTANT: this does NOT change the actual Lua file.
+    display_text = (
+        "Loadstring Copy:\n"
+        + loader_text
+    )
+
+    return {
+        "lua_file": lua_file,
+        "loadstring": loader_text,
+        "pc_copy": loader_text,
+        "mobile_copy": loader_text,
+        "display_text": display_text,
+        "loader_id": _loader_id if publish else "",
+        "raw_url": raw_url if publish else "",
+    }
+
+
+def obfuscate_lua_safe(source, publish=True):
+    """Legacy-safe API: returns ONLY the Lua file text."""
+    return obfuscate_lua(source, publish=publish)
+
+
+
+
+# -----------------------------
+# PUBLIC OBFUSCATOR WEBSITE + API
+# -----------------------------
 
 OBF_RATE_LIMIT = 8
 OBF_RATE_WINDOW = 60.0
@@ -2925,7 +7310,7 @@ OBF_PAGE = r"""<!doctype html>
 </style></head>
 <body><main class="page"><div class="shell">
 <nav class="nav"><div class="brand"><div class="logo">D</div><span>DexNotifier</span></div><div class="navlinks"><a href="/">Home</a><a href="/scripts">Scripts</a><a href="/home">Dashboard</a></div></nav>
-<section class="hero"><div class="eyebrow"><i class="live"></i> Lua protection tool</div><h1><span>Obfustucate</span></h1><p>Paste your raw Lua source below. DexNotifier generates the protected payload you can copy.</p></section>
+<section class="hero"><div class="eyebrow"><i class="live"></i> Lua protection tool</div><h1><span>Obfustucate</span></h1><p>Paste your raw Lua source below. DexNotifier generates the protected payload and the exact raw loadstring you can copy.</p></section>
 <section class="workspace"><div class="toolbar"><div class="traffic"><i></i><i></i><i></i></div><div class="toolbar-title">Protected Lua workspace</div><div style="width:39px"></div></div>
 <div class="editor-card"><div class="label"><span>Source</span><span class="hint">Lua · UTF-8</span></div><textarea id="source" class="editor" spellcheck="false" placeholder="-- paste your Lua source here"></textarea><div class="actionbar"><button id="go" class="go">Obfustucate Lua</button><span id="status" class="status">Ready</span></div></div>
 <div id="results" class="results" style="display:none"><div class="result"><div class="result-head"><strong>Protected payload</strong><span>complete Lua file</span></div><div class="copyrow"><div id="payload" class="out"></div><button class="copy" data-copy="payload">Copy</button></div></div></div>
@@ -2937,6 +7322,195 @@ $('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){stat
 document.querySelectorAll('.copy').forEach(b=>b.addEventListener('click',()=>copyText($(b.dataset.copy).textContent,b)));
 </script></body></html>"""
 
+def _minify_lua_preserve_strings(source: str) -> str:
+    """Compact Lua while preserving quoted/long strings and token boundaries."""
+    if not isinstance(source, str):
+        source = str(source)
+    out=[]; i=0; n=len(source); quote=None; long_level=None; pending_space=False
+    ident=lambda c: c.isalnum() or c in "_"
+    while i<n:
+        c=source[i]
+        if quote:
+            out.append(c)
+            if c=='\\' and i+1<n:
+                out.append(source[i+1]); i+=2; continue
+            if c==quote: quote=None
+            i+=1; continue
+        if long_level is not None:
+            end=']'+('='*long_level)+']'
+            j=source.find(end,i)
+            if j<0: out.append(source[i:]); break
+            out.append(source[i:j+len(end)]); i=j+len(end); long_level=None; continue
+        if c in "'\"":
+            if pending_space and out and ident(out[-1][-1]): out.append(' ')
+            pending_space=False; quote=c; out.append(c); i+=1; continue
+        if c=='[':
+            m=re.match(r'\[(=*)\[', source[i:])
+            if m:
+                if pending_space and out and ident(out[-1][-1]): out.append(' ')
+                pending_space=False; long_level=len(m.group(1)); end='['+m.group(1)+'['; out.append(end); i+=len(end); continue
+        if c=='-' and i+1<n and source[i+1]=='-':
+            if i+2<n and source[i+2]=='[':
+                m=re.match(r'\-\-\[(=*)\[', source[i:])
+                if m:
+                    end='='+m.group(1)+'='  # unused; find closing long comment
+                    close=']'+('='*len(m.group(1)))+']'
+                    j=source.find(close,i+len(m.group(0)))
+                    i=n if j<0 else j+len(close)
+                    pending_space=True
+                    continue
+            j=source.find('\n',i+2); i=n if j<0 else j+1; pending_space=True; continue
+        if c.isspace(): pending_space=True; i+=1; continue
+        if pending_space and out:
+            prev=out[-1][-1]
+            if ident(prev) and ident(c): out.append(' ')
+        pending_space=False
+        out.append(c); i+=1
+    return ''.join(out).strip()
+
+_MINIFIED_HEADER='-- This file was protected using Dex Obfustucator v4.5 [.gg/dexfinder]'
+
+def _format_minified_lua(source: str) -> str:
+    body=_minify_lua_preserve_strings(source)
+    return _MINIFIED_HEADER+'\\n\\n'+body
+
+@app.get("/obfuscate")
+async def obfuscate_page():
+    return HTMLResponse(OBF_PAGE)
+
+def _dex_obfuscator_default_settings() -> dict:
+    """Return the public DEX Obfuscator V8 settings used by the website."""
+    return {
+        "encryptStrings": True,
+        "proxyfyLocals": True,
+        "proxyfyFunctions": True,
+        "antiTamper": True,
+        "controlFlowFlattening": True,
+        "isLuaRuntime": True,
+        "loaderVMDepth": 3,
+    }
+
+
+def _dex_obfuscator_settings(raw_settings) -> dict:
+    """Normalize the public V8 settings while keeping safe website defaults."""
+    settings = _dex_obfuscator_default_settings()
+    if isinstance(raw_settings, dict):
+        for key in settings:
+            if key not in raw_settings:
+                continue
+            if key == "loaderVMDepth":
+                try:
+                    settings[key] = max(1, min(5, int(raw_settings[key])))
+                except (TypeError, ValueError):
+                    pass
+            else:
+                settings[key] = bool(raw_settings[key])
+    return settings
+
+
+def _call_dex_obfuscator_v8(source: str, settings: dict) -> str:
+    """POST Lua source to DEX Obfuscator V8 and return its `result` payload."""
+    if not DEX_OBFUSCATOR_API_URL:
+        raise RuntimeError(
+            "DEX Obfuscator V8 API is not configured. "
+            "Set DEX_OBFUSCATOR_API_URL to its POST /obfuscate endpoint."
+        )
+
+    payload = json.dumps(
+        {
+            "source": source,
+            "settings": _dex_obfuscator_settings(settings),
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    req = urllib.request.Request(
+        DEX_OBFUSCATOR_API_URL,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Content-Length": str(len(payload)),
+            "User-Agent": "DEX-Obfuscator/8.0",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=DEX_OBFUSCATOR_API_TIMEOUT) as response:
+            response_bytes = response.read()
+            status_code = getattr(response, "status", 200)
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            body = ""
+        detail = body[:800] if body else str(exc.reason or exc)
+        raise RuntimeError(
+            f"DEX Obfuscator V8 returned HTTP {exc.code}: {detail}"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not reach DEX Obfuscator V8: {str(exc)[:500]}"
+        ) from exc
+
+    if status_code < 200 or status_code >= 300:
+        raise RuntimeError(
+            f"DEX Obfuscator V8 returned HTTP {status_code}."
+        )
+
+    response_text = response_bytes.decode("utf-8", errors="replace").strip()
+    if not response_text:
+        raise RuntimeError("DEX Obfuscator V8 returned an empty response.")
+
+    try:
+        result = json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "DEX Obfuscator V8 returned invalid JSON: "
+            + response_text[:500]
+        ) from exc
+
+    if not isinstance(result, dict):
+        raise RuntimeError("DEX Obfuscator V8 returned an invalid response object.")
+
+    if str(result.get("status", "")).strip().lower() != "success":
+        error_detail = (
+            result.get("error")
+            or result.get("message")
+            or result.get("detail")
+            or "unknown upstream error"
+        )
+        raise RuntimeError(
+            f"DEX Obfuscator V8 failed: {str(error_detail)[:800]}"
+        )
+
+    protected = result.get("result")
+    if not isinstance(protected, str) or not protected.strip():
+        raise RuntimeError(
+            "DEX Obfuscator V8 returned success without a result payload."
+        )
+
+    return (
+        protected
+        .replace("\ufeff", "", 1)
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .strip()
+    )
+
+
+def _format_dex_obfuscator_payload(protected: str) -> str:
+    """Add the DEX header and exactly one blank line before the upstream payload."""
+    protected = str(protected or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not protected:
+        raise ValueError("DEX Obfuscator V8 returned an empty payload.")
+
+    # The upstream result is the executable payload. Keep it intact and only
+    # normalize the outer file formatting requested by the website.
+    header = "-- This file was protected using DEX Obfuscator V8 [.gg/dexfinder]"
+    return header + "\n\n" + protected
+
 
 @app.get("/obfuscate")
 async def obfuscate_page():
@@ -2945,131 +7519,1057 @@ async def obfuscate_page():
 
 @app.post("/obfuscate")
 async def obfuscate_api(request: Request):
-    """Call the DEX Obfuscator V8 API directly with a POST request, then wrap
-    the returned payload with the Dex header and spacing before serving it.
-    No bridge jobs or browser workers are involved.
+    """Public DEX Obfuscator V8 API proxy.
 
-    Required Railway env var: DEX_OBF_API_URL — the full URL of the
-    DEX Obfuscator V8 /obfuscate endpoint, e.g.
-      https://your-obfuscator.up.railway.app/obfuscate
+    The website POSTs the Lua source here. This route now sends a real JSON
+    POST directly to the DEX Obfuscator V8 upstream API instead of creating
+    or waiting on a `.goofy` bridge job. The upstream `result` is then wrapped
+    with the DEX header and spacing used by the website.
     """
     ip = _client_ip(request)
     if rate_limited(ip, "obfustucate", OBF_RATE_LIMIT, OBF_RATE_WINDOW):
-        return JSONResponse({"error": "Too many obfuscation requests. Try again shortly."}, status_code=429)
+        return JSONResponse(
+            {"error": "Too many obfuscation requests. Try again shortly."},
+            status_code=429,
+        )
+
     if reject_if_oversized(request, OBF_MAX_SOURCE + 32 * 1024):
         return JSONResponse({"error": "Source is too large."}, status_code=413)
+
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "Expected JSON with source."}, status_code=400)
-    source = body.get("source", "") if isinstance(body, dict) else ""
+
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "Expected JSON with source."}, status_code=400)
+
+    source = body.get("source", "")
     if not isinstance(source, str) or not source.strip():
         return JSONResponse({"error": "Lua source is empty."}, status_code=400)
+
     if len(source.encode("utf-8")) > OBF_MAX_SOURCE:
-        return JSONResponse({"error": "Source is too large (16 MB maximum)."}, status_code=413)
-
-    # DEX Obfuscator V8 API endpoint — set DEX_OBF_API_URL in Railway env vars.
-    obf_api_url = os.environ.get("DEX_OBF_API_URL", "").strip()
-    if not obf_api_url:
         return JSONResponse(
-            {"error": "DEX Obfuscator API is not configured on this deployment."},
-            status_code=503,
-        )
-
-    # V8 settings — all protection layers enabled.
-    obf_settings = {
-        "encryptStrings": True,
-        "proxifyLocals": True,
-        "proxifyFunctions": True,
-        "antiTamper": True,
-        "controlFlowFlattening": True,
-        "isLuauRuntime": False,
-        "loaderVMDepth": 3,
-    }
-
-    def _call_obf_api():
-        payload_bytes = json.dumps({"source": source, "settings": obf_settings}).encode("utf-8")
-        req = urllib.request.Request(
-            obf_api_url,
-            data=payload_bytes,
-            method="POST",
-        )
-        req.add_header("Content-Type", "application/json")
-        req.add_header("User-Agent", "DexNotifier/4.5")
-        req.add_header("Accept", "application/json")
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read().decode("utf-8", errors="replace"))
-
-    try:
-        result = await asyncio.to_thread(_call_obf_api)
-    except urllib.error.HTTPError as exc:
-        body_text = ""
-        try:
-            body_text = exc.read().decode("utf-8", errors="replace")[:400]
-        except Exception:
-            pass
-        print(f"[DEX_OBF_API] HTTP {exc.code}: {body_text}")
-        return JSONResponse(
-            {"error": "Please Make Sure Your Source Is Syntax Error Free"},
-            status_code=502,
-        )
-    except Exception as exc:
-        print(f"[DEX_OBF_API] request failed: {exc}")
-        return JSONResponse(
-            {"error": "DEX Obfuscator is unavailable. Try again shortly."},
-            status_code=502,
-        )
-
-    if not isinstance(result, dict) or str(result.get("status", "")).lower() != "success":
-        err = str(
-            result.get("error") or result.get("message") or "DEX Obfuscator returned an error."
-        )[:400]
-        return JSONResponse({"error": err}, status_code=502)
-
-    obf_result = str(result.get("result") or "").strip()
-    if not obf_result:
-        return JSONResponse(
-            {"error": "DEX Obfuscator returned an empty payload."},
-            status_code=502,
-        )
-
-    # Normalise line endings from the upstream service.
-    obf_result = (
-        obf_result
-        .replace("\ufeff", "", 1)
-        .replace("\r\n", "\n")
-        .replace("\r", "\n")
-    )
-
-    # Replace any upstream runtime-error strings with the Dex brand.
-    obf_result = re.sub(
-        r"error\(\s*(['\"])runtime error\1\s*\)",
-        "error('DEX: Tamper Detected')",
-        obf_result,
-        flags=re.IGNORECASE,
-    )
-
-    if not obf_result.startswith("return"):
-        return JSONResponse(
-            {"error": "Please Make Sure Your Source Is Syntax Error Free"},
-            status_code=502,
-        )
-
-    dex_header = "-- This file was protected using Dex Obfustucator v4.5 [.gg/dexfinder]"
-
-    # Final output format:
-    #   line 1: Dex header comment
-    #   line 2: blank
-    #   line 3+: obfuscated payload from DEX Obfuscator
-    final_payload = dex_header + "\n\n" + obf_result
-
-    if len(final_payload.encode("utf-8")) > 3 * 1024 * 1024:
-        return JSONResponse(
-            {"error": "Final protected payload exceeds the 3 MB output limit."},
+            {"error": "Source is too large (16 MB maximum)."},
             status_code=413,
         )
 
-    return JSONResponse({"ok": True, "payload": final_payload})
+    settings = _dex_obfuscator_settings(body.get("settings"))
+
+    try:
+        protected = await asyncio.to_thread(
+            _call_dex_obfuscator_v8,
+            source,
+            settings,
+        )
+        final_payload = _format_dex_obfuscator_payload(protected)
+
+        if len(final_payload.encode("utf-8")) > 3 * 1024 * 1024:
+            return JSONResponse(
+                {"error": "Final protected payload exceeds the 3 MB output limit."},
+                status_code=413,
+            )
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "status": "success",
+                "payload": final_payload,
+                "result": protected,
+                "settings": settings,
+            }
+        )
+    except Exception as exc:
+        print(f"[DEX_OBFUSCATOR_V8] failed: {exc}")
+        return JSONResponse(
+            {
+                "error": (
+                    str(exc)
+                    if str(exc)
+                    else "Obfuscation failed. Check that the source is valid Lua."
+                )
+            },
+            status_code=502,
+        )
+
+# -----------------------------
+# ADMIN-ONLY OBFUSTUCATE SOURCE VIEW
+# -----------------------------
+@app.get("/admin/obfuscate/{submission_id}/source")
+async def admin_obfustucate_source(submission_id: str, request: Request):
+    if not require_admin_session(request):
+        return PlainTextResponse("Unauthorized", status_code=401)
+    if not RAW_LOADER_ID_PATTERN.fullmatch(submission_id):
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+    try:
+        with open(_obf_source_path(submission_id), "r", encoding="utf-8") as f:
+            return PlainTextResponse(f.read(), media_type="text/plain; charset=utf-8")
+    except FileNotFoundError:
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+    except Exception:
+        return PlainTextResponse("Could not read source", status_code=500)
+
+
+# -----------------------------
+# PRIVATE SERVICE ENDPOINTS
+# -----------------------------
+# Not linked from public pages. Every route requires DEX_API_KEY.
+# -----------------------------
+
+PRIVATE_STATS_RATE_LIMIT = 20
+PRIVATE_STATS_RATE_WINDOW = 30.0
+
+def _private_key_ok(request: Request) -> bool:
+    return is_valid_key(request.headers.get("X-Api-Key", ""))
+
+@app.get("/check")
+async def private_info(request: Request):
+    ip = _client_ip(request)
+    if rate_limited(ip, "private_info", PRIVATE_STATS_RATE_LIMIT, PRIVATE_STATS_RATE_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+    if not _private_key_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    async with scripts_lock:
+        script_count = len(scripts)
+    async with logs_lock:
+        log_count = len(stored_logs)
+    async with ws_count_lock:
+        ws_connections = sum(ws_ip_connection_counts.values())
+    async with obf_history_lock:
+        obf_count = len(_load_obf_history())
+    return JSONResponse({"ok":True,"service":"DexNotifier","service_version":"4.1","timestamp":int(time.time()),"scripts":script_count,"stored_logs":log_count,"websocket_connections":ws_connections,"obfuscation_submissions":obf_count,"base_url":BASE_URL})
+
+@app.get("/metrics")
+async def private_metrics(request: Request):
+    if not _private_key_ok(request):
+        return PlainTextResponse("UNAUTHORIZED", status_code=401)
+    async with logs_lock:
+        log_count = len(stored_logs)
+    async with ws_count_lock:
+        viewer_count = len(viewers)
+    return JSONResponse({"ok":True,"viewers":viewer_count,"stored_logs":log_count,"uptime_seconds":int(time.time()-START_TIME) if 'START_TIME' in globals() else None})
+
+
+# -----------------------------
+# PRIVATE INTERNAL ENDPOINTS - intentionally unlinked and API-key protected.
+# -----------------------------
+@app.get("/internal/status")
+async def internal_status(request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    async with scripts_lock: sc=len(scripts)
+    async with logs_lock: lc=len(stored_logs)
+    async with ws_count_lock: vc=len(viewers)
+    return JSONResponse({"ok":True,"service":"DexNotifier","status":"online","uptime_seconds":int(time.time()-START_TIME) if "START_TIME" in globals() else None,"scripts":sc,"logs":lc,"viewers":vc})
+
+@app.get("/internal/routes")
+async def internal_routes(request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    hidden_prefixes = ("/internal", "/check", "/metrics", "/admin/stats", "/admin/obfuscate/", "/admin/me-group")
+    routes = []
+    for r in app.routes:
+        path = getattr(r, "path", None)
+        methods = getattr(r, "methods", None)
+        if not path or not methods or any(path.startswith(prefix) for prefix in hidden_prefixes):
+            continue
+        routes.append({"path": path, "methods": sorted(methods)})
+    return JSONResponse({"ok":True,"routes":routes})
+
+
+@app.get("/internal/obfuscate/history")
+async def internal_obfustucate_history(request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"}, status_code=401)
+    async with obf_history_lock:
+        history = _load_obf_history()
+    safe = [{k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url")} for item in reversed(history)]
+    return JSONResponse({"ok": True, "count": len(safe), "submissions": safe})
+
+
+@app.get("/internal/obfuscate/history/{submission_id}")
+async def internal_obfustucate_history_item(submission_id: str, request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"}, status_code=401)
+    if not RAW_LOADER_ID_PATTERN.fullmatch(submission_id): return JSONResponse({"error":"not found"}, status_code=404)
+    async with obf_history_lock:
+        history = _load_obf_history()
+    for item in history:
+        if item.get("id") == submission_id:
+            return JSONResponse({"ok": True, "submission": {k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url")}})
+    return JSONResponse({"error":"not found"}, status_code=404)
+
+
+@app.get("/internal/obfuscate/source/{submission_id}")
+async def internal_obfustucate_source(submission_id: str, request: Request):
+    if not _private_key_ok(request): return PlainTextResponse("UNAUTHORIZED", status_code=401)
+    if not RAW_LOADER_ID_PATTERN.fullmatch(submission_id): return PlainTextResponse("NOT_FOUND", status_code=404)
+    try:
+        with open(_obf_source_path(submission_id), "r", encoding="utf-8") as f:
+            return PlainTextResponse(f.read(), media_type="text/plain; charset=utf-8")
+    except FileNotFoundError:
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+    except Exception:
+        return PlainTextResponse("Could not read source", status_code=500)
+
+
+@app.get("/internal/healthz")
+async def internal_healthz(request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"}, status_code=401)
+    return JSONResponse({"ok": True, "service": "DexNotifier", "status": "healthy", "timestamp": int(time.time())})
+
+
+@app.get("/internal/version")
+async def internal_version(request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"}, status_code=401)
+    return JSONResponse({"ok": True, "service": "DexNotifier", "service_version": "4.1", "obfuscator": "Obfustucate", "chat": "/chat", "me_chat": "/ME-chat"})
+
+@app.get("/internal/config")
+async def internal_config(request: Request):
+    if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    return JSONResponse({"ok":True,"base_url":BASE_URL,"github_configured":github_configured(),"github_branch":GITHUB_BRANCH,"obfuscation_max_source_bytes":OBF_MAX_SOURCE,"public_obfuscator":"/obfuscate","chat":"/chat","me_chat":"/ME-chat"})
+
+# ============================================================================
+# LIVE CHAT / ME-CHAT
+# ============================================================================
+CHAT_PAGE_CSS = r'''
+.chat-page{min-height:100vh;width:min(1420px,calc(100% - 32px));margin:0 auto;padding:10px 0 34px}.chat-hero{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;margin:18px 0}.chat-hero h1{font-size:clamp(42px,6vw,72px);line-height:.95;margin:10px 0 8px;letter-spacing:-.055em}.chat-hero p{max-width:760px;margin:0;color:#9099ab;font-size:15px;line-height:1.65}.chat-badge{display:inline-flex;align-items:center;gap:8px;border:1px solid rgba(139,92,246,.22);background:rgba(139,92,246,.08);color:#ddd6fe;padding:8px 11px;border-radius:999px;font-size:11px;font-weight:950;letter-spacing:.09em;text-transform:uppercase}.chat-shell{height:min(820px,calc(100vh - 220px));min-height:620px;display:grid;grid-template-columns:260px minmax(0,1fr);overflow:hidden;border:1px solid rgba(255,255,255,.09);border-radius:28px;background:linear-gradient(145deg,rgba(14,17,24,.98),rgba(5,7,11,.98));box-shadow:0 40px 120px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.035);backdrop-filter:blur(24px)}.chat-side{min-height:0;overflow:auto;border-right:1px solid rgba(255,255,255,.07);padding:18px;background:linear-gradient(180deg,rgba(17,20,29,.82),rgba(7,9,13,.86))}.chat-side-card{padding:17px;border:1px solid rgba(255,255,255,.065);border-radius:18px;background:rgba(255,255,255,.028);margin-bottom:12px}.chat-side-card strong{display:block;color:#fff;font-size:14px}.chat-side-card span{display:block;color:#788397;font-size:12px;line-height:1.5;margin-top:5px}.chat-online{display:inline-flex!important;align-items:center;gap:7px;color:#a7f3d0!important}.chat-online i{width:7px;height:7px;background:#34d399;border-radius:50%;box-shadow:0 0 14px #34d399}.chat-main{min-width:0;min-height:0;height:100%;display:flex;flex-direction:column}.chat-top{flex:0 0 auto;min-height:70px;padding:16px 20px;border-bottom:1px solid rgba(255,255,255,.07);display:flex;align-items:center;justify-content:space-between;gap:12px;background:rgba(8,10,14,.78)}.chat-top strong{font-size:17px}.chat-top small{display:block;color:#697489;margin-top:5px;font-size:12px}.chat-count{font-size:12px;color:#a7f3d0;border:1px solid rgba(52,211,153,.16);background:rgba(52,211,153,.05);padding:8px 11px;border-radius:999px;white-space:nowrap}.chat-messages{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding:28px 30px;display:flex;flex-direction:column;gap:14px;scroll-behavior:smooth;overscroll-behavior:contain}.chat-empty{margin:auto;text-align:center;color:#667286;max-width:420px}.chat-empty b{display:block;color:#e7edf8;font-size:20px;margin-bottom:8px}.chat-empty span{font-size:14px;line-height:1.6}.msg{max-width:min(78%,820px);padding:13px 16px;border:1px solid rgba(255,255,255,.07);border-radius:20px;background:rgba(255,255,255,.035);animation:chatIn .18s ease both;box-shadow:0 12px 32px rgba(0,0,0,.12)}.msg.me{align-self:flex-end;background:linear-gradient(145deg,rgba(99,102,241,.2),rgba(139,92,246,.11));border-color:rgba(139,92,246,.2)}.msg-head{display:flex;align-items:baseline;gap:9px;margin-bottom:7px}.msg-name{font-size:13px;font-weight:950;color:#c4b5fd}.msg-time{font-size:10px;color:#647086}.msg-text{white-space:pre-wrap;word-break:break-word;color:#eef2f7;font-size:16px;line-height:1.55}.msg-media{display:block;width:auto;max-width:min(620px,100%);max-height:430px;border-radius:16px;border:1px solid rgba(255,255,255,.09);margin-top:7px;background:#02040a;object-fit:contain;cursor:pointer}.msg-media:hover{border-color:rgba(139,92,246,.32)}.chat-compose{flex:0 0 auto;border-top:1px solid rgba(255,255,255,.07);padding:15px 18px 16px;background:rgba(5,7,11,.9)}.chat-input-row{display:flex;align-items:flex-end;gap:9px}.chat-input{flex:1;min-height:54px;max-height:150px;resize:none;padding:15px 16px!important;border-radius:17px!important;font-size:15px!important}.chat-icon-btn{width:50px;height:50px;display:grid;place-items:center;flex:0 0 50px;background:rgba(255,255,255,.045)!important;border:1px solid rgba(255,255,255,.09)!important;box-shadow:none!important;font-size:20px}.chat-send{height:50px;padding:0 22px;white-space:nowrap}.chat-file-name{font-size:11px;color:#8a95a8;margin-top:8px;min-height:15px}.chat-preview{display:none;align-items:center;gap:12px;margin:0 0 10px;padding:10px;border:1px solid rgba(139,92,246,.16);border-radius:15px;background:rgba(139,92,246,.055)}.chat-preview.show{display:flex}.chat-preview img,.chat-preview video{width:86px;height:64px;object-fit:cover;border-radius:10px;background:#02040a}.chat-preview-info{min-width:0;flex:1}.chat-preview-info strong{display:block;color:#e8edf7;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.chat-preview-info span{display:block;color:#7e899b;font-size:11px;margin-top:3px}.chat-preview-clear{width:34px;height:34px!important;padding:0!important;border-radius:10px!important;background:rgba(255,255,255,.05)!important;box-shadow:none!important}.chat-toast{position:fixed;right:20px;bottom:20px;z-index:100;padding:12px 15px;border-radius:14px;background:#10141d;border:1px solid rgba(255,255,255,.1);color:#e5e7eb;box-shadow:0 15px 50px rgba(0,0,0,.35);animation:chatIn .2s ease}@keyframes chatIn{from{opacity:0;transform:translateY(7px) scale(.985)}to{opacity:1;transform:none}}@media(max-width:980px){.chat-page{width:calc(100% - 22px)}.chat-shell{grid-template-columns:1fr;height:calc(100vh - 195px);min-height:580px}.chat-side{display:none}.msg{max-width:90%}.chat-messages{padding:20px 16px}.chat-top{padding:14px 16px}.chat-compose{padding:12px}.chat-hero{margin-top:10px}}@media(max-width:620px){.chat-page{width:calc(100% - 12px);padding-bottom:14px}.chat-hero{align-items:flex-start;flex-direction:column;gap:10px}.chat-hero h1{font-size:44px}.chat-hero p{font-size:13px}.chat-shell{height:calc(100dvh - 180px);min-height:520px;border-radius:22px}.chat-messages{padding:16px 12px;gap:10px}.msg{max-width:94%;padding:11px 13px;border-radius:17px}.msg-text{font-size:15px}.msg-media{max-height:330px}.chat-input-row{gap:6px}.chat-input{min-height:50px;font-size:14px!important;padding:13px!important}.chat-icon-btn{width:46px;height:46px;flex-basis:46px}.chat-send{height:46px;padding:0 14px}.chat-top strong{font-size:15px}.chat-count{font-size:10px;padding:7px 9px}}@media(prefers-reduced-motion:reduce){.msg,.chat-toast{animation:none!important}}
+'''
+CHAT_PAGE_JS = r'''
+<script>
+(()=>{
+const cfg=window.__DN_CHAT_CONFIG__||{},box=document.getElementById('chat-messages'),input=document.getElementById('chat-input'),file=document.getElementById('chat-file'),fileName=document.getElementById('chat-file-name'),send=document.getElementById('chat-send'),count=document.getElementById('chat-count'),status=document.getElementById('chat-status'),preview=document.getElementById('chat-preview'),previewMedia=document.getElementById('chat-preview-media'),previewTitle=document.getElementById('chat-preview-title'),previewMeta=document.getElementById('chat-preview-meta');
+let ws=null,selectedFile=null,previewUrl=null,reconnectTimer=null,renderedIds=new Set(),stopped=false;
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const t=v=>new Date((Number(v)||Date.now())*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+function toast(x){const e=document.createElement('div');e.className='chat-toast';e.textContent=x;document.body.appendChild(e);setTimeout(()=>e.remove(),2600)}
+function scrollToBottom(){box.scrollTop=box.scrollHeight;requestAnimationFrame(()=>{box.scrollTop=box.scrollHeight})}
+function render(m){if(!m||m.type==='Presence'||m.type==='System'||m.type==='History')return;if(m.id&&renderedIds.has(m.id))return;if(m.id)renderedIds.add(m.id);if(box.querySelector('.chat-empty'))box.innerHTML='';const mine=m.username===cfg.username,e=document.createElement('article');e.className='msg'+(mine?' me':'');let c='';if(m.type==='Message'||m.type==='ME-Chat')c='<div class="msg-text">'+esc(m.message)+'</div>';else if(m.type==='Picture'||m.type==='ME-Photo')c='<img class="msg-media" loading="lazy" src="'+esc(m.url)+'" alt="'+esc(m.filename||'picture')+'" onclick="window.open(this.src,\'_blank\')">';else if(m.type==='Video'||m.type==='ME-Video')c='<video class="msg-media" controls preload="metadata" playsinline src="'+esc(m.url)+'"></video>';e.innerHTML='<div class="msg-head"><span class="msg-name">'+esc(m.display_name||m.username)+'</span><span class="msg-time">@'+esc(m.account_username||m.username)+' · '+esc(t(m.timestamp))+'</span></div>'+c;box.appendChild(e);const media=e.querySelector('img.msg-media,video.msg-media');if(media){const onReady=()=>scrollToBottom();media.addEventListener('load',onReady,{once:true});media.addEventListener('loadedmetadata',onReady,{once:true});media.addEventListener('error',onReady,{once:true})}scrollToBottom()}
+function renderHistory(items){if(!Array.isArray(items))return;box.innerHTML='';renderedIds.clear();if(!items.length){box.innerHTML='<div class="chat-empty"><b>No messages yet</b><span>Start the conversation.</span></div>';return}items.forEach(render);scrollToBottom()}
+function connect(){if(stopped)return;clearTimeout(reconnectTimer);const proto=location.protocol==='https:'?'wss':'ws',path=cfg.me?'/ws/me-chat':'/ws/chat';ws=new WebSocket(proto+'://'+location.host+path);ws.onopen=()=>{status.textContent='Online';status.className='chat-count chat-online';send.disabled=false};ws.onclose=()=>{if(stopped){status.textContent='Chat disabled';status.className='chat-count';send.disabled=true;return}status.textContent='Reconnecting…';status.className='chat-count';send.disabled=true;reconnectTimer=setTimeout(connect,1800)};ws.onerror=()=>{try{ws.close()}catch{}};ws.onmessage=e=>{try{const d=JSON.parse(e.data);if(d.type==='Disabled'){stopped=true;toast(d.message||'This chat has been disabled.');status.textContent='Chat disabled';status.className='chat-count';send.disabled=true;try{ws.close()}catch{}return}if(d.type==='System')return toast(d.message||'');if(d.type==='Presence'){count.textContent=(d.online||0)+' online';return}if(d.type==='History'){renderHistory(d.messages||[]);return}render(d)}catch{}}}
+function clearFile(){selectedFile=null;if(previewUrl){URL.revokeObjectURL(previewUrl);previewUrl=null}if(file)file.value='';if(fileName)fileName.textContent='';if(preview){preview.classList.remove('show');previewMedia.innerHTML='';previewTitle.textContent='';previewMeta.textContent=''}}
+function showPreview(f){if(!preview)return;clearFile();selectedFile=f;previewUrl=URL.createObjectURL(f);const isVideo=f.type.startsWith('video/');previewMedia.innerHTML=isVideo?'<video src="'+previewUrl+'" muted playsinline></video>':'<img src="'+previewUrl+'" alt="preview">';previewTitle.textContent=f.name;previewMeta.textContent=(isVideo?'Video':'Image')+' · '+(f.size/1024/1024).toFixed(2)+' MB';preview.classList.add('show');fileName.textContent='Ready to send';}
+async function submit(){if(!ws||ws.readyState!==1)return toast('Chat is reconnecting…');const text=input.value.trim();if(selectedFile){const f=selectedFile;if(f.size>cfg.maxMedia)return toast('That file is too large.');const mime=f.type.toLowerCase();if(!/^image\/(jpeg|png|gif|webp)$/.test(mime)&&!/^video\/(mp4|webm|quicktime)$/.test(mime))return toast('Unsupported media type.');send.disabled=true;const r=new FileReader();const reset=()=>{send.disabled=false};r.onload=()=>{const b64=String(r.result).split(',')[1]||'',type=cfg.me?(mime.startsWith('image/')?'ME-Photo':'ME-Video'):(mime.startsWith('image/')?'Picture':'Video');try{ws.send(JSON.stringify({type,data:b64,mime,filename:f.name}));if(text)ws.send(JSON.stringify({type:cfg.me?'ME-Chat':'Message',message:text}));}catch{toast('Could not send that attachment.')}clearFile();input.value='';reset()};r.onerror=()=>{toast('Could not read that file.');reset()};r.onabort=reset;r.readAsDataURL(f);return}if(text){try{ws.send(JSON.stringify({type:cfg.me?'ME-Chat':'Message',message:text}));input.value=''}catch{toast('Message could not be sent.')}}}
+file?.addEventListener('change',()=>{const f=file.files?.[0];if(f)showPreview(f)});document.getElementById('chat-preview-clear')?.addEventListener('click',clearFile);send?.addEventListener('click',submit);input?.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();submit()}});connect();
+})();
+</script>
+'''
+CHAT_DISABLED_PAGE_HTML = '''<!doctype html><html lang="en"><head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#050608"><title>{title} — DexNotifier</title><style>body{{background:#050608;color:#f7f7fb;font-family:Inter,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px}}.box{{max-width:440px;text-align:center;background:linear-gradient(145deg,rgba(17,20,27,.88),rgba(8,10,14,.9));border:1px solid rgba(255,255,255,.08);border-radius:20px;padding:36px 28px}}.box h1{{margin:0 0 10px;font-size:22px}}.box p{{color:#8f98a9;font-size:14px;line-height:1.6}}.box a{{color:#a5b4fc;text-decoration:none;font-weight:700}}</style></head><body><div class="box"><h1>{title} is currently disabled</h1><p>An admin has temporarily turned {title} off. Please check back later.</p><p><a href="/home">← Back to dashboard</a></p></div></body></html>'''
+async def _chat_user_from_ws(websocket: WebSocket, me: bool = False) -> Optional[str]:
+    token = websocket.cookies.get("dex_session")
+    username = verify_session_token(token, SESSION_MAX_AGE)
+    if not username or username not in users: return None
+    if me:
+        async with me_group_lock:
+            if username not in me_group_users: return None
+    return username
+
+def _chat_page_html(username: str, me: bool = False) -> str:
+    title = "ME-Chat" if me else "Chat"
+    subtitle = "Your private ME-Group conversation" if me else "A fast, live place to talk and share media"
+    badge = "ME-GROUP • PRIVATE" if me else "LIVE COMMUNITY"
+    return f'''<!doctype html><html lang="en"><head><link rel="icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="shortcut icon" type="image/webp" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><link rel="apple-touch-icon" href="https://cdn.discordapp.com/icons/1505354277848219758/a6a84873eb83095e937b0051df49f5dc.webp?size=1536"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#050608"><title>{title} — DexNotifier</title><style>{CHAT_PAGE_CSS}</style></head><body><main class="chat-page"><section class="chat-hero"><div><span class="chat-badge"><i style="width:7px;height:7px;border-radius:50%;background:#34d399;box-shadow:0 0 14px #34d399"></i>{badge}</span><h1>{title}</h1><p>{subtitle}. You're signed in as <strong>{html.escape(username)}</strong>.</p></div><nav class="dn-chrome-links"><a href="/">Home</a><a href="/obfuscate">Obfustucate</a><a href="/chat">Chat</a><a href="/ME-chat">ME-Chat</a><a href="/home">Dashboard</a></nav></section><section class="chat-shell"><aside class="chat-side"><div class="chat-side-card"><strong>{html.escape(username)}</strong><span>Your account</span><span class="chat-online" style="margin-top:10px"><i></i> Online</span></div><div class="chat-side-card"><strong>{'ME-Group' if me else 'Community'}</strong><span>{'Private conversation for approved accounts.' if me else 'Everyone who is signed in can join.'}</span></div><div class="chat-side-card"><strong>Share media</strong><span>Send photos and videos directly in the conversation.</span></div></aside><section class="chat-main"><header class="chat-top"><div><strong>{title}</strong><small id="chat-status">Connecting…</small></div><span id="chat-count" class="chat-count">0 online</span></header><div id="chat-messages" class="chat-messages"><div class="chat-empty"><b>Welcome to {title}</b><span>Your conversation is saved automatically and stays available when you come back.</span></div></div><footer class="chat-compose"><div id="chat-preview" class="chat-preview"><div id="chat-preview-media"></div><div class="chat-preview-info"><strong id="chat-preview-title"></strong><span id="chat-preview-meta"></span></div><button type="button" id="chat-preview-clear" class="chat-preview-clear">×</button></div><div class="chat-input-row"><input id="chat-file" type="file" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/webm,video/quicktime" hidden><button type="button" class="chat-icon-btn" onclick="document.getElementById('chat-file').click()" title="Add photo or video">＋</button><textarea id="chat-input" class="chat-input" placeholder="Write a message…" maxlength="{CHAT_MAX_MESSAGE}"></textarea><button id="chat-send" class="chat-send" disabled>Send</button></div><div id="chat-file-name" class="chat-file-name"></div></footer></section></section></main><script>window.__DN_CHAT_CONFIG__={{me:{str(me).lower()},username:{json.dumps(username)},maxMedia:{CHAT_MAX_MEDIA_BYTES}}};</script>{CHAT_PAGE_JS}</body></html>'''
+
+@app.get("/chat")
+async def chat_page(request: Request):
+    username = get_logged_in_user(request)
+    if not username: return RedirectResponse("/home?next=/chat", status_code=303)
+    if not chat_enabled: return HTMLResponse(CHAT_DISABLED_PAGE_HTML.format(title="Chat"))
+    return HTMLResponse(_chat_page_html(username, False))
+
+@app.get("/ME-chat")
+async def me_chat_page(request: Request):
+    username = get_logged_in_user(request)
+    if not username: return RedirectResponse("/", status_code=303)
+    async with me_group_lock: allowed = username in me_group_users
+    if not allowed: return RedirectResponse("/", status_code=303)
+    if not me_chat_enabled: return HTMLResponse(CHAT_DISABLED_PAGE_HTML.format(title="ME-Chat"))
+    return HTMLResponse(_chat_page_html(username, True))
+
+@app.get("/chat/media/{room}/{filename}")
+async def chat_media(room: str, filename: str, request: Request):
+    username = get_logged_in_user(request)
+    if not username: return PlainTextResponse("Unauthorized", status_code=401)
+    if room not in {"chat","me"} or not re.fullmatch(r"[A-Za-z0-9_.-]{1,180}", filename): return PlainTextResponse("NOT_FOUND", status_code=404)
+    if room == "me":
+        async with me_group_lock:
+            if username not in me_group_users: return PlainTextResponse("NOT_FOUND", status_code=404)
+    path=os.path.join(CHAT_MEDIA_DIR,room,filename)
+    if not os.path.isfile(path): return PlainTextResponse("NOT_FOUND", status_code=404)
+    import mimetypes
+    from starlette.responses import FileResponse
+    return FileResponse(path, media_type=mimetypes.guess_type(path)[0] or "application/octet-stream")
+
+async def _broadcast_chat(connections: Set[WebSocket], payload: dict) -> None:
+    text=json.dumps(payload,ensure_ascii=False); dead=[]
+    for ws in list(connections):
+        try: await ws.send_text(text)
+        except Exception: dead.append(ws)
+    for ws in dead: connections.discard(ws)
+
+async def _load_and_send_history(ws: WebSocket, history: list) -> None:
+    try:
+        await ws.send_text(json.dumps({"type":"History","messages":history[-CHAT_HISTORY_MAX:]}, ensure_ascii=False, separators=(",",":")))
+    except Exception:
+        pass
+
+CHAT_CONNECT_RATE_LIMIT = 8
+CHAT_CONNECT_RATE_WINDOW = 60.0
+CHAT_MEDIA_RATE_LIMIT = 6
+CHAT_MEDIA_RATE_WINDOW = 60.0
+
+async def _clear_chat_room(me: bool) -> int:
+    """Wipes stored history for a chat room (from memory + disk) and pushes
+    an empty History frame to everyone currently connected so their screen
+    clears live, with no refresh needed. Returns how many messages were removed."""
+    lock_obj = me_chat_lock if me else chat_lock
+    history_cache = me_chat_history_cache if me else chat_history_cache
+    history_file = ME_CHAT_HISTORY_FILE if me else CHAT_HISTORY_FILE
+    connections = me_chat_connections if me else chat_connections
+    async with lock_obj:
+        removed = len(history_cache)
+        history_cache.clear()
+        save_chat_history_file(history_file, history_cache)
+    await _broadcast_chat(connections, {"type": "History", "messages": []})
+    return removed
+
+
+async def _set_chat_enabled(me: bool, enabled: bool) -> None:
+    """Flips Chat or ME-Chat on/off, persists the setting so it survives a
+    redeploy, and - when turning it off - immediately disconnects anyone
+    currently connected to that room."""
+    global chat_enabled, me_chat_enabled
+    if me:
+        me_chat_enabled = enabled
+    else:
+        chat_enabled = enabled
+    async with chat_settings_lock:
+        _save_chat_settings({"chat_enabled": chat_enabled, "me_chat_enabled": me_chat_enabled})
+    if not enabled:
+        connections = me_chat_connections if me else chat_connections
+        label = "ME-Chat" if me else "Chat"
+        await _broadcast_chat(connections, {"type": "Disabled", "message": f"{label} has been disabled by an admin."})
+        for ws in list(connections):
+            try: await ws.close(code=4404)
+            except Exception: pass
+        connections.clear()
+
+
+async def _handle_chat_ws(websocket: WebSocket, me: bool = False):
+    username=await _chat_user_from_ws(websocket,me)
+    if not username: await websocket.close(code=4403); return
+    if not (me_chat_enabled if me else chat_enabled):
+        label = "ME-Chat" if me else "Chat"
+        await websocket.accept()
+        try: await websocket.send_text(json.dumps({"type":"Disabled","message":f"{label} is currently disabled by an admin."}))
+        except Exception: pass
+        await websocket.close(code=4404)
+        return
+    ip=_ws_client_ip(websocket)
+    room_key="me_chat" if me else "chat"
+    if rate_limited(ip, room_key+"_connect", CHAT_CONNECT_RATE_LIMIT, CHAT_CONNECT_RATE_WINDOW):
+        await websocket.close(code=4429); return
+    connections=me_chat_connections if me else chat_connections
+    history_file=ME_CHAT_HISTORY_FILE if me else CHAT_HISTORY_FILE
+    lock_obj=me_chat_lock if me else chat_lock
+    history_cache=me_chat_history_cache if me else chat_history_cache
+    await websocket.accept(); connections.add(websocket)
+    await _load_and_send_history(websocket, history_cache)
+    await _broadcast_chat(connections,{"type":"Presence","online":len(connections)})
+    try:
+        while True:
+            raw=await websocket.receive_text()
+            if len(raw.encode("utf-8"))>CHAT_MAX_JSON: await websocket.send_text(json.dumps({"type":"System","message":"Message too large."})); continue
+            if rate_limited(ip,room_key+"_send",CHAT_RATE_LIMIT,CHAT_RATE_WINDOW): await websocket.send_text(json.dumps({"type":"System","message":"Slow down for a moment."})); continue
+            try: data=json.loads(raw)
+            except Exception: await websocket.send_text(json.dumps({"type":"System","message":"Invalid message."})); continue
+            if not isinstance(data,dict): continue
+            typ=str(data.get("type","")); allowed={"ME-Chat","ME-Photo","ME-Video"} if me else {"Message","Picture","Video"}
+            if typ not in allowed: await websocket.send_text(json.dumps({"type":"System","message":"That message could not be sent."})); continue
+            base={"type":typ,"id":secrets.token_urlsafe(10),"username":username,"account_username":username,"display_name":username,"timestamp":time.time()}
+            if typ in {"Message","ME-Chat"}:
+                message=str(data.get("message",""))[:CHAT_MAX_MESSAGE].strip()
+                if not message: continue
+                base["message"]=message
+            else:
+                if rate_limited(ip,room_key+"_media",CHAT_MEDIA_RATE_LIMIT,CHAT_MEDIA_RATE_WINDOW): await websocket.send_text(json.dumps({"type":"System","message":"Too many uploads. Try again shortly."})); continue
+                mime=str(data.get("mime","" )).lower().strip(); ext=_media_extension(mime); encoded=data.get("data","")
+                if not ext or not isinstance(encoded,str) or len(encoded)>int(CHAT_MAX_MEDIA_BYTES*1.38)+1024: await websocket.send_text(json.dumps({"type":"System","message":"Unsupported or oversized media."})); continue
+                try:
+                    import base64; blob=base64.b64decode(encoded,validate=True)
+                except Exception: await websocket.send_text(json.dumps({"type":"System","message":"Invalid media data."})); continue
+                if len(blob)>CHAT_MAX_MEDIA_BYTES: await websocket.send_text(json.dumps({"type":"System","message":"That file is too large."})); continue
+                room="me" if me else "chat"; os.makedirs(os.path.join(CHAT_MEDIA_DIR,room),exist_ok=True); filename=secrets.token_hex(16)+ext
+                with open(os.path.join(CHAT_MEDIA_DIR,room,filename),"wb") as f: f.write(blob)
+                base.update({"url":f"/chat/media/{room}/{filename}","filename":_safe_chat_filename(data.get("filename","attachment")),"mime":mime,"size":len(blob)})
+            async with lock_obj:
+                history_cache.append(base)
+                if len(history_cache)>CHAT_HISTORY_MAX: del history_cache[:-CHAT_HISTORY_MAX]
+                save_chat_history_file(history_file,history_cache)
+            await _broadcast_chat(connections,base)
+    except WebSocketDisconnect: pass
+    except Exception: pass
+    finally:
+        connections.discard(websocket); await _broadcast_chat(connections,{"type":"Presence","online":len(connections)})
+
+@app.websocket("/ws/chat")
+async def websocket_chat(websocket: WebSocket): await _handle_chat_ws(websocket,False)
+
+@app.websocket("/ws/me-chat")
+async def websocket_me_chat(websocket: WebSocket): await _handle_chat_ws(websocket,True)
+
+# -----------------------------
+# ADMIN CHAT CONTROLS - enable/disable each room independently and wipe
+# stored history on demand. Both take effect immediately for anyone
+# currently connected, not just on their next page load.
+# -----------------------------
+
+@app.post("/admin/chat/toggle")
+async def admin_chat_toggle(request: Request):
+    if not require_admin_session(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    if reject_if_oversized(request, MAX_GENERIC_BODY): return PlainTextResponse("Payload too large.", status_code=413)
+    raw = await request.body()
+    if len(raw) > MAX_GENERIC_BODY: return PlainTextResponse("Payload too large.", status_code=413)
+    data = parse_qs(raw.decode(errors="ignore"))
+    room = data.get("room", [""])[0].strip().lower()
+    if room not in {"chat", "me"}: return JSONResponse({"error":"room must be 'chat' or 'me'"},status_code=400)
+    enabled = data.get("enabled", [""])[0].strip().lower() in {"1","true","on","yes"}
+    await _set_chat_enabled(room == "me", enabled)
+    return JSONResponse({"ok": True, "room": room, "enabled": enabled})
+
+
+@app.post("/admin/chat/clear")
+async def admin_chat_clear(request: Request):
+    if not require_admin_session(request): return JSONResponse({"error":"unauthorized"},status_code=401)
+    if reject_if_oversized(request, MAX_GENERIC_BODY): return PlainTextResponse("Payload too large.", status_code=413)
+    raw = await request.body()
+    if len(raw) > MAX_GENERIC_BODY: return PlainTextResponse("Payload too large.", status_code=413)
+    data = parse_qs(raw.decode(errors="ignore"))
+    room = data.get("room", [""])[0].strip().lower()
+    if room not in {"chat", "me", "both"}: return JSONResponse({"error":"room must be 'chat', 'me', or 'both'"},status_code=400)
+    removed = 0
+    if room in {"chat", "both"}: removed += await _clear_chat_room(False)
+    if room in {"me", "both"}: removed += await _clear_chat_room(True)
+    return JSONResponse({"ok": True, "room": room, "removed": removed})
+
+# -----------------------------
+# DYNAMIC LOADER ENDPOINTS - rate-limited, with a separate failed-attempt
+# lockout on wrong paid keys / HWID mismatches per IP.
+# -----------------------------
+
+SLUG_LOADER_RATE_LIMIT = 30
+SLUG_LOADER_RATE_WINDOW = 10.0
+
+
+@app.get("/{slug}")
+async def dynamic_loader(slug: str, request: Request):
+    ip = _client_ip(request)
+
+    if rate_limited(ip, "slug_loader_get", max_requests=SLUG_LOADER_RATE_LIMIT, window_seconds=SLUG_LOADER_RATE_WINDOW):
+        return PlainTextResponse("-- Rate limited, try again shortly.", status_code=429)
+
+    if slug.lower() in RESERVED_PATHS_LOWER:
+        if not is_executor(request):
+            return protected_script_response()
+        return PlainTextResponse("-- Reserved.")
+
+    if not is_executor(request):
+        return protected_script_response()
+
+    async with scripts_lock:
+        s = scripts.get(slug)
+        if not s:
+            for k, v in scripts.items():
+                if k.lower() == slug.lower():
+                    s = v
+                    break
+        if not s:
+            # Confirmed executor request, just for a slug that doesn't
+            # exist - plain text so it fails cleanly inside loadstring()
+            # instead of dumping an HTML page into their script.
+            return PlainTextResponse("-- Script not found.")
+
+        code = s.get("code", "")
+        is_paid = s.get("is_paid", False)
+        hwid_lock = s.get("hwid_lock", False)
+        actual_slug = s.get("slug", slug)
+
+    if not is_paid:
+        return PlainTextResponse(code)
+
+    if await is_rate_limited("slug_key_guess", ip):
+        return PlainTextResponse("-- Too many invalid key attempts. Try again later.", status_code=429)
+
+    key = request.query_params.get("key", "").strip()
+    hwid = request.query_params.get("hwid", "").strip()
+
+    if not key:
+        return PlainTextResponse("-- Missing paid key.")
+    if hwid_lock and not hwid:
+        return PlainTextResponse("-- Missing HWID for locked script.")
+
+    async with scripts_lock:
+        s = scripts.get(actual_slug)
+        if not s:
+            return PlainTextResponse("-- Script not found.")
+        keys = s.get("keys", {})
+
+        matched_key = None
+        for stored_key in keys.keys():
+            if constant_time_eq(stored_key, key):
+                matched_key = stored_key
+                break
+
+        if matched_key is None:
+            await record_failed_attempt("slug_key_guess", ip)
+            return PlainTextResponse("-- Invalid paid key.")
+
+        info = keys[matched_key]
+        expiry = info.get("expiry", 0)
+        bound_hwid = info.get("hwid")
+        now = time.time()
+        if now > expiry:
+            keys.pop(matched_key, None)
+            s["keys"] = keys
+            save_scripts_to_file()
+            return PlainTextResponse("-- Paid key expired.")
+        if hwid_lock:
+            if bound_hwid is None:
+                info["hwid"] = hwid
+                keys[matched_key] = info
+                s["keys"] = keys
+                save_scripts_to_file()
+            else:
+                if not constant_time_eq(bound_hwid, hwid):
+                    await record_failed_attempt("slug_key_guess", ip)
+                    return PlainTextResponse("-- HWID mismatch for this key.")
+
+    await clear_attempts("slug_key_guess", ip)
+    return PlainTextResponse(code)
+
+
+# -----------------------------
+# DISCORD <-> DEX BOT BRIDGE
+# -----------------------------
+# A small job queue used by the Discord bot and the local Playwright bridge.
+# POST /bridge/jobs creates work; GET /bridge/jobs/next claims the oldest job;
+# GET /bridge/jobs/{id} retrieves its state/result; POST /bridge/jobs/{id}/result
+# posts the Discord reply back to the bot.
+# Bridge jobs are durable until the Discord bot explicitly acknowledges
+# receipt of the puller's result. Do not expire or size-prune pending,
+# processing, or complete jobs; losing one here would make a bridge request
+# disappear before the puller/bot pair can finish it.
+BRIDGE_JOB_TTL = int(os.environ.get("DEX_BRIDGE_JOB_TTL", "0"))
+BRIDGE_MAX_JOBS = int(os.environ.get("DEX_BRIDGE_MAX_JOBS", "0"))
+bridge_jobs: Dict[str, Dict[str, Any]] = {}
+bridge_jobs_lock = asyncio.Lock()
+
+
+def _bridge_cleanup_locked() -> None:
+    # Intentionally do nothing. A bridge job is removed only by the explicit
+    # /bridge/jobs/{job_id}/ack endpoint after the Discord bot has consumed
+    # the result.
+    return
+
+
+def _bridge_job_public(job: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(job)
+    out.pop("source_text", None)
+    out.pop("result_attachment_b64", None)
+    return out
+
+
+async def _bridge_fetch_source_url(source_url: str) -> str:
+    """Fetch a bridge source URL into source_text so /bridge/input/{id} is always usable."""
+    source_url = str(source_url or "").strip()
+    if not source_url:
+        return ""
+    if not re.match(r"^https?://", source_url, re.IGNORECASE):
+        raise ValueError("source_url must use http:// or https://")
+    # Bridge source fetching intentionally has no application-level size cap.
+    # The upstream/platform remains responsible for hard infrastructure limits.
+    def _fetch():
+        req = urllib.request.Request(
+            source_url,
+            headers={
+                "User-Agent": "DexBridge/1.0",
+                "Accept": "text/plain,text/*,*/*;q=0.8",
+                "Cache-Control": "no-cache",
+            },
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=20) as response:
+            data = response.read()
+            content_type = str(response.headers.get("Content-Type") or "").lower()
+
+        text = data.decode("utf-8", errors="replace")
+
+        # Raw Lua endpoints should never silently become an HTML page.
+        # If an upstream service returns a normal HTML error/login page, fail
+        # the bridge job with a useful error instead of sending '<' to Dex and
+        # producing the misleading Lua parser error shown to the user.
+        stripped = text.lstrip().lower()
+        if (
+            "text/html" in content_type
+            or stripped.startswith("<!doctype html")
+            or stripped.startswith("<html")
+        ):
+            raise ValueError("source_url returned HTML instead of Lua source")
+
+        return text
+    return await asyncio.to_thread(_fetch)
+
+
+@app.post("/bridge/jobs")
+async def bridge_create_job(request: Request):
+    ip = _client_ip(request)
+    # Bridge endpoints intentionally have no application-level request-rate
+    # limiter. The API key remains mandatory.
+    if not is_valid_key(request.headers.get("X-Api-Key", "")):
+        await record_failed_attempt("bridge_create_auth", ip)
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "expected JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid body"}, status_code=400)
+    job_id = secrets.token_urlsafe(18).rstrip("=")
+    source_url = str(body.get("source_url") or "").strip()
+    source_text = body.get("source_text")
+    if source_text is not None and not isinstance(source_text, str):
+        source_text = str(source_text)
+    if not source_url and not (source_text and source_text.strip()):
+        return JSONResponse({"error": "source_url or source_text is required"}, status_code=400)
+    if source_url and not (source_text and source_text.strip()):
+        try:
+            source_text = await _bridge_fetch_source_url(source_url)
+        except Exception as exc:
+            return JSONResponse({"error": f"source_url fetch failed: {str(exc)[:500]}"}, status_code=400)
+        if not source_text.strip():
+            return JSONResponse({"error": "source_url returned an empty source"}, status_code=400)
+    # No application-level size rejection for bridge source_text.
+    # Keep the value exactly as supplied so large bridge inputs can flow
+    # through API1 to the puller.
+    operation = str(body.get("operation") or body.get("mode") or "deobfuscate").strip().lower()
+    # `.goofy` is a direct passthrough mode: the puller receives the
+    # DEX Obfuscator attachment and returns it without a Dex obfuscation or
+    # minify pass. Legacy minify remains accepted for unrelated callers.
+    if operation not in {"deobfuscate", "goofy", "goofy_obf", "obfuscate", "minify"}:
+        return JSONResponse({"error": "invalid bridge operation"}, status_code=400)
+
+    job = {
+        "id": job_id,
+        "state": "pending",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "source_url": source_url,
+        "source_text": source_text or "",
+        "source_length": len((source_text or "").encode("utf-8")),
+        "source_sha256": hashlib.sha256((source_text or "").encode("utf-8")).hexdigest(),
+        "filename": str(body.get("filename") or "source.lua")[:180],
+        "requester_id": str(body.get("requester_id") or ""),
+        "requester_name": str(body.get("requester_name") or ""),
+        "operation": operation,
+        "result_text": "",
+        "result_filename": "",
+        "result_attachment_b64": "",
+        "result_error": "",
+    }
+    async with bridge_jobs_lock:
+        _bridge_cleanup_locked()
+        bridge_jobs[job_id] = job
+    input_url = f"{BASE_URL}/bridge/input/{job_id}"
+    return JSONResponse({"ok": True, "job_id": job_id, "state": "pending", "input_url": input_url})
+
+
+@app.get("/bridge/jobs/next")
+async def bridge_next_job(request: Request):
+    ip = _client_ip(request)
+    # Bridge polling is intentionally not rate limited.
+    if not is_valid_key(request.headers.get("X-Api-Key", "")):
+        await record_failed_attempt("bridge_next_auth", ip)
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    async with bridge_jobs_lock:
+        _bridge_cleanup_locked()
+        candidates = [j for j in bridge_jobs.values() if j.get("state") == "pending"]
+        if not candidates:
+            return JSONResponse({"ok": True, "job": None})
+        job = min(candidates, key=lambda j: float(j.get("created_at", 0)))
+        job["state"] = "processing"
+        job["updated_at"] = time.time()
+        public = _bridge_job_public(job)
+        public["input_url"] = f"{BASE_URL}/bridge/input/{job['id']}"
+        return JSONResponse({"ok": True, "job": public})
+
+
+@app.get("/bridge/input/{job_id}")
+async def bridge_input(job_id: str, request: Request):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,40}", job_id):
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+    async with bridge_jobs_lock:
+        _bridge_cleanup_locked()
+        job = bridge_jobs.get(job_id)
+        if not job:
+            return PlainTextResponse("NOT_FOUND", status_code=404)
+        source_text = str(job.get("source_text") or "")
+        source_url = str(job.get("source_url") or "").strip()
+
+    if not source_text and source_url:
+        try:
+            fetched = await _bridge_fetch_source_url(source_url)
+        except Exception:
+            fetched = ""
+        if fetched.strip():
+            async with bridge_jobs_lock:
+                job = bridge_jobs.get(job_id)
+                if job is not None:
+                    job["source_text"] = fetched
+                    job["updated_at"] = time.time()
+                    source_text = fetched
+
+    if not source_text:
+        return PlainTextResponse("NOT_FOUND", status_code=404)
+
+    return PlainTextResponse(
+        source_text,
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "X-Dex-Bridge-Source": "1",
+            "X-Dex-Bridge-Job": job_id,
+        },
+    )
+
+
+@app.get("/bridge/jobs/{job_id}")
+async def bridge_get_job(job_id: str, request: Request):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,40}", job_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not is_valid_key(request.headers.get("X-Api-Key", "")):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    async with bridge_jobs_lock:
+        _bridge_cleanup_locked()
+        job = bridge_jobs.get(job_id)
+        if not job:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        public = _bridge_job_public(job)
+        if job.get("result_attachment_b64"):
+            public["result_attachment_b64"] = job["result_attachment_b64"]
+        return JSONResponse(public)
+
+
+@app.post("/bridge/jobs/{job_id}/result")
+async def bridge_set_result(job_id: str, request: Request):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,40}", job_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not is_valid_key(request.headers.get("X-Api-Key", "")):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "expected JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid body"}, status_code=400)
+    state = str(body.get("state") or "complete").lower().strip()
+    if state not in {"pending", "complete", "error"}:
+        return JSONResponse({"error": "invalid state"}, status_code=400)
+    result_text = str(body.get("result_text") or "")
+
+    # Accept both field names used by bridge versions. The canonical stored
+    # field remains result_attachment_b64.
+    attachment_b64 = str(
+        body.get("attachment_b64")
+        or body.get("result_attachment_b64")
+        or ""
+    )
+
+    if len(attachment_b64) > 24 * 1024 * 1024:
+        return JSONResponse({"error": "attachment too large"}, status_code=413)
+    async with bridge_jobs_lock:
+        _bridge_cleanup_locked()
+        job = bridge_jobs.get(job_id)
+        if not job:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        job.update({
+            "state": state,
+            "updated_at": time.time(),
+            "result_text": result_text[:MAX_LOG_LEN] if state != "pending" else "",
+            "result_filename": str(
+                body.get("attachment_name")
+                or body.get("result_filename")
+                or ""
+            )[:180] if state != "pending" else "",
+            "result_attachment_b64": attachment_b64 if state != "pending" else "",
+            "result_error": str(body.get("error") or body.get("result_error") or "")[:1000],
+        })
+    return JSONResponse({"ok": True, "job_id": job_id, "state": state})
+
+
+@app.post("/bridge/jobs/{job_id}/ack")
+async def bridge_ack_job(job_id: str, request: Request):
+    """
+    Permanently acknowledge a completed bridge result.
+
+    The Discord bot calls this only after it has successfully consumed the
+    puller's result and finalized it for the requesting Discord user. Until
+    this endpoint succeeds, the completed job remains in API1.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,40}", job_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if not is_valid_key(request.headers.get("X-Api-Key", "")):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    async with bridge_jobs_lock:
+        job = bridge_jobs.get(job_id)
+        if not job:
+            return JSONResponse({"error": "not found"}, status_code=404)
+
+        state = str(job.get("state") or "").lower().strip()
+        if state not in {"complete", "error"}:
+            return JSONResponse(
+                {"error": "job is not complete", "state": state},
+                status_code=409,
+            )
+
+        # Delete only after the consumer explicitly acknowledges the result.
+        bridge_jobs.pop(job_id, None)
+
+    return JSONResponse({"ok": True, "job_id": job_id, "state": "acknowledged"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GAME CHAT — paste this entire block into your main.py
+# BEFORE the final  `if __name__ == "__main__":` line at the very bottom.
+#
+# New endpoints:
+#   POST /game-chat/send      { username, display_name, role, message }
+#   GET  /game-chat/messages  ?since=<last_id>   → { messages:[…], online:N }
+#   GET  /game-chat/status    → { online:N, total_messages:N }
+# ═══════════════════════════════════════════════════════════════════════════
+
+import collections as _collections
+
+GAME_CHAT_MAX_MESSAGES  = 300      # keep at most this many in memory
+GAME_CHAT_MAX_MSG_LEN   = 200      # character limit per message
+GAME_CHAT_RATE_WINDOW   = 5.0      # seconds between accepted messages per IP
+GAME_CHAT_POST_LIMIT    = 12       # raw request volume cap (any status)
+GAME_CHAT_POST_WINDOW   = 10.0
+GAME_CHAT_GET_LIMIT     = 60
+GAME_CHAT_GET_WINDOW    = 10.0
+GAME_CHAT_SPAM_LOOKBACK = 3        # identical-message spam window
+GAME_CHAT_ONLINE_TTL    = 15.0     # seconds before a client is "offline"
+
+_game_chat_lock                          = asyncio.Lock()
+_game_chat_messages: list                = []
+_game_chat_id_counter: int               = 0
+_game_chat_online: Dict[str, float]      = {}   # ip -> last_seen
+_game_chat_last_sent: Dict[str, float]   = {}   # ip -> last accepted send time
+_game_chat_recent: Dict[str, "_collections.deque"] = {}  # ip -> deque of norm msgs
+
+_GC_BLOCKED_WORDS = {
+    "nigger","nigga","faggot","fag","retard","kike","chink","spic","cunt",
+    "fuck","shit","bitch","asshole","dick","cock","pussy","whore","slut",
+    "porn","rape","nazi","discord","discordgg",
+}
+
+
+def _gc_normalize(text: str) -> str:
+    import unicodedata as _ud
+    s = _ud.normalize("NFKD", text)
+    s = "".join(c for c in s if not _ud.combining(c))
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def _gc_contains_blocked(text: str) -> bool:
+    n = _gc_normalize(text)
+    for w in _GC_BLOCKED_WORDS:
+        if w in n:
+            return True
+    if re.search(r"https?://|www\.", text, re.IGNORECASE):
+        return True
+    return False
+
+
+def _gc_is_spam(ip: str, norm: str) -> bool:
+    dq = _game_chat_recent.get(ip)
+    if not dq or len(dq) < GAME_CHAT_SPAM_LOOKBACK:
+        return False
+    return sum(1 for m in dq if m == norm) >= GAME_CHAT_SPAM_LOOKBACK
+
+
+def _gc_record_sent(ip: str, norm: str) -> None:
+    if ip not in _game_chat_recent:
+        _game_chat_recent[ip] = _collections.deque(maxlen=GAME_CHAT_SPAM_LOOKBACK + 1)
+    _game_chat_recent[ip].append(norm)
+
+
+def _gc_online_count() -> int:
+    cutoff = time.time() - GAME_CHAT_ONLINE_TTL
+    return sum(1 for ts in _game_chat_online.values() if ts >= cutoff)
+
+
+def _gc_trim_online() -> None:
+    cutoff = time.time() - GAME_CHAT_ONLINE_TTL
+    stale = [ip for ip, ts in _game_chat_online.items() if ts < cutoff]
+    for ip in stale:
+        _game_chat_online.pop(ip, None)
+
+
+@app.post("/game-chat/send")
+async def game_chat_send(request: Request):
+    """Accept a chat message from a Roblox executor client."""
+    global _game_chat_id_counter
+
+    ip = _client_ip(request)
+
+    # Volume cap (raw requests)
+    if rate_limited(ip, "game_chat_post", GAME_CHAT_POST_LIMIT, GAME_CHAT_POST_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    # Per-message cooldown — 5 seconds between accepted sends
+    now = time.time()
+    async with _game_chat_lock:
+        last = _game_chat_last_sent.get(ip, 0)
+        if now - last < GAME_CHAT_RATE_WINDOW:
+            remaining = int(GAME_CHAT_RATE_WINDOW - (now - last)) + 1
+            return JSONResponse(
+                {"error": f"slow down — wait {remaining}s", "wait": remaining},
+                status_code=429,
+            )
+
+    if reject_if_oversized(request, 4096):
+        return JSONResponse({"error": "payload too large"}, status_code=413)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "expected JSON"}, status_code=400)
+
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid body"}, status_code=400)
+
+    username     = str(body.get("username") or "").strip()[:20]
+    display_name = str(body.get("display_name") or username).strip()[:40]
+    role         = str(body.get("role") or "Dex User").strip()[:32]
+    message      = str(body.get("message") or "").strip()[:GAME_CHAT_MAX_MSG_LEN]
+
+    if not username or not message:
+        return JSONResponse({"error": "username and message are required"}, status_code=400)
+
+    # Username must be a plausible Roblox username
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,20}", username):
+        return JSONResponse({"error": "invalid username format"}, status_code=400)
+
+    # Role whitelist
+    if role not in {"Owner", "Co-Owner", "Dex Finder Designer", "Dex User"}:
+        role = "Dex User"
+
+    # Content filter (username + message)
+    if _gc_contains_blocked(message) or _gc_contains_blocked(username):
+        return JSONResponse({"error": "blocked content"}, status_code=400)
+
+    # Control-character check
+    if re.search(r"[\x00-\x1f\x7f]", message):
+        return JSONResponse({"error": "invalid characters"}, status_code=400)
+
+    # Server-side spam detection
+    norm = re.sub(r"\s+", " ", message.lower()).strip()
+    async with _game_chat_lock:
+        if _gc_is_spam(ip, norm):
+            return JSONResponse(
+                {"error": "spam detected — vary your messages"},
+                status_code=429,
+            )
+        _gc_record_sent(ip, norm)
+        _game_chat_last_sent[ip] = time.time()
+        _game_chat_online[ip]    = time.time()
+
+        _game_chat_id_counter += 1
+        entry: Dict[str, Any] = {
+            "id":           _game_chat_id_counter,
+            "username":     username,
+            "display_name": display_name,
+            "role":         role,
+            "message":      message,
+            "timestamp":    time.strftime("%H:%M", time.gmtime()),
+            "sent_at":      time.time(),
+        }
+        _game_chat_messages.append(entry)
+        if len(_game_chat_messages) > GAME_CHAT_MAX_MESSAGES:
+            del _game_chat_messages[:-GAME_CHAT_MAX_MESSAGES]
+
+    return JSONResponse({"ok": True, "id": entry["id"]})
+
+
+@app.get("/game-chat/messages")
+async def game_chat_messages(request: Request):
+    """
+    Return messages newer than `since` (a message id).
+    Also updates the caller's online timestamp.
+    """
+    ip = _client_ip(request)
+
+    if rate_limited(ip, "game_chat_get", GAME_CHAT_GET_LIMIT, GAME_CHAT_GET_WINDOW):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+
+    since_raw = request.query_params.get("since", "0")
+    try:
+        since = int(since_raw)
+    except ValueError:
+        since = 0
+
+    async with _game_chat_lock:
+        _game_chat_online[ip] = time.time()
+        _gc_trim_online()
+        online_count = _gc_online_count()
+        new_msgs = [m for m in _game_chat_messages if m["id"] > since]
+
+    return JSONResponse(
+        {"ok": True, "messages": new_msgs, "online": online_count},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/game-chat/status")
+async def game_chat_status(request: Request):
+    """Lightweight public endpoint — just online count and total messages."""
+    ip = _client_ip(request)
+    if rate_limited(ip, "game_chat_status", 30, 10.0):
+        return JSONResponse({"error": "rate limited"}, status_code=429)
+    async with _game_chat_lock:
+        _gc_trim_online()
+        cnt   = _gc_online_count()
+        total = len(_game_chat_messages)
+    return JSONResponse({"ok": True, "online": cnt, "total_messages": total})
+
+
+# ─── Admin: view/clear game chat ────────────────────────────────────────────
+
+@app.get("/admin/game-chat")
+async def admin_game_chat_view(request: Request):
+    """Admin-only: see full in-memory game-chat log."""
+    if not require_admin_session(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    async with _game_chat_lock:
+        _gc_trim_online()
+        return JSONResponse({
+            "ok": True,
+            "online": _gc_online_count(),
+            "total": len(_game_chat_messages),
+            "messages": list(reversed(_game_chat_messages[-50:])),
+        })
+
+
+@app.post("/admin/game-chat/clear")
+async def admin_game_chat_clear(request: Request):
+    """Admin-only: wipe all in-memory game-chat messages."""
+    global _game_chat_id_counter
+    if not require_admin_session(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    async with _game_chat_lock:
+        removed = len(_game_chat_messages)
+        _game_chat_messages.clear()
+        _game_chat_id_counter = 0
+    return JSONResponse({"ok": True, "removed": removed})
 
 
 # -----------------------------
