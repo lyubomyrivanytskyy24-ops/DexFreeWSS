@@ -7501,14 +7501,22 @@ def _call_dex_obfuscator_v8(source: str, settings: dict) -> str:
 
 
 def _format_dex_obfuscator_payload(protected: str) -> str:
-    """Add the DEX header and exactly one blank line before the upstream payload."""
-    protected = str(protected or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not protected:
-        raise ValueError("DEX Obfuscator V8 returned an empty payload.")
+    """Remove upstream branding, then add the DEX header and one blank line."""
+    protected = str(protected or "").replace("\ufeff", "")
+    protected = protected.replace("\r\n", "\n").replace("\r", "\n")
 
-    # The upstream result is the executable payload. Keep it intact and only
-    # normalize the outer file formatting requested by the website.
-    header = "-- This file was protected using DEX Obfuscator V8 [.gg/dexfinder]"
+    # Remove the exact Goofyscator V10 BETA-2.1 branding line completely if
+    # the upstream API includes it in its returned payload.
+    protected = protected.replace(
+        "-- This file is protected by goofyscator V10 BETA-2.1 >> goofyscator.lua.cz <<",
+        "",
+    )
+    protected = protected.strip()
+
+    if not protected:
+        raise ValueError("DEX Obfuscator returned an empty payload.")
+
+    header = "-- This file was protected using DEX Obfuscator v5.8 [.gg/dexfinder]"
     return header + "\n\n" + protected
 
 
