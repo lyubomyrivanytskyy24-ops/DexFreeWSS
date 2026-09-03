@@ -4237,6 +4237,10 @@ ADMIN_BASE_HTML = """
         .me-remove{{background:var(--danger-soft)!important;color:#ffd6d6!important;border-color:rgba(239,91,91,.3)!important;padding:8px 10px!important;font-size:11px!important}}
         .me-empty{{color:var(--dim);font-size:12px}}
         @media(max-width:900px){{ body{{flex-direction:column}} .dn-sidebar{{position:relative;width:100%;flex:none;height:auto;border-right:none;border-bottom:1px solid var(--line)}} .dn-nav{{flex-direction:row;flex-wrap:wrap}} .me-admin-grid{{grid-template-columns:1fr}} }}
+        .obf-loadstring-row{{display:flex;align-items:center;gap:8px;margin-top:8px;padding:8px 10px;background:#0a0d12;border:1px solid var(--line);border-radius:8px;overflow:hidden;}}
+        .obf-loadstring-code{{flex:1;min-width:0;font-family:Consolas,'JetBrains Mono',monospace;font-size:11px;color:#9eff9e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}}
+        .obf-copy-ls-btn{{flex-shrink:0;padding:4px 10px!important;font-size:11px!important;border-radius:6px!important;background:var(--teal)!important;color:#052420!important;border:none!important;cursor:pointer;font-weight:800!important;}}
+        .obf-copy-ls-btn:hover{{filter:brightness(1.1);}}
 </style>
     <script>
         function showTab(id) {{
@@ -4302,11 +4306,12 @@ ADMIN_BASE_HTML = """
                         historyEl.innerHTML = items.map((item, idx) => {{
                             const when = new Date((Number(item.created_at) || 0) * 1000).toLocaleString();
                             const bytes = Number(item.source_bytes) || 0;
-                            const raw = String(item.raw_url || '#');
                             const id = String(item.id || '');
                             const sha = String(item.source_sha256 || '');
                             const shaShort = sha.slice(0, 16);
                             const sourceLink = `/admin/obfuscate/${{encodeURIComponent(id)}}/source`;
+                            const ls = String(item.loadstring || item.raw_url ? `loadstring(game:HttpGet("${{item.raw_url}}"))()`  : '');
+                            const lsEsc = ls.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
                             const num = items.length - idx;
                             return `<div class="obf-history-item" data-obf-id="${{id}}">
   <div class="obf-history-top">
@@ -4314,17 +4319,13 @@ ADMIN_BASE_HTML = """
       <span class="obf-history-num">#${{num}}</span>
       <div>
         <strong class="obf-id-text">${{id}}</strong>
-        <span class="small-text">${{when}} &nbsp;·&nbsp; ${{bytes.toLocaleString()}} bytes</span>
+        <span class="small-text">${{when}} &nbsp;·&nbsp; ${{bytes.toLocaleString()}} source bytes</span>
       </div>
     </div>
     <div class="obf-history-actions">
-      <a class="obf-link-btn obf-raw-link" href="${{raw}}" target="_blank" rel="noopener noreferrer">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-        Raw payload
-      </a>
       <a class="obf-link-btn obf-src-link" href="${{sourceLink}}" target="_blank" rel="noopener noreferrer">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-        Raw input
+        Raw Source Code
       </a>
     </div>
   </div>
@@ -4335,6 +4336,11 @@ ADMIN_BASE_HTML = """
     <span class="obf-meta-label">ID</span>
     <code class="obf-id-small">${{id}}</code>
   </div>
+  ${{ls ? `<div class="obf-loadstring-row">
+    <span class="obf-meta-label" style="flex-shrink:0;">Loadstring</span>
+    <code class="obf-loadstring-code" id="obf-ls-${{id}}">${{lsEsc}}</code>
+    <button class="obf-copy-ls-btn" onclick="(()=>{{const t=document.getElementById('obf-ls-${{id}}');if(!t)return;navigator.clipboard?navigator.clipboard.writeText(t.textContent):((a=document.createElement('textarea'),a.value=t.textContent,document.body.appendChild(a),a.select(),document.execCommand('copy'),document.body.removeChild(a)));const b=this;const old=b.textContent;b.textContent='Copied!';setTimeout(()=>b.textContent=old,1200);}})()">Copy</button>
+  </div>` : ''}}
 </div>`;
                         }}).join('');
                     }}
@@ -4349,7 +4355,8 @@ ADMIN_BASE_HTML = """
                             if (!q) {{ renderObfHistory(window._obfHistory || []); return; }}
                             const filtered = (window._obfHistory || []).filter(item =>
                                 String(item.id || '').toLowerCase().includes(q) ||
-                                String(item.source_sha256 || '').toLowerCase().includes(q)
+                                String(item.source_sha256 || '').toLowerCase().includes(q) ||
+                                String(item.loadstring || '').toLowerCase().includes(q)
                             );
                             renderObfHistory(filtered);
                         }});
@@ -5261,7 +5268,7 @@ async def admin_stats(request: Request):
 
     async with obf_history_lock:
         history = _load_obf_history()
-    obf_preview = [{k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url")} for item in reversed(history)]
+    obf_preview = [{k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url", "loadstring")} for item in reversed(history)]
 
     async with chat_lock:
         chat_message_count = len(chat_history_cache)
@@ -5507,10 +5514,11 @@ def _obf_source_path(submission_id: str) -> str:
     os.makedirs(OBF_HISTORY_DIR, exist_ok=True)
     return os.path.join(OBF_HISTORY_DIR, submission_id + ".lua")
 
-def _record_obfustucate_submission(source: str, loader_id: str, raw_url: str) -> dict:
+def _record_obfustucate_submission(source: str, loader_id: str, raw_url: str, loadstring: str = "") -> dict:
     source_path = _obf_source_path(loader_id)
     _atomic_write(source_path, source, mode=0o600)
-    entry = {"id": loader_id, "created_at": time.time(), "source_bytes": len(source.encode("utf-8")), "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(), "raw_url": raw_url, "source_path": source_path}
+    ls = loadstring or _build_loadstring(raw_url)
+    entry = {"id": loader_id, "created_at": time.time(), "source_bytes": len(source.encode("utf-8")), "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(), "raw_url": raw_url, "loadstring": ls, "source_path": source_path}
     history = _load_obf_history()
     history.append(entry)
     if len(history) > OBF_HISTORY_MAX:
@@ -7313,13 +7321,15 @@ OBF_PAGE = r"""<!doctype html>
 <section class="hero"><div class="eyebrow"><i class="live"></i> Lua protection tool</div><h1><span>Obfustucate</span></h1><p>Paste your raw Lua source below. DexNotifier generates the protected payload and the exact raw loadstring you can copy.</p></section>
 <section class="workspace"><div class="toolbar"><div class="traffic"><i></i><i></i><i></i></div><div class="toolbar-title">Protected Lua workspace</div><div style="width:39px"></div></div>
 <div class="editor-card"><div class="label"><span>Source</span><span class="hint">Lua · UTF-8</span></div><textarea id="source" class="editor" spellcheck="false" placeholder="-- paste your Lua source here"></textarea><div class="actionbar"><button id="go" class="go">Obfustucate Lua</button><span id="status" class="status">Ready</span></div></div>
-<div id="results" class="results" style="display:none"><div class="result"><div class="result-head"><strong>Protected payload</strong><span>complete Lua file</span></div><div class="copyrow"><div id="payload" class="out"></div><button class="copy" data-copy="payload">Copy</button></div></div></div>
+<div id="results" class="results" style="display:none">
+<div class="result"><div class="result-head"><strong>Executor Loadstring</strong><span>copy this into your executor</span></div><div class="copyrow"><div id="payload" class="out"></div><button class="copy" onclick="copyText(document.getElementById('payload').textContent,this)">Copy</button></div></div>
+<div class="result"><div class="result-head"><strong>Raw Protected Script</strong><span>goofyscator + DEX 10-layer cipher</span></div><div class="copyrow"><div id="rawscript" class="out" style="max-height:180px"></div><button class="copy" onclick="copyText(document.getElementById('rawscript').textContent,this)">Copy</button></div></div>
+</div>
 </section><div class="footer">DexNotifier · Obfustucate · Protected workspace</div></div></main>
 <script>
 const $=id=>document.getElementById(id),status=$('status');
 async function copyText(text,button){try{if(navigator.clipboard)await navigator.clipboard.writeText(text);else{const t=document.createElement('textarea');t.value=text;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove()}const old=button.textContent;button.textContent='Copied';setTimeout(()=>button.textContent=old,1000)}catch(e){button.textContent='Copy failed';setTimeout(()=>button.textContent='Copy',1000)}}
-$('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return}$('go').disabled=true;status.textContent='Protecting, Wait Patiently...';status.className='status';try{const r=await fetch('/obfuscate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfustucation failed');$('payload').textContent=d.payload||'';$('results').style.display='grid';status.textContent='Complete';status.className='status ok';$('results').scrollIntoView({behavior:'smooth',block:'nearest'})}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
-document.querySelectorAll('.copy').forEach(b=>b.addEventListener('click',()=>copyText($(b.dataset.copy).textContent,b)));
+$('go').onclick=async()=>{const source=$('source').value;if(!source.trim()){status.textContent='Paste Lua source first';status.className='status error';return}$('go').disabled=true;status.textContent='Protecting, Wait Patiently...';status.className='status';try{const r=await fetch('/obfuscate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source})});const d=await r.json();if(!r.ok)throw new Error(d.error||'Obfustucation failed');$('payload').textContent=d.payload||d.loadstring||'';$('rawscript').textContent=d.result||'';$('results').style.display='grid';status.textContent='Complete';status.className='status ok';$('results').scrollIntoView({behavior:'smooth',block:'nearest'})}catch(e){status.textContent=e.message;status.className='status error'}finally{$('go').disabled=false}};
 </script></body></html>"""
 
 def _minify_lua_preserve_strings(source: str) -> str:
@@ -7565,25 +7575,84 @@ async def obfuscate_api(request: Request):
     settings = _dex_obfuscator_settings(body.get("settings"))
 
     try:
+        # ── Step 1: Goofyscator (DEX Obfuscator V8 upstream) ────────────────
+        # Sends the raw Lua source to the upstream Goofyscator API and gets
+        # back an obfuscated Lua string.
         protected = await asyncio.to_thread(
             _call_dex_obfuscator_v8,
             source,
             settings,
         )
-        final_payload = _format_dex_obfuscator_payload(protected)
 
-        if len(final_payload.encode("utf-8")) > 3 * 1024 * 1024:
+        # ── Step 2: DEX header wrap ──────────────────────────────────────────
+        # Strips upstream branding and prepends the DEX Obfuscator header.
+        goofy_payload = _format_dex_obfuscator_payload(protected)
+
+        if len(goofy_payload.encode("utf-8")) > 3 * 1024 * 1024:
             return JSONResponse(
-                {"error": "Final protected payload exceeds the 3 MB output limit."},
+                {"error": "Goofyscator payload exceeds the 3 MB intermediate limit."},
                 status_code=413,
             )
+
+        # ── Step 3: DEX multi-layer cipher obfuscation ───────────────────────
+        # The Goofyscator output is now fed through the full DEX cipher stack:
+        # 10 independent permutation/XOR/rotation/additive rounds with random
+        # seeds and block sizes, binary-token encoding, shuffled fragment
+        # assembly, and runtime integrity checking.  The result is a
+        # self-contained Lua script that decodes itself at load time and
+        # executes the original payload — all without any external calls.
+        dex_obfuscated = await asyncio.to_thread(
+            obfuscate_lua,
+            goofy_payload,   # feed the goofyscator output in as source
+            False,            # publish=False  (we publish it ourselves below)
+            "hard",           # maximum cipher rounds / smallest block sizes
+            True,             # pad to minimum size so output is always substantial
+        )
+
+        if not dex_obfuscated or not dex_obfuscated.strip():
+            raise RuntimeError("DEX obfuscator returned an empty payload.")
+
+        if len(dex_obfuscated.encode("utf-8")) > 16 * 1024 * 1024:
+            return JSONResponse(
+                {"error": "Final DEX-obfuscated payload exceeds the 16 MB output limit."},
+                status_code=413,
+            )
+
+        # ── Step 4: Publish to raw loader store ─────────────────────────────
+        # Store the doubly-obfuscated payload and get back a stable raw URL.
+        # The caller (browser / executor) loads the URL with loadstring().
+        try:
+            raw_url, loader_id = _publish_local_payload(dex_obfuscated)
+        except Exception as pub_exc:
+            print(f"[DEX_OBF_PIPELINE] raw publish failed: {pub_exc}")
+            raise RuntimeError(
+                "Could not publish the protected payload to the raw loader store."
+            ) from pub_exc
+
+        # Record the submission in the admin history log.
+        try:
+            async with obf_history_lock:
+                _record_obfustucate_submission(source, loader_id, raw_url, final_loadstring)
+        except Exception as hist_exc:
+            # Non-fatal: history is best-effort.
+            print(f"[DEX_OBF_PIPELINE] history record failed: {hist_exc}")
+
+        final_loadstring = _build_loadstring(raw_url)
 
         return JSONResponse(
             {
                 "ok": True,
                 "status": "success",
-                "payload": final_payload,
-                "result": protected,
+                # `payload` is what the UI shows in the output box —
+                # the final self-executing loadstring, not the raw bytes.
+                "payload": final_loadstring,
+                # `result` carries the doubly-obfuscated Lua text for any
+                # caller that wants the raw protected script directly.
+                "result": dex_obfuscated,
+                # Convenience fields for the front-end copy controls.
+                "loadstring": final_loadstring,
+                "raw_url": raw_url,
+                "loader_id": loader_id,
                 "settings": settings,
             }
         )
@@ -7688,7 +7757,7 @@ async def internal_obfustucate_history(request: Request):
     if not _private_key_ok(request): return JSONResponse({"error":"unauthorized"}, status_code=401)
     async with obf_history_lock:
         history = _load_obf_history()
-    safe = [{k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url")} for item in reversed(history)]
+    safe = [{k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url", "loadstring")} for item in reversed(history)]
     return JSONResponse({"ok": True, "count": len(safe), "submissions": safe})
 
 
@@ -7700,7 +7769,7 @@ async def internal_obfustucate_history_item(submission_id: str, request: Request
         history = _load_obf_history()
     for item in history:
         if item.get("id") == submission_id:
-            return JSONResponse({"ok": True, "submission": {k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url")}})
+            return JSONResponse({"ok": True, "submission": {k: item.get(k) for k in ("id", "created_at", "source_bytes", "source_sha256", "raw_url", "loadstring")}})
     return JSONResponse({"error":"not found"}, status_code=404)
 
 
