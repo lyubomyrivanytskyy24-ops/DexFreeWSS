@@ -7323,7 +7323,7 @@ OBF_PAGE = r"""<!doctype html>
 <div class="editor-card"><div class="label"><span>Source</span><span class="hint">Lua · UTF-8</span></div><textarea id="source" class="editor" spellcheck="false" placeholder="-- paste your Lua source here"></textarea><div class="actionbar"><button id="go" class="go">Obfustucate Lua</button><span id="status" class="status">Ready</span></div></div>
 <div id="results" class="results" style="display:none">
 <div class="result"><div class="result-head"><strong>Executor Loadstring</strong><span>copy this into your executor</span></div><div class="copyrow"><div id="payload" class="out"></div><button class="copy" onclick="copyText(document.getElementById('payload').textContent,this)">Copy</button></div></div>
-<div class="result"><div class="result-head"><strong>Raw Protected Script</strong><span>goofyscator + DEX 10-layer cipher</span></div><div class="copyrow"><div id="rawscript" class="out" style="max-height:180px"></div><button class="copy" onclick="copyText(document.getElementById('rawscript').textContent,this)">Copy</button></div></div>
+<div class="result"><div class="result-head"><strong>Raw Protected Script</strong><span>Obfuscated Output</span></div><div class="copyrow"><div id="rawscript" class="out" style="max-height:180px"></div><button class="copy" onclick="copyText(document.getElementById('rawscript').textContent,this)">Copy</button></div></div>
 </div>
 </section><div class="footer">DexNotifier · Obfustucate · Protected workspace</div></div></main>
 <script>
