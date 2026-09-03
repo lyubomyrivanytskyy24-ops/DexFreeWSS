@@ -7447,7 +7447,7 @@ def _call_dex_obfuscator_v8(source: str, settings: dict) -> str:
             body = ""
         detail = body[:800] if body else str(exc.reason or exc)
         raise RuntimeError(
-            f"DEX Obfuscator V8 returned HTTP {exc.code}: {detail}"
+            f"DEX Obfuscator: Please Make Sure Your Code Is Syntax Valid"
         ) from exc
     except Exception as exc:
         raise RuntimeError(
@@ -7456,23 +7456,23 @@ def _call_dex_obfuscator_v8(source: str, settings: dict) -> str:
 
     if status_code < 200 or status_code >= 300:
         raise RuntimeError(
-            f"DEX Obfuscator V8 returned HTTP {status_code}."
+            f"DEX Obfuscator: Please Make Sure Your Code Is Syntax Valid"
         )
 
     response_text = response_bytes.decode("utf-8", errors="replace").strip()
     if not response_text:
-        raise RuntimeError("DEX Obfuscator V8 returned an empty response.")
+        raise RuntimeError("DEX Obfuscator: Empty Response")
 
     try:
         result = json.loads(response_text)
     except json.JSONDecodeError as exc:
         raise RuntimeError(
-            "DEX Obfuscator V8 returned invalid JSON: "
+            "DEX Obfuscator returned invalid JSON: "
             + response_text[:500]
         ) from exc
 
     if not isinstance(result, dict):
-        raise RuntimeError("DEX Obfuscator V8 returned an invalid response object.")
+        raise RuntimeError("DEX Obfuscator returned an invalid response object.")
 
     if str(result.get("status", "")).strip().lower() != "success":
         error_detail = (
@@ -7488,7 +7488,7 @@ def _call_dex_obfuscator_v8(source: str, settings: dict) -> str:
     protected = result.get("result")
     if not isinstance(protected, str) or not protected.strip():
         raise RuntimeError(
-            "DEX Obfuscator V8 returned success without a result payload."
+            "DEX Obfuscator returned success without a result payload."
         )
 
     return (
