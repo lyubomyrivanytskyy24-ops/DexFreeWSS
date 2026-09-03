@@ -5657,7 +5657,7 @@ async def get_raw_loader(loader_id: str, request: Request):
 OBF_LEVELS = {
     "light": {"block1": (31, 53), "block2": (35, 59), "decoys": (16, 24), "fragment": (45, 85)},
     "medium": {"block1": (23, 49), "block2": (27, 55), "decoys": (64, 96), "fragment": (25, 65)},
-    "hard": {"block1": (9, 27), "block2": (11, 31), "decoys": (256, 384), "fragment": (8, 32)},
+    "hard": {"block1": (9, 27), "block2": (11, 31), "decoys": (32, 48), "fragment": (8, 32)},
 }
 
 def normalize_obf_level(level):
@@ -6417,7 +6417,7 @@ def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) ->
     lines.append(f"local {V_ENVSEED}={_num_expr(_RNG.randint(1, 65535))}")
     lines.append(f"local {V_ENVPROBE}={{}}")
 
-    fake_env_calls = _RNG.randint(2500, 4000)
+    fake_env_calls = _RNG.randint(80, 140)
     fake_indices = [0, 1, 2, -1, -2, 3, 4, 5, 7, 8, 16, 32, 64]
     for _ in range(fake_env_calls):
         index = _RNG.choice(fake_indices)
@@ -7588,12 +7588,6 @@ async def obfuscate_api(request: Request):
         # Strips upstream branding and prepends the DEX Obfuscator header.
         goofy_payload = _format_dex_obfuscator_payload(protected)
 
-        if len(goofy_payload.encode("utf-8")) > 3 * 1024 * 1024:
-            return JSONResponse(
-                {"error": "Goofyscator payload exceeds the 3 MB intermediate limit."},
-                status_code=413,
-            )
-
         # ── Step 3: DEX multi-layer cipher obfuscation ───────────────────────
         # The Goofyscator output is now fed through the full DEX cipher stack:
         # 10 independent permutation/XOR/rotation/additive rounds with random
@@ -7606,17 +7600,11 @@ async def obfuscate_api(request: Request):
             goofy_payload,   # feed the goofyscator output in as source
             False,            # publish=False  (we publish it ourselves below)
             "hard",           # maximum cipher rounds / smallest block sizes
-            True,             # pad to minimum size so output is always substantial
+            False,            # minimum_size=False — no padding, keep output compact
         )
 
         if not dex_obfuscated or not dex_obfuscated.strip():
             raise RuntimeError("DEX obfuscator returned an empty payload.")
-
-        if len(dex_obfuscated.encode("utf-8")) > 16 * 1024 * 1024:
-            return JSONResponse(
-                {"error": "Final DEX-obfuscated payload exceeds the 16 MB output limit."},
-                status_code=413,
-            )
 
         # ── Step 4: Publish to raw loader store ─────────────────────────────
         # Store the doubly-obfuscated payload and get back a stable raw URL.
