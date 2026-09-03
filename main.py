@@ -7447,7 +7447,7 @@ def _call_dex_obfuscator_v8(source: str, settings: dict) -> str:
             body = ""
         detail = body[:800] if body else str(exc.reason or exc)
         raise RuntimeError(
-            f"DEX Obfuscator V8 returned HTTP {exc.code}: {detail}"
+            f"DEX Obfuscator: Please Make Sure Your Source Is Syntax Valid"
         ) from exc
     except Exception as exc:
         raise RuntimeError(
@@ -7456,7 +7456,7 @@ def _call_dex_obfuscator_v8(source: str, settings: dict) -> str:
 
     if status_code < 200 or status_code >= 300:
         raise RuntimeError(
-            f"DEX Obfuscator V8 returned HTTP {status_code}."
+            f"DEX Obfuscator: Please Make Sure Your Code Is Syntax Valid"
         )
 
     response_text = response_bytes.decode("utf-8", errors="replace").strip()
