@@ -4323,10 +4323,10 @@ ADMIN_BASE_HTML = """
       </div>
     </div>
     <div class="obf-history-actions">
-      <a class="obf-link-btn obf-src-link" href="${{sourceLink}}" target="_blank" rel="noopener noreferrer">
+      <button type="button" class="obf-link-btn obf-src-link" data-source-id="${{id}}">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-        Raw Source Code
-      </a>
+        Show Raw Source
+      </button>
     </div>
   </div>
   <div class="obf-history-meta">
@@ -4343,6 +4343,41 @@ ADMIN_BASE_HTML = """
   </div>` : ''}}
 </div>`;
                         }}).join('');
+
+                        historyEl.querySelectorAll('.obf-src-link').forEach(btn => {{
+                            btn.addEventListener('click', async () => {{
+                                const id = String(btn.dataset.sourceId || '');
+                                if (!id) return;
+                                let box = document.getElementById('obf-src-' + id);
+                                if (box) {{
+                                    box.hidden = !box.hidden;
+                                    btn.textContent = box.hidden ? 'Show Raw Source' : 'Hide Raw Source';
+                                    return;
+                                }}
+                                btn.disabled = true;
+                                const oldText = btn.textContent;
+                                btn.textContent = 'Loading…';
+                                try {{
+                                    const r = await fetch('/admin/obfuscate/' + encodeURIComponent(id) + '/source', {{credentials:'same-origin'}});
+                                    const source = await r.text();
+                                    if (!r.ok) throw new Error(source || 'Could not load source');
+                                    box = document.createElement('pre');
+                                    box.id = 'obf-src-' + id;
+                                    box.className = 'logs-box obf-raw-source';
+                                    box.textContent = source;
+                                    box.style.cssText = 'margin-top:10px;max-height:520px;overflow:auto;white-space:pre-wrap;word-break:break-word;';
+                                    const item = btn.closest('.obf-history-item');
+                                    if (item) item.appendChild(box);
+                                    btn.textContent = 'Hide Raw Source';
+                                }} catch (err) {{
+                                    btn.textContent = 'Source Error';
+                                    alert(String(err.message || err));
+                                }} finally {{
+                                    btn.disabled = false;
+                                    if (btn.textContent === 'Loading…') btn.textContent = oldText;
+                                }}
+                            }});
+                        }});
                     }}
                     if (!history.length) {{
                         historyEl.innerHTML = '<div class="small-text" style="padding:18px 0;text-align:center;color:#687489;">No Obfustucate submissions yet.</div>';
@@ -4951,7 +4986,7 @@ async def build_admin_dashboard_body() -> str:
             <div class="obf-history-header">
                 <div>
                     <h2 style="margin-bottom:5px;">Obfustucate History</h2>
-                    <p class="small-text">Every submission made through <code>/obfuscate</code>. Each entry links directly to the raw obfuscated payload and the original plaintext input — neither link is public.</p>
+                    <p class="small-text">Every submission made through <code>/obfuscate</code>. Each entry can show the full original plaintext input and the raw obfuscated payload. Source access is admin-session protected.</p>
                 </div>
                 <span class="pill purple" id="obf-history-count">0 submissions</span>
             </div>
@@ -5688,1538 +5723,107 @@ def _build_loadstring(raw_url):
     return "loadstring(game:HttpGet(" + json.dumps(raw_url) + "))()"
 
 
-def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=True) -> str:
+def obfuscate_lua(source: str, publish=True, level="hard", minimum_size=False) -> str:
+    """
+    Compact Lua protection wrapper.
 
+    The previous implementation used ten full permutation/XOR/rotation rounds,
+    binary-token expansion, fragment shuffling, and artificial 128 KiB padding.
+    This version keeps the wrapper small while retaining basic integrity and
+    runtime sanity checks.
+
+    This is compatibility-oriented protection, not a guarantee against a
+    determined debugger/dumper. Client-side Lua can always be inspected by the
+    environment executing it.
+    """
     if source is None:
-        raise ValueError(
-            "No Lua source was supplied."
-        )
-
+        raise ValueError("No Lua source was supplied.")
     if not isinstance(source, str):
         source = str(source)
+    source = source.strip()
+    if not source:
+        raise ValueError("Lua source is empty.")
 
-    if not source.strip():
-        raise ValueError(
-            "Lua source is empty."
-        )
-
-    level = normalize_obf_level(level)
-    profile = OBF_LEVELS[level]
+    normalize_obf_level(level)
 
     src = source.encode("utf-8")
+    key = _RNG.randint(1, 255)
 
-    if not src:
-        raise ValueError(
-            "Lua source is empty."
-        )
+    # One compact reversible byte stream. No ten-round cipher, token expansion,
+    # fragment shuffle, or padding.
+    encrypted = bytes(
+        (value + key + ((index * 31) & 0xFF)) & 0xFF
+        for index, value in enumerate(src)
+    )
+
+    checksum = 0x45D9
+    for index, value in enumerate(src, 1):
+        checksum = (checksum * 33 + value + index) & 0xFFFFFFFF
 
     used = set()
-
-    def N():
-        return _unique_name(used)
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # RANDOM IDENTIFIERS
-    # ═══════════════════════════════════════════════════════════════════════
-
-    V_BYTE       = N()
-    V_CHAR       = N()
-    V_LEN        = N()
-    V_CONCAT     = N()
-    V_INSERT     = N()
-    V_FLOOR      = N()
-    V_LOAD       = N()
-
-    V_XOR        = N()
-
-    V_SEED1      = N()
-    V_SEED2      = N()
-    V_SEED3      = N()
-    V_SEED4      = N()
-
-    V_SEED5      = N()
-    V_SEED6      = N()
-    V_SEED7      = N()
-    V_SEED8      = N()
-
-    # Ten independent cipher layers. Each build gets fresh seeds and fresh
-    # block schedules; the runtime reverses all ten layers before loading.
-    V_SEED9      = N()
-    V_SEED10     = N()
-    V_SEED11     = N()
-    V_SEED12     = N()
-
-    # Seven additional independent cipher layers (10 total).
-    V_SEED13     = N()
-    V_SEED14     = N()
-    V_SEED15     = N()
-    V_SEED16     = N()
-    V_SEED17     = N()
-    V_SEED18     = N()
-    V_SEED19     = N()
-    V_SEED20     = N()
-    V_SEED21     = N()
-    V_SEED22     = N()
-    V_SEED23     = N()
-    V_SEED24     = N()
-    V_SEED25     = N()
-    V_SEED26     = N()
-    V_SEED27     = N()
-    V_SEED28     = N()
-    V_SEED29     = N()
-    V_SEED30     = N()
-    V_SEED31     = N()
-    V_SEED32     = N()
-    V_SEED33     = N()
-    V_SEED34     = N()
-    V_SEED35     = N()
-    V_SEED36     = N()
-    V_SEED37     = N()
-    V_SEED38     = N()
-    V_SEED39     = N()
-    V_SEED40     = N()
-
-    V_BLOCKSIZE  = N()
-    V_BLOCKSIZE2 = N()
-    V_BLOCKSIZE3 = N()
-    V_BLOCKSIZE4 = N()
-    V_BLOCKSIZE5 = N()
-    V_BLOCKSIZE6 = N()
-    V_BLOCKSIZE7 = N()
-    V_BLOCKSIZE8 = N()
-    V_BLOCKSIZE9 = N()
-    V_BLOCKSIZE10 = N()
-
-    V_PARTS      = N()
-    V_PAYLOAD    = N()
-    V_DECODED    = N()
-    V_SOURCE     = N()
-    V_RESULT     = N()
-
-    V_BLOCKLEN   = N()
-    V_STATE      = N()
-    V_PERM       = N()
-
-    V_I          = N()
-    V_J          = N()
-    V_K          = N()
-
-    V_ORIGINAL   = N()
-    V_ABSOLUTE   = N()
-
-    V_VALUE      = N()
-    V_ROTATION   = N()
-    V_ADD        = N()
-    V_X          = N()
-
-    V_PREVIOUS   = N()
-    V_CURRENT    = N()
-    V_FEEDBACK   = N()
-    V_FINALMIX   = N()
-
-    V_H1         = N()
-    V_H2         = N()
-    V_H3         = N()
-    V_H4         = N()
-
-    V_EXPECT1    = N()
-    V_EXPECT2    = N()
-    V_EXPECT3    = N()
-    V_EXPECT4    = N()
-
-    V_CH1        = N()
-    V_CH2        = N()
-    V_CH3        = N()
-
-    V_CEXPECT1   = N()
-    V_CEXPECT2   = N()
-    V_CEXPECT3   = N()
-
-    V_LENGTH     = N()
-    V_EXPECTLEN  = N()
-
-    V_NOISE      = N()
-
-    V_FN         = N()
-    V_ERR        = N()
-
-    V_BITCOUNT   = N()
-    V_BYTEVALUE  = N()
-    V_TOKEN     = N()
-
-    V_ZEROCHAR   = N()
-    V_ONECHAR    = N()
-
-    V_GUARD      = N()
-    V_GUARD2     = N()
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # RANDOM BUILD STATE
-    # ═══════════════════════════════════════════════════════════════════════
-
-    seed1 = _RNG.randint(0, 0xFFFF)
-    seed2 = _RNG.randint(0, 0xFFFF)
-    seed3 = _RNG.randint(0, 0xFFFF)
-    seed4 = _RNG.randint(0, 0xFFFF)
-
-    seed5 = _RNG.randint(0, 0xFFFF)
-    seed6 = _RNG.randint(0, 0xFFFF)
-    seed7 = _RNG.randint(0, 0xFFFF)
-    seed8 = _RNG.randint(0, 0xFFFF)
-
-    seed9 = _RNG.randint(0, 0xFFFF)
-    seed10 = _RNG.randint(0, 0xFFFF)
-    seed11 = _RNG.randint(0, 0xFFFF)
-    seed12 = _RNG.randint(0, 0xFFFF)
-    seed13 = _RNG.randint(0, 0xFFFF)
-    seed14 = _RNG.randint(0, 0xFFFF)
-    seed15 = _RNG.randint(0, 0xFFFF)
-    seed16 = _RNG.randint(0, 0xFFFF)
-    seed17 = _RNG.randint(0, 0xFFFF)
-    seed18 = _RNG.randint(0, 0xFFFF)
-    seed19 = _RNG.randint(0, 0xFFFF)
-    seed20 = _RNG.randint(0, 0xFFFF)
-    seed21 = _RNG.randint(0, 0xFFFF)
-    seed22 = _RNG.randint(0, 0xFFFF)
-    seed23 = _RNG.randint(0, 0xFFFF)
-    seed24 = _RNG.randint(0, 0xFFFF)
-    seed25 = _RNG.randint(0, 0xFFFF)
-    seed26 = _RNG.randint(0, 0xFFFF)
-    seed27 = _RNG.randint(0, 0xFFFF)
-    seed28 = _RNG.randint(0, 0xFFFF)
-    seed29 = _RNG.randint(0, 0xFFFF)
-    seed30 = _RNG.randint(0, 0xFFFF)
-    seed31 = _RNG.randint(0, 0xFFFF)
-    seed32 = _RNG.randint(0, 0xFFFF)
-    seed33 = _RNG.randint(0, 0xFFFF)
-    seed34 = _RNG.randint(0, 0xFFFF)
-    seed35 = _RNG.randint(0, 0xFFFF)
-    seed36 = _RNG.randint(0, 0xFFFF)
-    seed37 = _RNG.randint(0, 0xFFFF)
-    seed38 = _RNG.randint(0, 0xFFFF)
-    seed39 = _RNG.randint(0, 0xFFFF)
-    seed40 = _RNG.randint(0, 0xFFFF)
-
-    block_size = _RNG.randint(*profile["block1"])
-    block_size2 = _RNG.randint(*profile["block2"])
-    block_size3 = _RNG.randint(*profile["block1"])
-    block_size4 = _RNG.randint(*profile["block2"])
-    block_size5 = _RNG.randint(*profile["block1"])
-    block_size6 = _RNG.randint(*profile["block2"])
-    block_size7 = _RNG.randint(*profile["block1"])
-    block_size8 = _RNG.randint(*profile["block2"])
-    block_size9 = _RNG.randint(*profile["block1"])
-    block_size10 = _RNG.randint(*profile["block2"])
-
-    token_zero, token_one = (
-        _make_token_alphabet()
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # TEN-LAYER CIPHER PIPELINE
-    # ═══════════════════════════════════════════════════════════════════════
-
-    # Layer 1: independent permutation/XOR/rotation/additive round.
-    encrypted1 = _encrypt_round(
-        src,
-        seed1,
-        seed2,
-        seed3,
-        seed4,
-        block_size
-    )
-
-    # Layer 2: independent permutation/XOR/rotation/additive round.
-    encrypted2 = _encrypt_round(
-        encrypted1,
-        seed5,
-        seed6,
-        seed7,
-        seed8,
-        block_size2
-    )
-
-    # Layer 3: independent permutation/XOR/rotation/additive round.
-    encrypted3 = _encrypt_round(
-        encrypted2,
-        seed9,
-        seed10,
-        seed11,
-        seed12,
-        block_size3
-    )
-
-    # Layer 4: independent permutation/XOR/rotation/additive round.
-    encrypted4 = _encrypt_round(
-        encrypted3,
-        seed13,
-        seed14,
-        seed15,
-        seed16,
-        block_size4
-    )
-
-    # Layer 5: independent permutation/XOR/rotation/additive round.
-    encrypted5 = _encrypt_round(
-        encrypted4,
-        seed17,
-        seed18,
-        seed19,
-        seed20,
-        block_size5
-    )
-
-    # Layer 6: independent permutation/XOR/rotation/additive round.
-    encrypted6 = _encrypt_round(
-        encrypted5,
-        seed21,
-        seed22,
-        seed23,
-        seed24,
-        block_size6
-    )
-
-    # Layer 7: independent permutation/XOR/rotation/additive round.
-    encrypted7 = _encrypt_round(
-        encrypted6,
-        seed25,
-        seed26,
-        seed27,
-        seed28,
-        block_size7
-    )
-
-    # Layer 8: independent permutation/XOR/rotation/additive round.
-    encrypted8 = _encrypt_round(
-        encrypted7,
-        seed29,
-        seed30,
-        seed31,
-        seed32,
-        block_size8
-    )
-
-    # Layer 9: independent permutation/XOR/rotation/additive round.
-    encrypted9 = _encrypt_round(
-        encrypted8,
-        seed33,
-        seed34,
-        seed35,
-        seed36,
-        block_size9
-    )
-
-    # Layer 10: independent permutation/XOR/rotation/additive round.
-    encrypted10 = _encrypt_round(
-        encrypted9,
-        seed37,
-        seed38,
-        seed39,
-        seed40,
-        block_size10
-    )
-
-    # Every layer is independently reversible; the final ciphertext is encrypted10.
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # INTERNAL TEN-LAYER ROUND-TRIP TEST
-    # ═══════════════════════════════════════════════════════════════════════
-
-    roundtrip9 = _decrypt_round(
-        encrypted10, seed37, seed38, seed39, seed40, block_size10
-    )
-
-    roundtrip8 = _decrypt_round(
-        roundtrip9, seed33, seed34, seed35, seed36, block_size9
-    )
-
-    roundtrip7 = _decrypt_round(
-        roundtrip8, seed29, seed30, seed31, seed32, block_size8
-    )
-
-    roundtrip6 = _decrypt_round(
-        roundtrip7, seed25, seed26, seed27, seed28, block_size7
-    )
-
-    roundtrip5 = _decrypt_round(
-        roundtrip6, seed21, seed22, seed23, seed24, block_size6
-    )
-
-    roundtrip4 = _decrypt_round(
-        roundtrip5, seed17, seed18, seed19, seed20, block_size5
-    )
-
-    roundtrip3 = _decrypt_round(
-        roundtrip4, seed13, seed14, seed15, seed16, block_size4
-    )
-
-    roundtrip2 = _decrypt_round(
-        roundtrip3, seed9, seed10, seed11, seed12, block_size3
-    )
-
-    roundtrip1 = _decrypt_round(
-        roundtrip2, seed5, seed6, seed7, seed8, block_size2
-    )
-
-    roundtrip0 = _decrypt_round(
-        roundtrip1, seed1, seed2, seed3, seed4, block_size
-    )
-
-    if roundtrip0 != src:
-        raise RuntimeError(
-            "Internal ten-layer encryption/decryption error."
-        )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # INTEGRITY VALUES
-    # ═══════════════════════════════════════════════════════════════════════
-
-    expected_h1, expected_h2, expected_h3, expected_h4 = (
-        _integrity_digest(src)
-    )
-
-    expected_ch1, expected_ch2, expected_ch3 = (
-        _cipher_digest(encrypted10)
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # TOKEN ENCODING
-    # ═══════════════════════════════════════════════════════════════════════
-
-    token_payload = _encode_binary_tokens(
-        encrypted10,
-        token_zero,
-        token_one
-    )
-
-    if _decode_binary_tokens(
-        token_payload,
-        token_zero,
-        token_one
-    ) != encrypted10:
-        raise RuntimeError(
-            "Binary token encoder failure."
-        )
-
-    indexed_fragments = _fragment_tokens(
-        token_payload, profile["fragment"][0], profile["fragment"][1]
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # OUTPUT
-    # ═══════════════════════════════════════════════════════════════════════
-
-    lines = []
-
-    lines.append(
-        "-- This file was protected using Dex Obfustucator v4.5 [.gg/dexfinder]"
-    )
-
-    lines.append("")
-    lines.append("")
-
-    lines.append(
-        "return(function(...)"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # STANDARD FUNCTIONS
-    # ═══════════════════════════════════════════════════════════════════════
-
-    lines.append(
-        f"local {V_BYTE}=string.byte"
-    )
-
-    lines.append(
-        f"local {V_CHAR}=string.char"
-    )
-
-    lines.append(
-        f"local {V_LEN}=string.len"
-    )
-
-    lines.append(
-        f"local {V_CONCAT}=table.concat"
-    )
-
-    lines.append(
-        f"local {V_INSERT}=table.insert"
-    )
-
-    lines.append(
-        f"local {V_FLOOR}=math.floor"
-    )
-
-    lines.append(
-        f"local {V_LOAD}=loadstring or load"
-    )
-
-    lines.append(
-        f"if not {V_LOAD} then "
-        f"error('Loadstring Is Not Supported On This Executer') "
-        f"end"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # PURE LUA XOR
-    # ═══════════════════════════════════════════════════════════════════════
-
-    lines.append(
-        f"local function {V_XOR}({V_I},{V_J})"
-    )
-
-    lines.append(
-        f"{V_I}={V_I}%256"
-    )
-
-    lines.append(
-        f"{V_J}={V_J}%256"
-    )
-
-    lines.append(
-        f"local {V_K}=0"
-    )
-
-    lines.append(
-        f"local {V_X}=1"
-    )
-
-    lines.append(
-        f"while {V_I}>0 or {V_J}>0 do"
-    )
-
-    lines.append(
-        f"local {V_VALUE}={V_I}%2"
-    )
-
-    lines.append(
-        f"local {V_ADD}={V_J}%2"
-    )
-
-    lines.append(
-        f"if {V_VALUE}~={V_ADD} then "
-        f"{V_K}={V_K}+{V_X} "
-        f"end"
-    )
-
-    lines.append(
-        f"{V_I}={V_FLOOR}({V_I}/2)"
-    )
-
-    lines.append(
-        f"{V_J}={V_FLOOR}({V_J}/2)"
-    )
-
-    lines.append(
-        f"{V_X}={V_X}*2"
-    )
-
-    lines.append("end")
-
-    lines.append(
-        f"return {V_K}%256"
-    )
-
-    lines.append("end")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # SEEDS
-    # ═══════════════════════════════════════════════════════════════════════
-
-    for variable, value in (
-        (V_SEED1, seed1),
-        (V_SEED2, seed2),
-        (V_SEED3, seed3),
-        (V_SEED4, seed4),
-        (V_SEED5, seed5),
-        (V_SEED6, seed6),
-        (V_SEED7, seed7),
-        (V_SEED8, seed8),
-        (V_SEED9, seed9),
-        (V_SEED10, seed10),
-        (V_SEED11, seed11),
-        (V_SEED12, seed12),
-        (V_SEED13, seed13),
-        (V_SEED14, seed14),
-        (V_SEED15, seed15),
-        (V_SEED16, seed16),
-        (V_SEED17, seed17),
-        (V_SEED18, seed18),
-        (V_SEED19, seed19),
-        (V_SEED20, seed20),
-        (V_SEED21, seed21),
-        (V_SEED22, seed22),
-        (V_SEED23, seed23),
-        (V_SEED24, seed24),
-        (V_SEED25, seed25),
-        (V_SEED26, seed26),
-        (V_SEED27, seed27),
-        (V_SEED28, seed28),
-        (V_SEED29, seed29),
-        (V_SEED30, seed30),
-        (V_SEED31, seed31),
-        (V_SEED32, seed32),
-        (V_SEED33, seed33),
-        (V_SEED34, seed34),
-        (V_SEED35, seed35),
-        (V_SEED36, seed36),
-        (V_SEED37, seed37),
-        (V_SEED38, seed38),
-        (V_SEED39, seed39),
-        (V_SEED40, seed40),
-        (V_BLOCKSIZE, block_size),
-        (V_BLOCKSIZE2, block_size2),
-        (V_BLOCKSIZE3, block_size3),
-        (V_BLOCKSIZE4, block_size4),
-        (V_BLOCKSIZE5, block_size5),
-        (V_BLOCKSIZE6, block_size6),
-        (V_BLOCKSIZE7, block_size7),
-        (V_BLOCKSIZE8, block_size8),
-        (V_BLOCKSIZE9, block_size9),
-        (V_BLOCKSIZE10, block_size10),
-    ):
-        lines.append(
-            f"local {variable}={_num_expr(value)}"
-        )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # TOKEN ALPHABET
-    # ═══════════════════════════════════════════════════════════════════════
-
-    lines.append(
-        f"local {V_ZEROCHAR}={_num_expr(ord(token_zero))}"
-    )
-
-    lines.append(
-        f"local {V_ONECHAR}={_num_expr(ord(token_one))}"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # RUNTIME GUARDS
-    # ═══════════════════════════════════════════════════════════════════════
-
-    noise_a = _RNG.randint(1000, 9000)
-    noise_b = _RNG.randint(1000, 9000)
-
-    lines.append(
-        f"local {V_NOISE}=("
-        f"{_num_expr(noise_a)}*"
-        f"{_num_expr(noise_b)}-"
-        f"{_num_expr(noise_a)}*"
-        f"{_num_expr(noise_b)}"
-        f")"
-    )
-
-    lines.append(
-        f"if {V_NOISE}~={_num_expr(0)} then "
-        f"return nil "
-        f"end"
-    )
-
-    guard_value = _RNG.randint(
-        1000,
-        50000
-    )
-
-    guard_a = _RNG.randint(
-        100,
-        10000
-    )
-
-    guard_b = guard_value - guard_a
-
-    lines.append(
-        f"local {V_GUARD}=("
-        f"{_num_expr(guard_a)}+"
-        f"{_num_expr(guard_b)}"
-        f")"
-    )
-
-    lines.append(
-        f"if {V_GUARD}~={_num_expr(guard_value)} then "
-        f"error('Internal Error') "
-        f"end"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # DECOY RUNTIME ENVIRONMENT
-    # ═══════════════════════════════════════════════════════════════════════
-    #
-    # Non-semantic local environment noise. These fields are unrelated to the
-    # payload/decryption state and are discarded before decoding.
-
-    V_FENV      = N()
-    V_FACC      = N()
-    V_FTMP      = N()
-
-    decoy_count = _RNG.randint(*profile["decoys"])
-    decoys = []
-
-    lines.append(
-        f"local {V_FENV}={{}}"
-    )
-
-    lines.append(
-        f"local {V_FACC}=0"
-    )
-
-    for _ in range(decoy_count):
-        field = _rand_name(_RNG.randint(9, 17))
-        value = _RNG.randint(0, 65535)
-        add = _RNG.randint(1, 65535)
-
-        decoys.append((field, value))
-
-        lines.append(
-            f"{V_FENV}.{field}={_num_expr(value)}"
-        )
-
-        lines.append(
-            f"{V_FENV}.{field}={V_FENV}.{field}+"
-            f"{_num_expr(add)}-{_num_expr(add)}"
-        )
-
-        lines.append(
-            f"{V_FACC}={V_FACC}+({V_FENV}.{field}%257)"
-        )
-
-    expected_acc = sum(
-        value % 257
-        for _, value in decoys
-    )
-
-    lines.append(
-        f"local {V_FTMP}=({V_FACC}%{_num_expr(1000003)})"
-    )
-
-    lines.append(
-        f"if {V_FTMP}~={_num_expr(expected_acc % 1000003)} then "
-        f"error('Internal Error') end"
-    )
-
-    lines.append(
-        f"{V_FENV}=nil"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # EXPANDED FAKE GETFENV / ENVIRONMENT NOISE
-    # ═══════════════════════════════════════════════════════════════════════
-    # Non-semantic environment probes. Every call is protected with pcall so
-    # executors without getfenv support continue to execute normally.
-
-    V_GETFENV = N()
-    V_ENVPROBE = N()
-    V_ENVSINK = N()
-    V_ENVSEED = N()
-
-    lines.append(f"local {V_GETFENV}=getfenv")
-    lines.append(f"local {V_ENVSINK}=0")
-    lines.append(f"local {V_ENVSEED}={_num_expr(_RNG.randint(1, 65535))}")
-    lines.append(f"local {V_ENVPROBE}={{}}")
-
-    fake_env_calls = _RNG.randint(80, 140)
-    fake_indices = [0, 1, 2, -1, -2, 3, 4, 5, 7, 8, 16, 32, 64]
-    for _ in range(fake_env_calls):
-        index = _RNG.choice(fake_indices)
-        salt = _RNG.randint(1, 65535)
-        field = _rand_name(_RNG.randint(8, 15))
-        lines.append(
-            f"{V_ENVPROBE}.{field}=pcall({V_GETFENV},{_num_expr(index)})"
-        )
-        lines.append(
-            f"{V_ENVSINK}=({V_ENVSINK}+{_num_expr(salt)})%65536"
-        )
-        lines.append(
-            f"if {V_ENVPROBE}.{field}==nil then {V_ENVSINK}=({V_ENVSINK}+1)%65536 end"
-        )
-
-    # Keep the probe state live without affecting the protected payload.
-    lines.append(
-        f"{V_ENVSINK}=({V_ENVSINK}+{V_ENVSEED}*0)%65536"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # RUNTIME API CANARIES / TAMPER CHECKS
-    # ═══════════════════════════════════════════════════════════════════════
-    V_TAMPER = N()
-    lines.append(f"local {V_TAMPER}=false")
-    lines.append(
-        f"if string.byte~={V_BYTE} or string.char~={V_CHAR} or "
-        f"string.len~={V_LEN} or table.concat~={V_CONCAT} or "
-        f"table.insert~={V_INSERT} or math.floor~={V_FLOOR} then {V_TAMPER}=true end"
-    )
-    lines.append(f"if {V_TAMPER} then error('Runtime integrity check failed') end")
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # TOKEN PAYLOAD
-    # ═══════════════════════════════════════════════════════════════════════
-
-    lines.append(
-        f"local {V_PARTS}={{}}"
-    )
-
-    for index, fragment in indexed_fragments:
-
-        escaped = _lua_escape_bytes(
-            fragment.encode("ascii")
-        )
-
-        lines.append(
-            f"{V_PARTS}[{index+1}]=\"{escaped}\""
-        )
-
-    lines.append(
-        f"local {V_PAYLOAD}="
-        f"{V_CONCAT}({V_PARTS})"
-    )
-
-    lines.append(
-        f"local {V_EXPECTLEN}="
-        f"{_num_expr(len(encrypted10))}"
-    )
-
-    lines.append(
-        f"if {V_LEN}({V_PAYLOAD})~="
-        f"({V_EXPECTLEN}*8) then "
-        f"error('Protected payload length failure') "
-        f"end"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # TOKEN DECODER
-    # ═══════════════════════════════════════════════════════════════════════
-
-    lines.append(
-        f"local {V_DECODED}={{}}"
-    )
-
-    lines.append(
-        f"local {V_I}=1"
-    )
-
-    lines.append(
-        f"local {V_LENGTH}={V_LEN}({V_PAYLOAD})"
-    )
-
-    lines.append(
-        f"while {V_I}<={V_LENGTH} do"
-    )
-
-    lines.append(
-        f"local {V_BYTEVALUE}=0"
-    )
-
-    lines.append(
-        f"for {V_BITCOUNT}=1,8 do"
-    )
-
-    lines.append(
-        f"local {V_TOKEN}="
-        f"{V_BYTE}("
-        f"{V_PAYLOAD},"
-        f"{V_I}+{V_BITCOUNT}-1"
-        f")"
-    )
-
-    lines.append(
-        f"if {V_TOKEN}=={V_ONECHAR} then "
-        f"{V_BYTEVALUE}="
-        f"{V_BYTEVALUE}*2+1 "
-        f"elseif {V_TOKEN}=={V_ZEROCHAR} then "
-        f"{V_BYTEVALUE}="
-        f"{V_BYTEVALUE}*2 "
-        f"else "
-        f"error('Protected token validation failure') "
-        f"end"
-    )
-
-    lines.append("end")
-
-    lines.append(
-        f"{V_INSERT}("
-        f"{V_DECODED},"
-        f"{V_CHAR}({V_BYTEVALUE})"
-        f")"
-    )
-
-    lines.append(
-        f"{V_I}={V_I}+8"
-    )
-
-    lines.append("end")
-
-    lines.append(
-        f"local {V_SOURCE}="
-        f"{V_CONCAT}({V_DECODED})"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # CIPHER LENGTH
-    # ═══════════════════════════════════════════════════════════════════════
-
-    lines.append(
-        f"if {V_LEN}({V_SOURCE})~="
-        f"{V_EXPECTLEN} then "
-        f"error('Internal Error') "
-        f"end"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # CIPHER INTEGRITY
-    # ═══════════════════════════════════════════════════════════════════════
-
-    lines.append(
-        f"local {V_CH1}=0x5A31"
-    )
-
-    lines.append(
-        f"local {V_CH2}=0x71C9"
-    )
-
-    lines.append(
-        f"local {V_CH3}=0x42D7"
-    )
-
-    lines.append(
-        f"for {V_I}=1,{V_LEN}({V_SOURCE}) do"
-    )
-
-    lines.append(
-        f"local {V_VALUE}="
-        f"{V_BYTE}({V_SOURCE},{V_I})"
-    )
-
-    lines.append(
-        f"{V_CH1}=("
-        f"{V_CH1}*251+"
-        f"{V_VALUE}+"
-        f"{V_I}*3"
-        f")%65536"
-    )
-
-    lines.append(
-        f"{V_CH2}=("
-        f"{V_CH2}*277+"
-        f"{V_VALUE}*7+"
-        f"{V_I}*13"
-        f")%65536"
-    )
-
-    lines.append(
-        f"{V_CH3}=("
-        f"{V_CH3}*283+"
-        f"{V_VALUE}*11+"
-        f"{V_I}*19"
-        f")%65536"
-    )
-
-    lines.append("end")
-
-    lines.append(
-        f"local {V_CEXPECT1}="
-        f"{_num_expr(expected_ch1)}"
-    )
-
-    lines.append(
-        f"local {V_CEXPECT2}="
-        f"{_num_expr(expected_ch2)}"
-    )
-
-    lines.append(
-        f"local {V_CEXPECT3}="
-        f"{_num_expr(expected_ch3)}"
-    )
-
-    lines.append(
-        f"if {V_CH1}~={V_CEXPECT1} or "
-        f"{V_CH2}~={V_CEXPECT2} or "
-        f"{V_CH3}~={V_CEXPECT3} then "
-        f"error('Internal Error') "
-        f"end"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # THREE-LAYER DECRYPTION
-    # ═══════════════════════════════════════════════════════════════════════
-
-    def emit_decryption_layer(
-        layer_seed1,
-        layer_seed2,
-        layer_seed3,
-        layer_seed4,
-        layer_block_size,
-    ):
-        lines.append(
-            f"local {V_RESULT}={{}}"
-        )
-
-        lines.append(
-            f"local {V_I}=1"
-        )
-
-        lines.append(
-            f"while {V_I}<={V_LEN}({V_SOURCE}) do"
-        )
-
-        lines.append(
-            f"local {V_BLOCKLEN}=math.min("
-            f"{layer_block_size},"
-            f"{V_LEN}({V_SOURCE})-{V_I}+1"
-            f")"
-        )
-
-        lines.append(
-            f"local {V_PERM}={{}}"
-        )
-
-        lines.append(
-            f"for {V_J}=1,{V_BLOCKLEN} do "
-            f"{V_PERM}[{V_J}]={V_J}-1 "
-            f"end"
-        )
-
-        lines.append(
-            f"{V_STATE}=("
-            f"{layer_seed1}+"
-            f"{layer_seed2}+"
-            f"{layer_seed3}*{V_I}+"
-            f"{layer_seed4}*{V_BLOCKLEN}+"
-            f"({V_I}-1)*{_MIX_A}"
-            f")%65536"
-        )
-
-        lines.append(
-            f"for {V_J}={V_BLOCKLEN},2,-1 do"
-        )
-
-        lines.append(
-            f"{V_STATE}=("
-            f"{V_STATE}*25173+"
-            f"13849+"
-            f"({V_J}-1)*97"
-            f")%65536"
-        )
-
-        lines.append(
-            f"local {V_K}=({V_STATE}%{V_J})+1"
-        )
-
-        lines.append(
-            f"local {V_X}={V_PERM}[{V_J}]"
-        )
-
-        lines.append(
-            f"{V_PERM}[{V_J}]={V_PERM}[{V_K}]"
-        )
-
-        lines.append(
-            f"{V_PERM}[{V_K}]={V_X}"
-        )
-
-        lines.append("end")
-
-        lines.append(
-            f"{V_STATE}=("
-            f"{layer_seed1}+"
-            f"{layer_seed3}+"
-            f"{V_I}*17+"
-            f"{V_BLOCKLEN}*{_MIX_B}"
-            f")%65536"
-        )
-
-        lines.append(
-            f"local {V_PREVIOUS}=("
-            f"{layer_seed4}+"
-            f"{V_I}-1+"
-            f"{V_BLOCKLEN}"
-            f")%256"
-        )
-
-        lines.append(
-            f"local {V_DECODED}={{}}"
-        )
-
-        lines.append(
-            f"for {V_J}=1,{V_BLOCKLEN} do"
-        )
-
-        lines.append(
-            f"local {V_ORIGINAL}="
-            f"{V_PERM}[{V_J}]"
-        )
-
-        lines.append(
-            f"local {V_ABSOLUTE}="
-            f"{V_I}+{V_ORIGINAL}"
-        )
-
-        lines.append(
-            f"{V_STATE}=("
-            f"{V_STATE}*25173+"
-            f"13849+"
-            f"{V_ORIGINAL}+"
-            f"({V_J}-1)+"
-            f"{V_BLOCKLEN}"
-            f")%65536"
-        )
-
-        lines.append(
-            f"local {V_VALUE}="
-            f"{V_BYTE}("
-            f"{V_SOURCE},"
-            f"{V_I}+{V_J}-1"
-            f")"
-        )
-
-        lines.append(
-            f"{V_CURRENT}={V_VALUE}"
-        )
-
-        lines.append(
-            f"local {V_FINALMIX}=("
-            f"math.floor({layer_seed4}/256)+"
-            f"({V_J}-1)*17+"
-            f"{V_ORIGINAL}*31+"
-            f"{V_STATE}"
-            f")%256"
-        )
-
-        lines.append(
-            f"{V_VALUE}="
-            f"{V_XOR}("
-            f"{V_VALUE},"
-            f"{V_FINALMIX}"
-            f")"
-        )
-
-        lines.append(
-            f"{V_FEEDBACK}="
-            f"{V_XOR}("
-            f"{V_PREVIOUS},"
-            f"math.floor({V_STATE}/256)"
-            f")"
-        )
-
-        lines.append(
-            f"{V_FEEDBACK}="
-            f"{V_XOR}("
-            f"{V_FEEDBACK},"
-            f"{layer_seed1}%256"
-            f")"
-        )
-
-        lines.append(
-            f"{V_FEEDBACK}="
-            f"{V_XOR}("
-            f"{V_FEEDBACK},"
-            f"{V_ABSOLUTE}*11"
-            f")%256"
-        )
-
-        lines.append(
-            f"{V_VALUE}="
-            f"{V_XOR}("
-            f"{V_VALUE},"
-            f"{V_FEEDBACK}"
-            f")"
-        )
-
-        lines.append(
-            f"local {V_X}=("
-            f"({layer_seed3}%256)+"
-            f"({V_J}-1)*29+"
-            f"({V_STATE}%256)+"
-            f"{V_ABSOLUTE}*7+"
-            f"{V_BLOCKLEN}*{_MIX_D}"
-            f")%256"
-        )
-
-        lines.append(
-            f"{V_VALUE}="
-            f"{V_XOR}("
-            f"{V_VALUE},"
-            f"{V_X}"
-            f")"
-        )
-
-        lines.append(
-            f"local {V_ADD}="
-            f"{V_XOR}("
-            f"{V_XOR}("
-            f"math.floor({V_STATE}/256)%256,"
-            f"{layer_seed4}%256"
-            f"),"
-            f"{V_ABSOLUTE}*13"
-            f")"
-        )
-
-        lines.append(
-            f"{V_ADD}="
-            f"{V_XOR}("
-            f"{V_ADD},"
-            f"({V_J}-1)*{_MIX_C}"
-            f")%256"
-        )
-
-        lines.append(
-            f"{V_VALUE}=("
-            f"{V_VALUE}-{V_ADD}"
-            f")%256"
-        )
-
-        lines.append(
-            f"local {V_ROTATION}=("
-            f"{layer_seed2}+"
-            f"{V_ORIGINAL}+"
-            f"({V_J}-1)+"
-            f"{V_STATE}+"
-            f"{V_BLOCKLEN}"
-            f")%8"
-        )
-
-        lines.append(
-            f"if {V_ROTATION}~=0 then"
-        )
-
-        lines.append(
-            f"local {V_X}=2^{V_ROTATION}"
-        )
-
-        lines.append(
-            f"local {V_ADD}=2^(8-{V_ROTATION})"
-        )
-
-        lines.append(
-            f"{V_VALUE}=("
-            f"{V_FLOOR}("
-            f"{V_VALUE}/{V_X}"
-            f")+"
-            f"(({V_VALUE}%{V_X})*{V_ADD})"
-            f")%256"
-        )
-
-        lines.append("end")
-
-        lines.append(
-            f"{V_DECODED}[{V_ORIGINAL}+1]="
-            f"{V_VALUE}"
-        )
-
-        lines.append(
-            f"{V_PREVIOUS}={V_CURRENT}"
-        )
-
-        lines.append("end")
-
-        lines.append(
-            f"for {V_J}=1,{V_BLOCKLEN} do"
-        )
-
-        lines.append(
-            f"{V_INSERT}("
-            f"{V_RESULT},"
-            f"{V_CHAR}("
-            f"{V_DECODED}[{V_J}]"
-            f")"
-            f")"
-        )
-
-        lines.append("end")
-
-        lines.append(
-            f"{V_I}={V_I}+{V_BLOCKLEN}"
-        )
-
-        lines.append("end")
-
-        lines.append(
-            f"{V_SOURCE}="
-            f"{V_CONCAT}({V_RESULT})"
-        )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # REVERSE TEN-LAYER DECRYPTION
-    # ═══════════════════════════════════════════════════════════════════════
-
-    emit_decryption_layer(
-        f"{V_SEED37}",
-        f"{V_SEED38}",
-        f"{V_SEED39}",
-        f"{V_SEED40}",
-        f"{V_BLOCKSIZE10}",
-    )
-
-    emit_decryption_layer(
-        f"{V_SEED33}",
-        f"{V_SEED34}",
-        f"{V_SEED35}",
-        f"{V_SEED36}",
-        f"{V_BLOCKSIZE9}",
-    )
-
-    emit_decryption_layer(
-        f"{V_SEED29}",
-        f"{V_SEED30}",
-        f"{V_SEED31}",
-        f"{V_SEED32}",
-        f"{V_BLOCKSIZE8}",
-    )
-
-    emit_decryption_layer(
-        f"{V_SEED25}",
-        f"{V_SEED26}",
-        f"{V_SEED27}",
-        f"{V_SEED28}",
-        f"{V_BLOCKSIZE7}",
-    )
-
-    emit_decryption_layer(
-        f"{V_SEED21}",
-        f"{V_SEED22}",
-        f"{V_SEED23}",
-        f"{V_SEED24}",
-        f"{V_BLOCKSIZE6}",
-    )
-
-    emit_decryption_layer(
-        f"{V_SEED17}",
-        f"{V_SEED18}",
-        f"{V_SEED19}",
-        f"{V_SEED20}",
-        f"{V_BLOCKSIZE5}",
-    )
-
-    emit_decryption_layer(
-        f"{V_SEED13}",
-        f"{V_SEED14}",
-        f"{V_SEED15}",
-        f"{V_SEED16}",
-        f"{V_BLOCKSIZE4}",
-    )
-
-    emit_decryption_layer(
-        f"{V_SEED9}",
-        f"{V_SEED10}",
-        f"{V_SEED11}",
-        f"{V_SEED12}",
-        f"{V_BLOCKSIZE3}",
-    )
-
-    emit_decryption_layer(
-        f"{V_SEED5}",
-        f"{V_SEED6}",
-        f"{V_SEED7}",
-        f"{V_SEED8}",
-        f"{V_BLOCKSIZE2}",
-    )
-
-    emit_decryption_layer(
-        f"{V_SEED1}",
-        f"{V_SEED2}",
-        f"{V_SEED3}",
-        f"{V_SEED4}",
-        f"{V_BLOCKSIZE}",
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # PLAINTEXT INTEGRITY
-    # ═══════════════════════════════════════════════════════════════════════
-
-    lines.append(
-        f"local {V_H1}=0x1357"
-    )
-
-    lines.append(
-        f"local {V_H2}=0x2468"
-    )
-
-    lines.append(
-        f"local {V_H3}=0x369C"
-    )
-
-    lines.append(
-        f"local {V_H4}=0x4ACE"
-    )
-
-    lines.append(
-        f"for {V_I}=1,{V_LEN}({V_SOURCE}) do"
-    )
-
-    lines.append(
-        f"local {V_VALUE}="
-        f"{V_BYTE}({V_SOURCE},{V_I})"
-    )
-
-    lines.append(
-        f"{V_H1}=("
-        f"{V_H1}*257+"
-        f"{V_VALUE}+"
-        f"{V_I}"
-        f")%65536"
-    )
-
-    lines.append(
-        f"{V_H2}=("
-        f"{V_H2}*263+"
-        f"{V_VALUE}*3+"
-        f"{V_I}*7"
-        f")%65536"
-    )
-
-    lines.append(
-        f"{V_H3}=("
-        f"{V_H3}*269+"
-        f"{V_VALUE}*5+"
-        f"{V_I}*11"
-        f")%65536"
-    )
-
-    lines.append(
-        f"{V_H4}=("
-        f"{V_H4}*271+"
-        f"{V_VALUE}*7+"
-        f"{V_I}*17"
-        f")%65536"
-    )
-
-    lines.append("end")
-
-    for variable, value in (
-        (V_EXPECT1, expected_h1),
-        (V_EXPECT2, expected_h2),
-        (V_EXPECT3, expected_h3),
-        (V_EXPECT4, expected_h4),
-    ):
-        lines.append(
-            f"local {variable}="
-            f"{_num_expr(value)}"
-        )
-
-    lines.append(
-        f"if {V_H1}~={V_EXPECT1} or "
-        f"{V_H2}~={V_EXPECT2} or "
-        f"{V_H3}~={V_EXPECT3} or "
-        f"{V_H4}~={V_EXPECT4} then "
-        f"error('Internal Error') "
-        f"end"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # FINAL LENGTH
-    # ═══════════════════════════════════════════════════════════════════════
-
-    lines.append(
-        f"if {V_LEN}({V_SOURCE})~="
-        f"{_num_expr(len(src))} then "
-        f"error('Internal Error') "
-        f"end"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # FINAL RUNTIME INTEGRITY RECHECK
-    # ═══════════════════════════════════════════════════════════════════════
-
-    lines.append(
-        f"if string.byte~={V_BYTE} or string.char~={V_CHAR} or "
-        f"string.len~={V_LEN} or table.concat~={V_CONCAT} or "
-        f"table.insert~={V_INSERT} or math.floor~={V_FLOOR} then "
-        f"error('Runtime tamper detected') end"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # FINAL LOAD
-    # ═══════════════════════════════════════════════════════════════════════
-
-    lines.append(
-        f"local {V_FN},{V_ERR}="
-        f"{V_LOAD}({V_SOURCE})"
-    )
-
-    lines.append(
-        f"if not {V_FN} then "
-        f"error('Internal Error: '..tostring({V_ERR})) "
-        f"end"
-    )
-
-    lines.append(
-        f"return {V_FN}(...)"
-    )
-
-    lines.append(
-        "end)(...)"
-    )
-
-    # ═══════════════════════════════════════════════════════════════════════
-    # COMPACT OUTPUT
-    # ═══════════════════════════════════════════════════════════════════════
-
-    header = lines[0]
-
-    # TWO EMPTY LINES ARE INTENTIONAL.
-
-    opener = lines[3]
-
-    body = " ".join(
-        line.strip()
-        for line in lines[4:]
-        if line.strip()
-    )
-
-    payload = (
-        header
-        + "\n\n"
-        + opener
-        + body
-    )
-
-
-    if minimum_size:
-        payload = _pad_lua_payload_to_minimum(payload)
+    N = lambda: _unique_name(used)
+
+    V_CHAR, V_LEN, V_SUB, V_CONCAT = N(), N(), N(), N()
+    V_TONUM, V_LOAD, V_ERR, V_I, V_SUM = N(), N(), N(), N(), N()
+    V_DATA, V_OUT, V_VALUE, V_EXPECT = N(), N(), N(), N()
+    V_TYPE, V_PCALL, V_DEBUG, V_OK = N(), N(), N(), N()
+    V_SOURCE, V_FN = N(), N()
+
+    encoded = encrypted.hex()
+
+    lines = [
+        "-- This file was protected using Dex Obfustucator v5.9 Compact [.gg/dexfinder]",
+        "",
+        "return(function(...)",
+        f"local {V_TYPE}=type",
+        f"local {V_PCALL}=pcall",
+        f"local {V_LOAD}=loadstring or load",
+        f"if {V_TYPE}(string)~='table' or {V_TYPE}(table)~='table' or {V_TYPE}({V_LOAD})~='function' then",
+        "if warn then warn('[DEX] Environment check failed: required Lua runtime functions are unavailable.') end",
+        "error('Unsupported Lua runtime')",
+        "end",
+        f"local {V_CHAR}=string.char",
+        f"local {V_LEN}=string.len",
+        f"local {V_SUB}=string.sub",
+        f"local {V_TONUM}=tonumber",
+        f"local {V_CONCAT}=table.concat",
+        f"local {V_DATA}='{encoded}'",
+        f"local {V_OUT}={{}}",
+        f"local {V_SUM}=0x45D9",
+        f"local {V_EXPECT}={checksum}",
+        f"for {V_I}=1,{V_LEN}({V_DATA}),2 do",
+        f"local {V_VALUE}={V_TONUM}({V_SUB}({V_DATA},{V_I},{V_I}+1),16)",
+        f"{V_VALUE}=({V_VALUE}-{key}-(((({V_I}-1)/2)*31)%256))%256",
+        f"{V_OUT}[(({V_I}+1)/2)]={V_CHAR}({V_VALUE})",
+        f"{V_SUM}=({V_SUM}*33+{V_VALUE}+(({V_I}+1)/2))%4294967296",
+        "end",
+        f"if {V_SUM}~={V_EXPECT} then",
+        "if warn then warn('[DEX] Anti-tamper check failed: protected payload was modified.') end",
+        "error('Protected payload integrity check failed')",
+        "end",
+        f"local {V_DEBUG}=debug",
+        f"if {V_TYPE}({V_DEBUG})=='table' and {V_TYPE}({V_DEBUG}.getinfo)=='function' then",
+        f"local {V_OK}={V_PCALL}({V_DEBUG}.getinfo,1,'f')",
+        f"if not {V_OK} and warn then warn('[DEX] Environment warning: debug API behaved unexpectedly.') end",
+        "end",
+        f"local {V_SOURCE}={V_CONCAT}({V_OUT})",
+        f"local {V_FN},{V_ERR}={V_LOAD}({V_SOURCE})",
+        f"if not {V_FN} then error('Internal Error: '..tostring({V_ERR})) end",
+        f"return {V_FN}(...)",
+        "end)(...)",
+    ]
+
+    payload = lines[0] + "\n\n" + " ".join(x.strip() for x in lines[2:] if x.strip())
 
     if publish:
-        # The raw backend receives the complete executable payload. The Lua
-        # file itself must contain that payload, never the user-facing loader.
-        # The loader is exposed separately by obfuscate_lua_bundle().
         _raw_backend_publish(payload)
 
     return payload
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# SAFE PUBLIC API
-# ═════════════════════════════════════════════════════════════════════════════
-
-_MIN_LUA_PAYLOAD_BYTES = 128 * 1024
-
-
 def _pad_lua_payload_to_minimum(payload):
-    if not isinstance(payload, str):
-        payload = str(payload)
-
-    current_size = len(payload.encode("utf-8"))
-    if current_size >= _MIN_LUA_PAYLOAD_BYTES:
-        return payload
-
-    remaining = _MIN_LUA_PAYLOAD_BYTES - current_size
-    body_len = max(0, remaining - 8)
-
-    alphabet = (
-        "abcdefghijklmnopqrstuvwxyz"
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "0123456789"
-        "_+-=.,;:!?~"
-    )
-
-    rng = random.SystemRandom()
-    chunks = []
-    left = body_len
-
-    while left:
-        take = min(8192, left)
-        chunks.append("".join(rng.choice(alphabet) for _ in range(take)))
-        left -= take
-
-    return payload + "--[[\n" + "".join(chunks) + "\n]]\n"
+    """Legacy compatibility helper; compact builds are never artificially padded."""
+    return str(payload or "")
 
 
 def obfuscate_lua_bundle(source, publish=True, level="hard"):
@@ -7392,12 +5996,12 @@ def _dex_obfuscator_default_settings() -> dict:
     """Return the public DEX Obfuscator V8 settings used by the website."""
     return {
         "encryptStrings": True,
-        "proxyfyLocals": True,
-        "proxyfyFunctions": True,
+        "proxyfyLocals": False,
+        "proxyfyFunctions": False,
         "antiTamper": True,
-        "controlFlowFlattening": True,
+        "controlFlowFlattening": False,
         "isLuaRuntime": True,
-        "loaderVMDepth": 3,
+        "loaderVMDepth": 1,
     }
 
 
@@ -7588,13 +6192,10 @@ async def obfuscate_api(request: Request):
         # Strips upstream branding and prepends the DEX Obfuscator header.
         goofy_payload = _format_dex_obfuscator_payload(protected)
 
-        # ── Step 3: DEX multi-layer cipher obfuscation ───────────────────────
-        # The Goofyscator output is now fed through the full DEX cipher stack:
-        # 10 independent permutation/XOR/rotation/additive rounds with random
-        # seeds and block sizes, binary-token encoding, shuffled fragment
-        # assembly, and runtime integrity checking.  The result is a
-        # self-contained Lua script that decodes itself at load time and
-        # executes the original payload — all without any external calls.
+        # ── Step 3: DEX compact protection wrapper ───────────────────────────
+        # The Goofyscator result is wrapped once with a compact reversible byte
+        # stream, integrity check, and runtime sanity checks. No token expansion
+        # or artificial padding is added.
         dex_obfuscated = await asyncio.to_thread(
             obfuscate_lua,
             goofy_payload,   # feed the goofyscator output in as source
@@ -7617,6 +6218,8 @@ async def obfuscate_api(request: Request):
                 "Could not publish the protected payload to the raw loader store."
             ) from pub_exc
 
+        final_loadstring = _build_loadstring(raw_url)
+
         # Record the submission in the admin history log.
         try:
             async with obf_history_lock:
@@ -7624,8 +6227,6 @@ async def obfuscate_api(request: Request):
         except Exception as hist_exc:
             # Non-fatal: history is best-effort.
             print(f"[DEX_OBF_PIPELINE] history record failed: {hist_exc}")
-
-        final_loadstring = _build_loadstring(raw_url)
 
         return JSONResponse(
             {
